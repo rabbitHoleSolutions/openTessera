@@ -19,6 +19,7 @@ pub struct Tile {
     pub mpv: Mpv,
     pub item: MediaItem,
     pub id: usize,
+    audio_enabled: bool,
     texture: Option<<glow::Context as HasContext>::Texture>,
     fbo: Option<<glow::Context as HasContext>::Framebuffer>,
     tex_w: i32,
@@ -45,7 +46,11 @@ impl Tile {
             ("keep-open", "no"),
         ];
         if opts.audio {
-            options.push(("ao", "pipewire,alsa,null"));
+            // Don't pin `ao`: let mpv auto-negotiate (pulse via PipeWire on
+            // Linux, coreaudio on macOS). Every tile starts muted — a video
+            // wall with N simultaneous streams is noise; right-click unmutes
+            // an individual tile, mirroring the Quest app's per-tile mute.
+            options.push(("mute", "yes"));
         } else {
             options.push(("audio", "no"));
         }
@@ -63,6 +68,7 @@ impl Tile {
             mpv,
             item: item.clone(),
             id,
+            audio_enabled: opts.audio,
             texture: None,
             fbo: None,
             tex_w: 0,
@@ -86,6 +92,32 @@ impl Tile {
         self.mpv.get_string("pause").map(|v| v == "yes").unwrap_or(false)
     }
 
+    /// Toggles this tile's audio. Returns the new muted state.
+    /// Only meaningful when the app was started with --audio; otherwise the
+    /// whole audio pipeline is disabled per-tile.
+    pub fn toggle_mute(&self) -> bool {
+        let muted = self.is_muted();
+        let _ = self.mpv.command(&["set_property", "mute", if muted { "no" } else { "yes" }]);
+        !muted
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.mpv.get_string("mute").map(|v| v == "yes").unwrap_or(true)
+    }
+
+    pub fn set_volume(&self, percent: i64) {
+        let v = percent.clamp(0, 130).to_string();
+        let _ = self.mpv.command(&["set_property", "volume", &v]);
+    }
+
+    pub fn volume(&self) -> i64 {
+        self.mpv.get_i64("volume").unwrap_or(100)
+    }
+
+    pub fn audio_enabled(&self) -> bool {
+        self.audio_enabled
+    }
+
     /// Polls mpv events and renders any new frame into this tile's FBO texture.
     /// Must be called with the tile's screen GL context current.
     pub fn tick(&mut self, gl: &glow::Context) -> Vec<TileEvent> {
@@ -107,9 +139,14 @@ impl Tile {
                         .or_else(|| self.mpv.get_string("video-out-params/pixelformat"))
                         .unwrap_or_else(|| "?".into());
                     let hwdec = self.mpv.get_string("hwdec-current").unwrap_or_else(|| "no".into());
+                    let ao = self
+                        .mpv
+                        .get_string("audio-device")
+                        .or_else(|| self.mpv.get_string("ao"))
+                        .unwrap_or_else(|| "-".into());
                     println!(
-                        "tile {}: {}x{} @{:.3} {} pix={} hwdec={}",
-                        self.id, w, h, fps, codec, pixfmt, hwdec
+                        "tile {}: {}x{} @{:.3} {} pix={} hwdec={} ao={}",
+                        self.id, w, h, fps, codec, pixfmt, hwdec, ao
                     );
                     self.loaded = true;
                     events.push(TileEvent::Loaded { width: w, height: h, fps, codec });
@@ -216,14 +253,20 @@ impl Tile {
         let hwdec = self.mpv.get_string("hwdec-current").unwrap_or_else(|| "n/a".into());
         let drops = self.mpv.get_i64("decoder-frame-drop-count").unwrap_or(-1);
         let paused = self.is_paused();
+        let audio = if self.audio_enabled() {
+            if self.is_muted() { "muted".to_string() } else { format!("vol {}%", self.volume()) }
+        } else {
+            "audio-off".to_string()
+        };
         format!(
-            "{} [{}x{}] {} drops={} {}",
+            "{} [{}x{}] {} drops={} {} {}",
             self.item.title,
             self.tex_w,
             self.tex_h,
             hwdec,
             drops,
-            if paused { "paused" } else { "playing" }
+            if paused { "paused" } else { "playing" },
+            audio
         )
     }
 

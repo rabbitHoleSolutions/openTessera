@@ -60,7 +60,10 @@ opentessera --tiles 12 vid1.mkv vid1.mkv vid1.mkv vid1.mkv ...
 ```
 
 Controls: `Esc` quit · `Space` pause/resume all tiles on the focused screen ·
-click a tile to pause/resume it.
+click a tile to pause/resume it · with `--audio`: right-click a tile to
+unmute/mute it (all tiles start muted — a wall of simultaneous streams should
+be selectively audible, not a cacophony), `Up`/`Down` adjust volume of unmuted
+tiles on the focused screen.
 
 Status (playback rate per tile, composited fps, hwdec mode, decoder drops,
 budget utilization) prints every 5 seconds; adjust with `--status-interval`.

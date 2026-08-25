@@ -191,6 +191,41 @@ impl Screen {
         false
     }
 
+    /// Right-click: toggles audio on the tile under the cursor. Returns the
+    /// tile id if one was hit.
+    pub fn click_mute(&mut self, x: f32, y: f32) -> Option<usize> {
+        for (tile, cell) in self.tiles.iter_mut().zip(self.layout.iter()) {
+            if cell.contains(x, y) {
+                if !tile.audio_enabled() {
+                    println!(
+                        "screen {} tile {}: audio disabled (start with --audio)",
+                        self.monitor_index, tile.id
+                    );
+                    return Some(tile.id);
+                }
+                let muted = tile.toggle_mute();
+                println!(
+                    "screen {} tile {}: {}",
+                    self.monitor_index,
+                    tile.id,
+                    if muted { "muted".to_string() } else { format!("audio on (vol {}%)", tile.volume()) }
+                );
+                return Some(tile.id);
+            }
+        }
+        None
+    }
+
+    /// Adjusts volume on every unmuted tile of this screen.
+    pub fn adjust_volume(&mut self, delta: i64) {
+        for tile in self.tiles.iter_mut() {
+            if tile.audio_enabled() && !tile.is_muted() {
+                tile.set_volume(tile.volume() + delta);
+                println!("screen {} tile {}: vol {}%", self.monitor_index, tile.id, tile.volume());
+            }
+        }
+    }
+
     pub fn status(&mut self, dt: f64) {
         let mut parts = Vec::new();
         for (i, tile) in self.tiles.iter_mut().enumerate() {

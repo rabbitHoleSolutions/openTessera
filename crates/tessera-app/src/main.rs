@@ -110,7 +110,9 @@ OPTIONS:
 CONTROLS:
   Esc                Quit
   Space              Pause/resume all tiles on the focused screen
-  Left click         Pause/resume the clicked tile"
+  Left click         Pause/resume the clicked tile
+  Right click        Mute/unmute the clicked tile (needs --audio)
+  Up/Down arrows     Volume +/-5 on unmuted tiles of the focused screen"
     );
 }
 
@@ -396,6 +398,10 @@ fn main() {
                             let (x, y) = cursor_pos[idx];
                             screens[idx].click(x, y);
                         }
+                        WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
+                            let (x, y) = cursor_pos[idx];
+                            screens[idx].click_mute(x, y);
+                        }
                         WindowEvent::KeyboardInput { event: key_event, .. } => {
                             if key_event.state == ElementState::Pressed {
                                 match key_event.logical_key {
@@ -407,6 +413,12 @@ fn main() {
                                     }
                                     Key::Named(NamedKey::Space) => {
                                         screens[idx].toggle_pause_all();
+                                    }
+                                    Key::Named(NamedKey::ArrowUp) => {
+                                        screens[idx].adjust_volume(5);
+                                    }
+                                    Key::Named(NamedKey::ArrowDown) => {
+                                        screens[idx].adjust_volume(-5);
                                     }
                                     _ => {}
                                 }
