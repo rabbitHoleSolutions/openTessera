@@ -17,4 +17,5 @@ winit = { workspace = true }
 glutin = { workspace = true }
 glutin-winit = { workspace = true }
 glow = { workspace = true }
+png = "0.17"
 raw-window-handle = { workspace = true }

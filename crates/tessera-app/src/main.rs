@@ -1,4 +1,5 @@
 mod compositor;
+mod png_util;
 mod screen;
 mod tile;
 
@@ -365,6 +366,12 @@ fn main() {
                         for screen in screens.iter_mut() {
                             screen.status(dt);
                         }
+                        if let Some(dir) = dump_dir() {
+                            let tag = format!("t{elapsed}s");
+                            for screen in screens.iter_mut() {
+                                screen.request_screenshot(dir.clone(), &tag);
+                            }
+                        }
                     }
                 }
                 Event::WindowEvent { window_id, event } => {
@@ -414,6 +421,12 @@ fn main() {
         .unwrap();
 
     println!("bye (uptime {:.1}s)", start.elapsed().as_secs_f64());
+}
+
+fn dump_dir() -> Option<std::path::PathBuf> {
+    let dir = std::path::PathBuf::from(std::env::var("TESSERA_DUMP_DIR").ok()?);
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
 }
 
 fn window_builder(args: &Args, monitors: &[winit::monitor::MonitorHandle], index: usize) -> WindowBuilder {

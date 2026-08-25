@@ -101,6 +101,16 @@ impl Tile {
                         .or_else(|| self.mpv.get_f64("estimated-vf-fps"))
                         .unwrap_or(30.0);
                     let codec = self.mpv.get_string("video-codec").unwrap_or_default();
+                    let pixfmt = self
+                        .mpv
+                        .get_string("video-params/pixelformat")
+                        .or_else(|| self.mpv.get_string("video-out-params/pixelformat"))
+                        .unwrap_or_else(|| "?".into());
+                    let hwdec = self.mpv.get_string("hwdec-current").unwrap_or_else(|| "no".into());
+                    println!(
+                        "tile {}: {}x{} @{:.3} {} pix={} hwdec={}",
+                        self.id, w, h, fps, codec, pixfmt, hwdec
+                    );
                     self.loaded = true;
                     events.push(TileEvent::Loaded { width: w, height: h, fps, codec });
                 }
@@ -123,14 +133,17 @@ impl Tile {
         if flags & tessera_mpv::MPV_RENDER_UPDATE_FRAME != 0 {
             self.ensure_texture(gl);
             if let Some(fbo) = self.fbo {
-                unsafe {
-                    gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-                    gl.viewport(0, 0, self.tex_w, self.tex_h);
-                }
-                if let Err(e) = self.render.render(0, self.tex_w, self.tex_h, true) {
+                // Per render_gl.h, MPV_RENDER_PARAM_OPENGL_FBO=0 means the
+                // default framebuffer — mpv binds the target itself, so we
+                // must pass our FBO's actual GL name, not merely bind it.
+                let fbo_id = fbo.0.get() as i32;
+                if let Err(e) = self.render.render(fbo_id, self.tex_w, self.tex_h, true) {
                     eprintln!("tile {}: render failed: {e}", self.id);
                 }
                 unsafe {
+                    // mpv leaves assorted GL state behind (notably scissor,
+                    // which would silently clip later clears/draws).
+                    gl.disable(glow::SCISSOR_TEST);
                     gl.bind_framebuffer(glow::FRAMEBUFFER, None);
                 }
                 self.frames += 1;
@@ -224,5 +237,20 @@ impl Tile {
                 gl.delete_framebuffer(f);
             }
         }
+    }
+
+    /// Dumps this tile's current FBO content to a PNG. Diagnostic aid.
+    pub fn dump_fbo(&self, gl: &glow::Context, path: &std::path::Path) -> std::io::Result<()> {
+        let Some(fbo) = self.fbo else { return Ok(()) };
+        let w = self.tex_w;
+        let h = self.tex_h;
+        let mut buf = vec![0u8; (w as usize) * (h as usize) * 3];
+        unsafe {
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            gl.read_pixels(0, 0, w, h, glow::RGB, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(&mut buf));
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+        crate::png_util::write_png_rgb(path, w, h, &buf)
     }
 }

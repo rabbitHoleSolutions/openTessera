@@ -20,6 +20,7 @@ pub struct Screen {
     layout: Vec<Rect>,
     last_status_tp: Vec<f64>,
     pub frames_drawn: u64,
+    pending_screenshot: Option<(std::path::PathBuf, String)>,
 }
 
 impl Screen {
@@ -45,6 +46,7 @@ impl Screen {
             layout: Vec::new(),
             last_status_tp: Vec::new(),
             frames_drawn: 0,
+            pending_screenshot: None,
         }
         .with_layout(size.width as i32, size.height as i32)
     }
@@ -123,6 +125,7 @@ impl Screen {
         let size = self.window.inner_size();
         let (w, h) = (size.width as i32, size.height as i32);
         unsafe {
+            self.gl.disable(glow::SCISSOR_TEST);
             self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             self.gl.viewport(0, 0, w, h);
             self.gl.clear_color(0.04, 0.04, 0.05, 1.0);
@@ -134,8 +137,33 @@ impl Screen {
                 self.compositor.draw(&self.gl, tex, cell, aspect, w, h);
             }
         }
+        if let Some((dir, tag)) = self.pending_screenshot.take() {
+            let mut buf = vec![0u8; (w as usize) * (h as usize) * 3];
+            unsafe {
+                self.gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+                self.gl.read_pixels(0, 0, w, h, glow::RGB, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(&mut buf));
+            }
+            let path = dir.join(format!("screen{}-{}.png", self.monitor_index, tag));
+            match crate::png_util::write_png_rgb(&path, w, h, &buf) {
+                Ok(()) => println!("screenshot: {}", path.display()),
+                Err(e) => eprintln!("screenshot failed: {e}"),
+            }
+            for tile in self.tiles.iter() {
+                let path = dir.join(format!("screen{}-tile{}-{}.png", self.monitor_index, tile.id, tag));
+                if let Err(e) = tile.dump_fbo(&self.gl, &path) {
+                    eprintln!("tile fbo dump failed: {e}");
+                } else {
+                    println!("screenshot: {}", path.display());
+                }
+            }
+        }
         self.surface.swap_buffers(&self.context).ok();
         self.frames_drawn += 1;
+    }
+
+    /// Requests a composited-frame screenshot (taken at the next tick).
+    pub fn request_screenshot(&mut self, dir: std::path::PathBuf, tag: &str) {
+        self.pending_screenshot = Some((dir, tag.to_string()));
     }
 
     pub fn toggle_pause_all(&mut self) {
