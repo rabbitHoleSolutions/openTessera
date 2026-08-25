@@ -92,6 +92,25 @@ impl Tile {
         }
     }
 
+    /// Seeks the stream. `absolute` targets a position from the start;
+    /// otherwise `seconds` is relative to the current position.
+    pub fn seek(&self, seconds: f64, absolute: bool) {
+        let v = format!("{seconds:.3}");
+        let r = if absolute {
+            self.mpv.command(&["seek", &v, "absolute"])
+        } else {
+            self.mpv.command(&["seek", &v])
+        };
+        if let Err(e) = r {
+            eprintln!("tile {}: seek failed: {e}", self.id);
+        }
+    }
+
+    /// Current playback position (seconds), or -1 if unknown.
+    pub fn time_pos(&self) -> f64 {
+        self.mpv.get_f64("time-pos").unwrap_or(-1.0)
+    }
+
     pub fn is_paused(&self) -> bool {
         self.mpv.get_string("pause").map(|v| v == "yes").unwrap_or(false)
     }

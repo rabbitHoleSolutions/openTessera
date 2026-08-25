@@ -24,6 +24,13 @@ pub enum OverlayAction {
     /// Click on a tile chip: pause if playing, resume (budget-aware) if paused.
     TogglePause { tile_id: usize },
     ToggleMute { tile_id: usize },
+    /// Scrub bar released (or clicked): seek to an absolute position.
+    SeekTo { tile_id: usize, to: f64 },
+    /// Relative seek, e.g. +/-10s buttons.
+    Skip { tile_id: usize, secs: f64 },
+    /// Load the next/previous queue item on this tile.
+    Next { tile_id: usize },
+    Prev { tile_id: usize },
     PauseAll,
     ResumeAll,
 }
@@ -142,7 +149,7 @@ pub fn draw(
                     .inner_margin(egui::Margin::symmetric(8.0, 5.0))
                     .stroke(egui::Stroke::new(1.0, egui::Color32::from_black_alpha(120)))
                     .show(ui, |ui| {
-                        ui.set_max_width(360.0);
+                        ui.set_max_width(460.0);
                         ui.horizontal(|ui| {
                             let state = if tile.paused { "⏸" } else { "▶" };
                             let title = truncate(&tile.title, 38);
@@ -165,8 +172,48 @@ pub fn draw(
                             if label.clicked() {
                                 actions.push(OverlayAction::TogglePause { tile_id: tile.id });
                             }
+                            if tile.audio_enabled {
+                                let icon = if tile.muted { "🔇" } else { "🔊" };
+                                if ui.small_button(icon).clicked() {
+                                    actions.push(OverlayAction::ToggleMute { tile_id: tile.id });
+                                }
+                            }
                         });
+                        // Transport row: prev, -10s, +10s, next, scrub, time.
                         ui.horizontal(|ui| {
+                            let b = |ui: &mut egui::Ui, glyph: &str, w: f32| {
+                                ui.add_sized(
+                                    [w, 16.0],
+                                    egui::Button::new(egui::RichText::new(glyph).small()),
+                                )
+                            };
+                            if b(ui, "⏮", 22.0).clicked() {
+                                actions.push(OverlayAction::Prev { tile_id: tile.id });
+                            }
+                            if b(ui, "⏪", 22.0).clicked() {
+                                actions.push(OverlayAction::Skip { tile_id: tile.id, secs: -10.0 });
+                            }
+                            if b(ui, "⏩", 22.0).clicked() {
+                                actions.push(OverlayAction::Skip { tile_id: tile.id, secs: 10.0 });
+                            }
+                            if b(ui, "⏭", 22.0).clicked() {
+                                actions.push(OverlayAction::Next { tile_id: tile.id });
+                            }
+                            if tile.duration > 0.0 {
+                                let mut pos = tile.time_pos.clamp(0.0, tile.duration);
+                                let sresp = ui.add_sized(
+                                    [110.0, 14.0],
+                                    egui::Slider::new(&mut pos, 0.0..=tile.duration)
+                                        .show_value(false),
+                                );
+                                if (sresp.clicked() || sresp.drag_stopped())
+                                    && (pos - tile.time_pos).abs() > 0.5
+                                {
+                                    actions.push(OverlayAction::SeekTo { tile_id: tile.id, to: pos });
+                                }
+                            } else {
+                                ui.add_space(110.0);
+                            }
                             ui.label(
                                 egui::RichText::new(format!(
                                     "{} / {}",
@@ -176,12 +223,6 @@ pub fn draw(
                                 .small()
                                 .weak(),
                             );
-                            if tile.audio_enabled {
-                                let icon = if tile.muted { "🔇" } else { "🔊" };
-                                if ui.small_button(icon).clicked() {
-                                    actions.push(OverlayAction::ToggleMute { tile_id: tile.id });
-                                }
-                            }
                         });
                     });
             });

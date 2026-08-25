@@ -119,7 +119,9 @@ CONTROLS:
   Space              Pause/resume all tiles on the focused screen
   Left click         Pause/resume the clicked tile
   Right click        Mute/unmute the clicked tile (needs --audio)
-  Up/Down arrows     Volume +/-5 on unmuted tiles of the focused screen"
+  Up/Down arrows     Volume +/-5 on unmuted tiles of the focused screen
+  Left/Right arrows  Seek -/+10s on all tiles of the focused screen
+  N / P              Next / previous queue item on each tile of the focused screen"
     );
 }
 
@@ -520,6 +522,24 @@ fn main() {
                                     Key::Named(NamedKey::ArrowDown) => {
                                         screens[idx].adjust_volume(-5);
                                     }
+                                    Key::Named(NamedKey::ArrowLeft) => {
+                                        seek_screen(&mut screens[idx], -10.0);
+                                    }
+                                    Key::Named(NamedKey::ArrowRight) => {
+                                        seek_screen(&mut screens[idx], 10.0);
+                                    }
+                                    Key::Character(ref c) if c.eq_ignore_ascii_case("n") => {
+                                        let ids: Vec<usize> = screens[idx].tiles.iter().map(|t| t.id).collect();
+                                        for id in ids {
+                                            tile_next(&mut screens, id, true);
+                                        }
+                                    }
+                                    Key::Character(ref c) if c.eq_ignore_ascii_case("p") => {
+                                        let ids: Vec<usize> = screens[idx].tiles.iter().map(|t| t.id).collect();
+                                        for id in ids {
+                                            tile_next(&mut screens, id, false);
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
@@ -638,6 +658,45 @@ fn handle_overlay_action(screens: &mut [Screen], budget: &mut DecodeBudget, acti
                 }
             }
         }
+        OverlayAction::SeekTo { tile_id, to } => {
+            for screen in screens.iter_mut() {
+                if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
+                    tile.seek(to, true);
+                    println!(
+                        "screen {} tile {tile_id}: seek to {} ({})",
+                        screen.monitor_index,
+                        fmt_time(to),
+                        tile.item.title
+                    );
+                    return;
+                }
+            }
+        }
+        OverlayAction::Skip { tile_id, secs } => {
+            for screen in screens.iter_mut() {
+                if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
+                    // NB: time-pos is read before the seek — mpv applies the
+                    // command asynchronously, so a post-command read can be
+                    // stale.
+                    let from = tile.time_pos();
+                    tile.seek(secs, false);
+                    println!(
+                        "screen {} tile {tile_id}: seek {}{secs:.0}s from {} ({})",
+                        screen.monitor_index,
+                        if secs >= 0.0 { "+" } else { "" },
+                        fmt_time(from),
+                        tile.item.title
+                    );
+                    return;
+                }
+            }
+        }
+        OverlayAction::Next { tile_id } => {
+            tile_next(screens, tile_id, true);
+        }
+        OverlayAction::Prev { tile_id } => {
+            tile_next(screens, tile_id, false);
+        }
         OverlayAction::PauseAll => {
             let ids: Vec<usize> = screens[screen_idx].tiles.iter().map(|t| t.id).collect();
             for id in ids {
@@ -649,6 +708,85 @@ fn handle_overlay_action(screens: &mut [Screen], budget: &mut DecodeBudget, acti
             for id in ids {
                 resume_tile(screens, budget, id);
             }
+        }
+    }
+}
+
+/// Loads the next (or previous) queue item onto the tile, advancing the
+/// screen's shared queue. Returns false if the tile was not found.
+fn tile_next(screens: &mut [Screen], tile_id: usize, forward: bool) -> bool {
+    for screen_idx in 0..screens.len() {
+        if !screens[screen_idx].tiles.iter().any(|t| t.id == tile_id) {
+            continue;
+        }
+        let item = {
+            let queue = &mut screens[screen_idx].queue;
+            if forward { queue.advance() } else { queue.go_back() }.cloned()
+        };
+        if let Some(item) = item {
+            let monitor_index = screens[screen_idx].monitor_index;
+            if let Some(tile) = screens[screen_idx].tiles.iter_mut().find(|t| t.id == tile_id) {
+                tile.item = item.clone();
+                if let Err(e) = tile.load(&item) {
+                    eprintln!("screen {monitor_index} tile {tile_id}: load failed: {e}");
+                } else {
+                    println!(
+                        "screen {monitor_index} tile {tile_id}: {} \"{}\"",
+                        if forward { "next" } else { "prev" },
+                        item.title
+                    );
+                }
+            }
+        }
+        return true;
+    }
+    false
+}
+
+/// Seeks every tile of a screen by a relative offset.
+fn seek_screen(screen: &mut Screen, secs: f64) {
+    let monitor_index = screen.monitor_index;
+    for tile in screen.tiles.iter_mut() {
+        tile.seek(secs, false);
+    }
+    println!("screen {monitor_index}: seek {}{secs:.0}s on {} tile(s)", if secs >= 0.0 { "+" } else { "" }, screen.tiles.len());
+}
+
+fn fmt_time(t: f64) -> String {
+    if t < 0.0 {
+        return "--:--".into();
+    }
+    let total = t as i64;
+    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use winit::keyboard::Key;
+
+    #[test]
+    fn character_key_guards_match() {
+        type K = winit::keyboard::Key<winit::keyboard::SmolStr>;
+        let cases: Vec<(K, bool, bool)> = vec![
+            (Key::Character("n".into()), true, false),
+            (Key::Character("N".into()), true, false),
+            (Key::Character("p".into()), false, true),
+            (Key::Character("P".into()), false, true),
+            (Key::Character("x".into()), false, false),
+        ];
+        for (k, expect_n, expect_p) in cases {
+            let m = match &k {
+                Key::Character(c) if c.eq_ignore_ascii_case("n") => 'n',
+                Key::Character(c) if c.eq_ignore_ascii_case("p") => 'p',
+                _ => '-',
+            };
+            assert_eq!(m == 'n', expect_n, "n-guard for {k:?}");
+            assert_eq!(m == 'p', expect_p, "p-guard for {k:?}");
         }
     }
 }
