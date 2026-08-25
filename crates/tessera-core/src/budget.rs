@@ -1,8 +1,11 @@
 /// Decode admission controller, ported from the Quest app's DecodeBudgetController.
 ///
-/// Desktop gates for phase 1: weighted macroblocks/sec throughput ceiling and a
-/// max concurrent streams setting. Eviction, per-codec session caps, and the
-/// frame-drop adaptive feedback loop arrive with the full player integration.
+/// Gates: weighted macroblocks/sec throughput ceiling (static, hardware-derived)
+/// multiplied by an adaptive factor driven by real frame-drop telemetry, and a
+/// max concurrent streams setting. A single stream is always admissible alone.
+///
+/// Eviction policy: OLDEST_STARTED — the playing stream with the earliest
+/// admission time is paused to make room, mirroring the Quest dock behavior.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Codec {
     H264,
@@ -76,30 +79,62 @@ pub const DEFAULT_CEILING_EQUIVALENTS: f64 = 96.0;
 
 pub const DEFAULT_MAX_STREAMS: usize = 16;
 
+/// Sustained decoder drop rate (drops/sec) that triggers adaptive shrink.
+pub const DROP_RATE_THRESHOLD: f64 = 10.0;
+
+/// Consecutive sampling windows of sustained drops before shrinking.
+pub const DROP_STREAK_LIMIT: u32 = 2;
+
+/// Adaptive multiplier floor: never shrink below 30% of the static ceiling.
+pub const ADAPTIVE_FLOOR: f64 = 0.30;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Admission {
     Admitted,
+    /// Admitted after evicting another stream; the evicted id is included.
+    AdmittedEvicting { evicted: usize },
     RejectedBudget { would_use: f64, ceiling: f64 },
     RejectedMaxStreams { max: usize },
 }
 
+struct ActiveStream {
+    id: usize,
+    spec: StreamSpec,
+    started_at: std::time::Instant,
+    drop_streak: u32,
+}
+
 pub struct DecodeBudget {
     ceiling_mbps: f64,
+    /// Multiplier in [ADAPTIVE_FLOOR, 1.0] driven by drop feedback.
+    adaptive: f64,
     max_streams: usize,
-    active: Vec<(usize, StreamSpec)>,
+    active: Vec<ActiveStream>,
+    total_evictions: u64,
 }
 
 impl DecodeBudget {
     pub fn new(ceiling_equivalents: f64, max_streams: usize) -> DecodeBudget {
         DecodeBudget {
             ceiling_mbps: ceiling_equivalents * MBPS_1080P30,
+            adaptive: 1.0,
             max_streams,
             active: Vec::new(),
+            total_evictions: 0,
         }
     }
 
     pub fn ceiling_mbps(&self) -> f64 {
         self.ceiling_mbps
+    }
+
+    /// The effective ceiling after adaptive feedback.
+    pub fn effective_ceiling_mbps(&self) -> f64 {
+        self.ceiling_mbps * self.adaptive
+    }
+
+    pub fn adaptive(&self) -> f64 {
+        self.adaptive
     }
 
     pub fn max_streams(&self) -> usize {
@@ -110,44 +145,148 @@ impl DecodeBudget {
         self.active.len()
     }
 
+    pub fn active_ids(&self) -> Vec<usize> {
+        self.active.iter().map(|a| a.id).collect()
+    }
+
     pub fn used_mbps(&self) -> f64 {
-        self.active.iter().map(|(_, s)| s.weight()).sum()
+        self.active.iter().map(|a| a.spec.weight()).sum()
     }
 
     pub fn utilization(&self) -> f64 {
-        self.used_mbps() / self.ceiling_mbps
+        self.used_mbps() / self.effective_ceiling_mbps()
     }
 
+    pub fn total_evictions(&self) -> u64 {
+        self.total_evictions
+    }
+
+    fn fits(&self, spec: &StreamSpec) -> bool {
+        // A single stream is always admissible alone — a wall that can't
+        // play one stream is worse than one that drops all but one.
+        self.active.is_empty() || self.used_mbps() + spec.weight() <= self.effective_ceiling_mbps()
+    }
+
+    fn admit(&mut self, stream_id: usize, spec: &StreamSpec) {
+        self.active.push(ActiveStream {
+            id: stream_id,
+            spec: spec.clone(),
+            started_at: std::time::Instant::now(),
+            drop_streak: 0,
+        });
+    }
+
+    /// Requests admission for a stream. On budget rejection, evicts the
+    /// oldest-started active stream and retries — but only if the eviction
+    /// would actually make room. Max-streams rejection also evicts, so
+    /// "oldest stream is paused to maintain the user's desired stream count"
+    /// holds globally.
     pub fn request(&mut self, stream_id: usize, spec: &StreamSpec) -> Admission {
-        if self.active.iter().any(|(id, _)| *id == stream_id) {
+        if self.active.iter().any(|a| a.id == stream_id) {
             return Admission::Admitted;
+        }
+        if self.active.len() < self.max_streams && self.fits(spec) {
+            self.admit(stream_id, spec);
+            return Admission::Admitted;
+        }
+        if let Some(oldest) = self.active.iter().min_by_key(|a| a.started_at) {
+            let after_evict = self.used_mbps() - oldest.spec.weight();
+            let slot_frees = self.active.len() - 1 < self.max_streams;
+            // If the last stream would be evicted, the single-stream rule
+            // admits anything; otherwise check the arithmetic.
+            let fits_after = self.active.len() == 1
+                || after_evict + spec.weight() <= self.effective_ceiling_mbps();
+            if slot_frees && fits_after {
+                let evicted = self.evict_oldest().expect("oldest exists");
+                self.admit(stream_id, spec);
+                return Admission::AdmittedEvicting { evicted };
+            }
         }
         if self.active.len() >= self.max_streams {
             return Admission::RejectedMaxStreams { max: self.max_streams };
         }
-        let would_use = self.used_mbps() + spec.weight();
-        if would_use > self.ceiling_mbps {
-            return Admission::RejectedBudget { would_use, ceiling: self.ceiling_mbps };
+        Admission::RejectedBudget {
+            would_use: self.used_mbps() + spec.weight(),
+            ceiling: self.effective_ceiling_mbps(),
         }
-        self.active.push((stream_id, spec.clone()));
-        Admission::Admitted
+    }
+
+    /// Removes and returns the oldest-started active stream id, if any.
+    /// The caller is responsible for actually pausing the victim player.
+    pub fn evict_oldest(&mut self) -> Option<usize> {
+        let oldest = self
+            .active
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, a)| a.started_at)
+            .map(|(i, _)| i)?;
+        let victim = self.active.remove(oldest);
+        self.total_evictions += 1;
+        Some(victim.id)
     }
 
     /// Replaces the spec for a known stream (e.g. real probe data replacing the
     /// admission placeholder). Reports the new utilization for logging.
     pub fn update(&mut self, stream_id: usize, spec: StreamSpec) -> f64 {
-        if let Some(entry) = self.active.iter_mut().find(|(id, _)| *id == stream_id) {
-            entry.1 = spec;
+        if let Some(entry) = self.active.iter_mut().find(|a| a.id == stream_id) {
+            entry.spec = spec;
         }
         self.utilization()
     }
 
     pub fn release(&mut self, stream_id: usize) {
-        self.active.retain(|(id, _)| *id != stream_id);
+        self.active.retain(|a| a.id != stream_id);
     }
 
     pub fn spec(&self, stream_id: usize) -> Option<&StreamSpec> {
-        self.active.iter().find(|(id, _)| *id == stream_id).map(|(_, s)| s)
+        self.active.iter().find(|a| a.id == stream_id).map(|a| &a.spec)
+    }
+
+    /// Feeds a per-stream decoder drop rate (drops/sec over the last window)
+    /// into the adaptive loop. Returns true while any stream is in a
+    /// sustained-drop condition.
+    pub fn report_drop_rate(&mut self, stream_id: usize, drops_per_sec: f64) -> bool {
+        let mut hot = false;
+        for a in self.active.iter_mut() {
+            if a.id == stream_id {
+                if drops_per_sec >= DROP_RATE_THRESHOLD {
+                    a.drop_streak += 1;
+                    hot = true;
+                } else {
+                    a.drop_streak = 0;
+                }
+            } else if a.drop_streak > 0 {
+                hot = true;
+            }
+        }
+        hot
+    }
+
+    /// Applies the adaptive shrink when streams have sustained drops. Returns
+    /// the worst offender (max streak) to proactively evict, if any qualified.
+    pub fn enforce(&mut self) -> Option<usize> {
+        let victim = self
+            .active
+            .iter()
+            .filter(|a| a.drop_streak >= DROP_STREAK_LIMIT)
+            .max_by_key(|a| a.drop_streak)
+            .map(|a| a.id);
+        if victim.is_some() {
+            self.adaptive = (self.adaptive * 0.85).max(ADAPTIVE_FLOOR);
+            for a in self.active.iter_mut() {
+                a.drop_streak = 0;
+            }
+        }
+        victim
+    }
+
+    /// Call when a sampling window was clean (no sustained drops): recovers
+    /// the adaptive multiplier toward 1.0.
+    pub fn recover(&mut self) {
+        self.adaptive = (self.adaptive * 1.10).min(1.0);
+        for a in self.active.iter_mut() {
+            a.drop_streak = 0;
+        }
     }
 }
 
@@ -174,11 +313,47 @@ mod tests {
             assert_eq!(b.request(i, &s(1920, 1080, 30.0, Codec::Hevc)), Admission::Admitted);
         }
         match b.request(99, &s(1920, 1080, 30.0, Codec::Hevc)) {
+            // ceiling 4.0: evicting one 1x stream frees exactly one slot, so
+            // the request succeeds by evicting the oldest.
+            Admission::AdmittedEvicting { evicted } => assert_eq!(evicted, 0),
             Admission::RejectedBudget { would_use, ceiling } => {
                 assert!(would_use > ceiling);
             }
-            other => panic!("expected rejection, got {other:?}"),
+            other => panic!("expected rejection-or-eviction, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn single_stream_always_admissible() {
+        let mut b = DecodeBudget::new(0.5, 16);
+        // Even a stream bigger than the whole ceiling plays alone.
+        assert_eq!(b.request(1, &s(3840, 2160, 60.0, Codec::H264)), Admission::Admitted);
+        // A second stream of any size forces eviction of the first.
+        match b.request(2, &s(640, 360, 30.0, Codec::Hevc)) {
+            Admission::AdmittedEvicting { evicted } => assert_eq!(evicted, 1),
+            other => panic!("expected eviction, got {other:?}"),
+        }
+        assert_eq!(b.active_ids(), vec![2]);
+    }
+
+    #[test]
+    fn eviction_picks_oldest_started() {
+        let mut b = DecodeBudget::new(2.0, 100);
+        b.request(1, &s(1920, 1080, 30.0, Codec::Hevc));
+        b.request(2, &s(1920, 1080, 30.0, Codec::Hevc));
+        // id 3 admitted, evicting 1 (oldest)
+        match b.request(3, &s(1920, 1080, 30.0, Codec::Hevc)) {
+            Admission::AdmittedEvicting { evicted } => assert_eq!(evicted, 1),
+            other => panic!("expected eviction, got {other:?}"),
+        }
+        // re-admit 1: its started_at refreshes, so 2 is now the oldest
+        b.release(3);
+        assert_eq!(b.request(1, &s(1920, 1080, 30.0, Codec::Hevc)), Admission::Admitted);
+        match b.request(3, &s(1920, 1080, 30.0, Codec::Hevc)) {
+            Admission::AdmittedEvicting { evicted } => assert_eq!(evicted, 2),
+            other => panic!("expected eviction of 2, got {other:?}"),
+        }
+        assert_eq!(b.total_evictions(), 2);
     }
 
     #[test]
@@ -186,9 +361,15 @@ mod tests {
         let mut b = DecodeBudget::new(100.0, 2);
         assert_eq!(b.request(1, &s(1920, 1080, 30.0, Codec::Hevc)), Admission::Admitted);
         assert_eq!(b.request(2, &s(1920, 1080, 30.0, Codec::Hevc)), Admission::Admitted);
-        assert_eq!(b.request(3, &s(640, 360, 30.0, Codec::Hevc)), Admission::RejectedMaxStreams { max: 2 });
-        b.release(1);
-        assert_eq!(b.request(3, &s(640, 360, 30.0, Codec::Hevc)), Admission::Admitted);
+        // Max-streams also evicts: maintaining the desired stream count means
+        // the oldest stream yields its slot.
+        match b.request(3, &s(640, 360, 30.0, Codec::Hevc)) {
+            Admission::AdmittedEvicting { evicted } => assert_eq!(evicted, 1),
+            other => panic!("expected eviction, got {other:?}"),
+        }
+        b.release(2);
+        b.release(3);
+        assert_eq!(b.request(4, &s(640, 360, 30.0, Codec::Hevc)), Admission::Admitted);
     }
 
     #[test]
@@ -198,6 +379,60 @@ mod tests {
         let util = b.update(7, s(3840, 2160, 60.0, Codec::H264));
         assert!(util > 0.1);
         assert_eq!(b.spec(7).unwrap().width, 3840);
+    }
+
+    #[test]
+    fn adaptive_shrink_and_recover() {
+        let mut b = DecodeBudget::new(100.0, 16);
+        b.request(1, &s(1920, 1080, 30.0, Codec::Hevc));
+        b.request(2, &s(1920, 1080, 30.0, Codec::Hevc));
+        assert_eq!(b.adaptive(), 1.0);
+
+        // One hot window is not enough.
+        assert!(b.report_drop_rate(2, 15.0));
+        assert_eq!(b.enforce(), None);
+        assert_eq!(b.adaptive(), 1.0);
+
+        // Second consecutive window triggers shrink + victim (caller pauses
+        // and releases the victim's slot).
+        b.report_drop_rate(2, 15.0);
+        assert_eq!(b.enforce(), Some(2));
+        assert!((b.adaptive() - 0.85).abs() < 1e-9);
+        b.release(2);
+        assert_eq!(b.active_ids(), vec![1]);
+        // Effective ceiling shrank accordingly.
+        assert!((b.effective_ceiling_mbps() - b.ceiling_mbps() * 0.85).abs() < 1.0);
+
+        // Clean windows recover.
+        b.recover();
+        assert!((b.adaptive() - 0.935).abs() < 1e-9);
+        b.recover();
+        b.recover();
+        assert!((b.adaptive() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn drop_streak_resets_when_clean() {
+        let mut b = DecodeBudget::new(100.0, 16);
+        b.request(1, &s(1920, 1080, 30.0, Codec::Hevc));
+        b.report_drop_rate(1, 20.0);
+        b.report_drop_rate(1, 0.0); // clean window resets the streak
+        b.report_drop_rate(1, 20.0);
+        assert_eq!(b.enforce(), None);
+        assert_eq!(b.adaptive(), 1.0);
+    }
+
+    #[test]
+    fn adaptive_floor() {
+        let mut b = DecodeBudget::new(100.0, 16);
+        b.request(1, &s(640, 360, 30.0, Codec::Hevc));
+        for _ in 0..40 {
+            b.report_drop_rate(1, 50.0);
+            b.report_drop_rate(1, 50.0);
+            b.enforce();
+            b.admit(1, &StreamSpec::placeholder()); // keep one active
+        }
+        assert!((b.adaptive() - ADAPTIVE_FLOOR).abs() < 1e-9);
     }
 
     #[test]

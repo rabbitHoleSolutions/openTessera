@@ -94,6 +94,11 @@ impl Tile {
         self.mpv.get_string("pause").map(|v| v == "yes").unwrap_or(false)
     }
 
+    /// Cumulative decoder-side frame drops (monotonic counter).
+    pub fn decoder_drops(&self) -> i64 {
+        self.mpv.get_i64("decoder-frame-drop-count").unwrap_or(0)
+    }
+
     /// Toggles this tile's audio. Returns the new muted state.
     /// Only meaningful when the app was started with --audio; otherwise the
     /// whole audio pipeline is disabled per-tile.

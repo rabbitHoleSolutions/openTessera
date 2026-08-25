@@ -16,8 +16,15 @@ Phase 1 skeleton — playback foundation:
   memory), hardware decode (NVDEC/VA-API/VideoToolbox via mpv)
 - Grid layout solver (coverage-scoring rows/cols search, ported from the Quest
   app's LayoutSolver) with per-tile aspect letterboxing
-- Decode budget controller skeleton: weighted macroblocks/sec admission with
-  codec weights, max-streams gate, real probe data fed back on load
+- Decode budget controller: weighted macroblocks/sec admission with
+  codec weights, max-streams gate, real probe data fed back on load,
+  OLDEST_STARTED eviction (the oldest playing stream is paused to admit
+  a new one or to sustain the user's stream count), and an adaptive
+  ceiling driven by real decoder frame-drop telemetry (sustained drops
+  shrink the effective ceiling and evict the worst offender; clean
+  windows recover it). A single stream is always admissible alone.
+  Budget is global across screens; resuming a paused tile re-requests
+  admission and may evict.
 - Cursor-based wrapping playback queue per screen (name/date/size/shuffle
   ordering, pending-tail re-sorting that preserves the current item)
 - Click a tile to pause/resume it, Space to pause/resume a screen, Esc to quit

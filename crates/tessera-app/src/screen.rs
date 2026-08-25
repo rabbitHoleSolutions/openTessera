@@ -166,29 +166,33 @@ impl Screen {
         self.pending_screenshot = Some((dir, tag.to_string()));
     }
 
-    pub fn toggle_pause_all(&mut self) {
-        let any_playing = self.tiles.iter().any(|t| !t.is_paused());
-        for tile in &self.tiles {
-            tile.set_paused(any_playing);
+    /// Hit-tests the cursor (top-left pixel origin) and returns the tile id.
+    pub fn tile_at(&self, x: f32, y: f32) -> Option<usize> {
+        self.tiles
+            .iter()
+            .zip(self.layout.iter())
+            .find(|(_, cell)| cell.contains(x, y))
+            .map(|(tile, _)| tile.id)
+    }
+
+    /// Pauses the tile with the given id. Returns false if not on this screen.
+    pub fn pause_tile(&mut self, id: usize) -> bool {
+        if let Some(tile) = self.tiles.iter_mut().find(|t| t.id == id) {
+            tile.set_paused(true);
+            true
+        } else {
+            false
         }
     }
 
-    /// Toggles pause on the tile under the given cursor position (top-left
-    /// pixel origin). Returns true if a tile was hit.
-    pub fn click(&mut self, x: f32, y: f32) -> bool {
-        for (tile, cell) in self.tiles.iter_mut().zip(self.layout.iter()) {
-            if cell.contains(x, y) {
-                tile.set_paused(!tile.is_paused());
-                println!(
-                    "screen {} tile {}: {}",
-                    self.monitor_index,
-                    tile.id,
-                    if tile.is_paused() { "paused" } else { "playing" }
-                );
-                return true;
-            }
+    /// Resumes the tile with the given id (caller has already secured budget).
+    pub fn resume_tile(&mut self, id: usize) -> bool {
+        if let Some(tile) = self.tiles.iter_mut().find(|t| t.id == id) {
+            tile.set_paused(false);
+            true
+        } else {
+            false
         }
-        false
     }
 
     /// Right-click: toggles audio on the tile under the cursor. Returns the

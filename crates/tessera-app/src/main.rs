@@ -296,45 +296,46 @@ fn main() {
 
     let mut cursor_pos: Vec<(f32, f32)> = vec![(0.0, 0.0); screens.len()];
 
-    for screen in screens.iter_mut() {
-        let target_tiles = screen.queue.len().clamp(1, args.tiles);
+    for screen_idx in 0..screens.len() {
+        let target_tiles = screens[screen_idx].queue.len().clamp(1, args.tiles);
+        let monitor_index = screens[screen_idx].monitor_index;
         let mut created = 0;
         while created < target_tiles {
-            let item = match screen.queue.current() {
+            let item = match screens[screen_idx].queue.current() {
                 Some(m) => m.clone(),
                 None => break,
             };
-            match budget.request(next_tile_id, &tessera_core::StreamSpec::placeholder()) {
-                Admission::Admitted => {}
+            match request_admission(&mut screens, &mut budget, next_tile_id, &tessera_core::StreamSpec::placeholder()) {
+                Admission::Admitted | Admission::AdmittedEvicting { .. } => {}
                 Admission::RejectedBudget { would_use, ceiling } => {
                     println!(
-                        "screen {}: decode budget full, stopping at {created} tiles ({would_use:.0}/{} mbps)",
-                        screen.monitor_index, ceiling
+                        "screen {monitor_index}: decode budget full, stopping at {created} tiles ({would_use:.0}/{} mbps)",
+                        ceiling
                     );
                     break;
                 }
                 Admission::RejectedMaxStreams { max } => {
-                    println!("screen {}: max streams ({max}) reached, stopping at {created} tiles", screen.monitor_index);
+                    println!("screen {monitor_index}: max streams ({max}) reached, stopping at {created} tiles");
                     break;
                 }
             }
-            screen.context.make_current(&screen.surface).ok();
+            screens[screen_idx].context.make_current(&screens[screen_idx].surface).ok();
             match Tile::new(&mpv_lib, next_tile_id, &item, &tile_opts) {
                 Ok(tile) => {
-                    screen.add_tile(tile);
+                    screens[screen_idx].add_tile(tile);
                     next_tile_id += 1;
                     created += 1;
-                    screen.queue.advance();
+                    screens[screen_idx].queue.advance();
                 }
                 Err(e) => {
                     budget.release(next_tile_id);
-                    eprintln!("screen {}: tile creation failed: {e}", screen.monitor_index);
+                    eprintln!("screen {monitor_index}: tile creation failed: {e}");
                     break;
                 }
             }
         }
-        if created == 0 && !screen.queue.is_empty() {
-            eprintln!("warning: screen {} has items but no tiles", screen.monitor_index);
+        if created == 0 && !screens[screen_idx].queue.is_empty() {
+            eprintln!("warning: screen {monitor_index} has items but no tiles");
         }
     }
 
@@ -347,6 +348,7 @@ fn main() {
 
     let start = Instant::now();
     let mut last_status = Instant::now();
+    let mut last_drops: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
     let vsync = std::env::var("TESSERA_VSYNC").map(|v| v != "0").unwrap_or(false);
     let frame_interval = if vsync { Duration::from_millis(15) } else { Duration::from_millis(16) };
 
@@ -365,6 +367,44 @@ fn main() {
                         last_status = Instant::now();
                         let elapsed = start.elapsed().as_secs();
                         println!("--- t+{elapsed}s ---");
+
+                        // Adaptive decode-budget feedback: sample per-tile
+                        // decoder drop rates; sustained drops shrink the
+                        // effective ceiling and evict the worst offender,
+                        // clean windows recover it.
+                        let mut hot = false;
+                        for screen in screens.iter() {
+                            for tile in screen.tiles.iter() {
+                                if tile.is_paused() {
+                                    continue;
+                                }
+                                let drops = tile.decoder_drops();
+                                let last = last_drops.get(&tile.id).copied().unwrap_or(drops);
+                                last_drops.insert(tile.id, drops);
+                                let rate = (drops - last).max(0) as f64 / dt;
+                                if budget.report_drop_rate(tile.id, rate) {
+                                    hot = true;
+                                }
+                            }
+                        }
+                        if hot {
+                            if let Some(victim) = budget.enforce() {
+                                pause_and_release(&mut screens, &mut budget, victim, "evicted: sustained decoder drops");
+                            }
+                        } else if budget.active_count() > 0 {
+                            budget.recover();
+                        }
+
+                        if budget.adaptive() < 1.0 {
+                            println!(
+                                "budget: adaptive ceiling {:.0}% of static, {:.0}/{:.0} mbps in use, {} evictions total",
+                                budget.adaptive() * 100.0,
+                                budget.used_mbps(),
+                                budget.effective_ceiling_mbps(),
+                                budget.total_evictions()
+                            );
+                        }
+
                         for screen in screens.iter_mut() {
                             screen.status(dt);
                         }
@@ -396,7 +436,16 @@ fn main() {
                         }
                         WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                             let (x, y) = cursor_pos[idx];
-                            screens[idx].click(x, y);
+                            if let Some(id) = screens[idx].tile_at(x, y) {
+                                let playing = screens
+                                    .iter()
+                                    .any(|s| s.tiles.iter().any(|t| t.id == id && !t.is_paused()));
+                                if playing {
+                                    pause_and_release(&mut screens, &mut budget, id, "user pause");
+                                } else {
+                                    resume_tile(&mut screens, &mut budget, id);
+                                }
+                            }
                         }
                         WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
                             let (x, y) = cursor_pos[idx];
@@ -412,7 +461,17 @@ fn main() {
                                         target.exit();
                                     }
                                     Key::Named(NamedKey::Space) => {
-                                        screens[idx].toggle_pause_all();
+                                        let ids: Vec<usize> = screens[idx].tiles.iter().map(|t| t.id).collect();
+                                        let any_playing = screens[idx].tiles.iter().any(|t| !t.is_paused());
+                                        if any_playing {
+                                            for id in ids {
+                                                pause_and_release(&mut screens, &mut budget, id, "user pause");
+                                            }
+                                        } else {
+                                            for id in ids {
+                                                resume_tile(&mut screens, &mut budget, id);
+                                            }
+                                        }
                                     }
                                     Key::Named(NamedKey::ArrowUp) => {
                                         screens[idx].adjust_volume(5);
@@ -439,6 +498,72 @@ fn dump_dir() -> Option<std::path::PathBuf> {
     let dir = std::path::PathBuf::from(std::env::var("TESSERA_DUMP_DIR").ok()?);
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
+}
+
+/// Pauses a tile (wherever it lives) and releases its budget slot. The
+/// invariant: budget.active == the set of playing tiles.
+fn pause_and_release(screens: &mut [Screen], budget: &mut DecodeBudget, id: usize, reason: &str) {
+    budget.release(id);
+    for screen in screens.iter_mut() {
+        if screen.pause_tile(id) {
+            println!("screen {} tile {id}: paused ({reason})", screen.monitor_index);
+            return;
+        }
+    }
+}
+
+/// Requests admission, evicting (pausing) older streams as needed until the
+/// request fits or only the requesting stream would remain. Mirrors the Quest
+/// retry loop: the oldest stream is paused to maintain the stream count.
+fn request_admission(
+    screens: &mut [Screen],
+    budget: &mut DecodeBudget,
+    id: usize,
+    spec: &tessera_core::StreamSpec,
+) -> Admission {
+    loop {
+        match budget.request(id, spec) {
+            Admission::Admitted => return Admission::Admitted,
+            Admission::AdmittedEvicting { evicted } => {
+                pause_and_release(screens, budget, evicted, "evicted: oldest stream");
+                return Admission::AdmittedEvicting { evicted };
+            }
+            rejected @ (Admission::RejectedBudget { .. } | Admission::RejectedMaxStreams { .. }) => {
+                // The single-stream rule guarantees admission once everything
+                // else is evicted; stop short of evicting the last stream
+                // only when the request itself is the lone candidate.
+                if budget.active_count() > 1 {
+                    if let Some(victim) = budget.evict_oldest() {
+                        pause_and_release(screens, budget, victim, "evicted: oldest stream");
+                        continue;
+                    }
+                }
+                return rejected;
+            }
+        }
+    }
+}
+
+/// Resumes a paused tile, securing budget first (evicting the oldest playing
+/// stream if necessary). Prints the outcome.
+fn resume_tile(screens: &mut [Screen], budget: &mut DecodeBudget, id: usize) {
+    let spec = budget.spec(id).cloned().unwrap_or_else(tessera_core::StreamSpec::placeholder);
+    match request_admission(screens, budget, id, &spec) {
+        Admission::Admitted | Admission::AdmittedEvicting { .. } => {
+            for screen in screens.iter_mut() {
+                if screen.resume_tile(id) {
+                    println!("screen {} tile {id}: playing", screen.monitor_index);
+                    return;
+                }
+            }
+        }
+        Admission::RejectedBudget { would_use, ceiling } => {
+            println!("tile {id}: staying paused — budget {would_use:.0}/{} mbps", ceiling);
+        }
+        Admission::RejectedMaxStreams { max } => {
+            println!("tile {id}: staying paused — max streams ({max})");
+        }
+    }
 }
 
 fn window_builder(args: &Args, monitors: &[winit::monitor::MonitorHandle], index: usize) -> WindowBuilder {
