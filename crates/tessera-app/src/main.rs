@@ -742,6 +742,37 @@ fn handle_overlay_action(screens: &mut [Screen], budget: &mut DecodeBudget, acti
         OverlayAction::Prev { tile_id } => {
             tile_next(screens, tile_id, false);
         }
+        OverlayAction::QueueJumpNext { index } => {
+            let monitor_index = screens[screen_idx].monitor_index;
+            let q = &mut screens[screen_idx].queue;
+            if let Some(m) = q.items().get(index).cloned() {
+                q.move_pending_to_front(index);
+                println!("screen {monitor_index}: queue: \"{}\" plays next", m.title);
+            }
+        }
+        OverlayAction::QueueRemove { index } => {
+            let monitor_index = screens[screen_idx].monitor_index;
+            let q = &mut screens[screen_idx].queue;
+            if let Some(m) = q.items().get(index).cloned() {
+                q.remove_pending(index);
+                println!("screen {monitor_index}: queue: removed \"{}\" ({} left)", m.title, q.len());
+            }
+        }
+        OverlayAction::QueueReorder { from, to } => {
+            let monitor_index = screens[screen_idx].monitor_index;
+            screens[screen_idx].queue.move_pending(from, to);
+            println!("screen {monitor_index}: queue: reordered");
+        }
+        OverlayAction::QueueShuffle => {
+            let monitor_index = screens[screen_idx].monitor_index;
+            screens[screen_idx].queue.set_order(QueueOrder::Shuffle);
+            println!("screen {monitor_index}: queue: shuffled");
+        }
+        OverlayAction::QueueSortName => {
+            let monitor_index = screens[screen_idx].monitor_index;
+            screens[screen_idx].queue.set_order(QueueOrder::Name);
+            println!("screen {monitor_index}: queue: sorted by name");
+        }
         OverlayAction::PauseAll => {
             let ids: Vec<usize> = screens[screen_idx].tiles.iter().map(|t| t.id).collect();
             for id in ids {

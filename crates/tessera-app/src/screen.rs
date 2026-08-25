@@ -165,7 +165,12 @@ impl Screen {
             .collect();
         let cells = self.layout.clone();
         let monitor_index = self.monitor_index;
-        let upcoming: Vec<String> = self.queue.upcoming(12).iter().map(|m| m.title.clone()).collect();
+        let queue_entries: Vec<overlay::QueueEntry> = self
+            .queue
+            .pending(12)
+            .iter()
+            .map(|(i, m)| overlay::QueueEntry { index: *i, title: m.title.clone() })
+            .collect();
         let budget_ui = BudgetUi {
             utilization: budget.utilization(),
             used_mbps: budget.used_mbps(),
@@ -176,16 +181,16 @@ impl Screen {
             evictions: budget.total_evictions(),
         };
         let visible = overlay.visible;
+        let mut queue_drag = overlay.queue_drag;
         let mut actions = Vec::new();
         let pending_here = overlay
             .pending_click
-            .as_ref()
             .filter(|pc| pc.window_id == self.window.id());
         let mut click_on_ui = false;
         let window = self.window.clone();
         self.egui.run(&window, |ctx| {
             if visible {
-                overlay::draw(ctx, monitor_index, &tiles_ui, &cells, &upcoming, &budget_ui, &mut actions);
+                overlay::draw(ctx, monitor_index, &tiles_ui, &cells, &queue_entries, &budget_ui, &mut actions, &mut queue_drag);
             }
             if let Some(pc) = pending_here {
                 // Frame-fresh verdict with the exact click position: if any
@@ -200,6 +205,7 @@ impl Screen {
                 );
             }
         });
+        overlay.queue_drag = queue_drag;
         if click_on_ui {
             overlay.pending_click = None;
         }

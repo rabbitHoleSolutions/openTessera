@@ -17,6 +17,8 @@ pub struct OverlayState {
     /// click. Event-time consumption can't be trusted — egui's notion of the
     /// pointer position lags one frame behind.
     pub pending_click: Option<PendingClick>,
+    /// Queue strip drag in progress: the source entry's queue index.
+    pub queue_drag: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -33,6 +35,23 @@ pub enum OverlayAction {
     Prev { tile_id: usize },
     PauseAll,
     ResumeAll,
+    /// Queue strip: make this pending item load next (moves it to the front
+    /// of the pending tail).
+    QueueJumpNext { index: usize },
+    /// Queue strip: remove this pending item from the queue.
+    QueueRemove { index: usize },
+    /// Queue strip: drag reorder — insert `from` before `to`.
+    QueueReorder { from: usize, to: usize },
+    /// Queue strip: reshuffle the pending tail.
+    QueueShuffle,
+    /// Queue strip: sort the pending tail by name.
+    QueueSortName,
+}
+
+/// One pending queue entry as shown in the up-next strip.
+pub struct QueueEntry {
+    pub index: usize,
+    pub title: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -71,9 +90,10 @@ pub fn draw(
     monitor_index: usize,
     tiles: &[TileUiInfo],
     cells: &[Rect],
-    upcoming: &[String],
+    queue: &[QueueEntry],
     budget: &BudgetUi,
     actions: &mut Vec<OverlayAction>,
+    queue_drag: &mut Option<usize>,
 ) {
     let ppp = ctx.pixels_per_point();
 
@@ -116,24 +136,76 @@ pub fn draw(
         });
     });
 
-    // Bottom strip: the upcoming queue tail (highlighted = next).
+    // Bottom strip: the pending queue tail. Interactive: click an entry to
+    // make it load next, right-click to remove it, drag to reorder.
     egui::TopBottomPanel::bottom("tessera_queue").show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.strong("Up next");
+            if queue.is_empty() {
+                ui.weak("(queue loops)");
+            }
             ui.separator();
+            if ui.small_button("🔀").clicked() {
+                actions.push(OverlayAction::QueueShuffle);
+            }
+            if ui.small_button("A–Z").clicked() {
+                actions.push(OverlayAction::QueueSortName);
+            }
+            ui.separator();
+            let mut drop_from: Option<usize> = None;
+            let mut rects: Vec<(usize, egui::Rect)> = Vec::new();
             egui::ScrollArea::horizontal().show(ui, |ui| {
-                for (i, title) in upcoming.iter().enumerate() {
-                    if i > 0 {
+                for (pos, entry) in queue.iter().enumerate() {
+                    if pos > 0 {
                         ui.weak("·");
                     }
-                    let rich = if i == 0 {
-                        egui::RichText::new(title).strong()
+                    let rich = if pos == 0 {
+                        egui::RichText::new(&entry.title).strong()
                     } else {
-                        egui::RichText::new(title).weak()
+                        egui::RichText::new(&entry.title).weak()
                     };
-                    ui.label(rich);
+                    let resp = ui.add(
+                        egui::Label::new(rich).sense(egui::Sense::click_and_drag()),
+                    );
+                    if resp.clicked() {
+                        actions.push(OverlayAction::QueueJumpNext { index: entry.index });
+                    }
+                    if resp.clicked_by(egui::PointerButton::Secondary) {
+                        actions.push(OverlayAction::QueueRemove { index: entry.index });
+                    }
+                    if resp.dragged() {
+                        *queue_drag = Some(entry.index);
+                    }
+                    if resp.drag_stopped() {
+                        drop_from = *queue_drag;
+                    }
+                    // Drop-target highlight while a strip drag is live.
+                    if let Some(from) = *queue_drag {
+                        if from != entry.index && resp.hovered() {
+                            let r = resp.rect;
+                            ui.painter().hline(
+                                r.left()..=r.right(),
+                                r.bottom(),
+                                egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                            );
+                        }
+                    }
+                    rects.push((entry.index, resp.rect));
+                    resp.on_hover_text("click: play next · right-click: remove · drag: reorder");
                 }
             });
+            // Drag released: if the pointer is over another entry, reorder.
+            if let Some(from) = drop_from {
+                *queue_drag = None;
+                if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
+                    for (idx, r) in &rects {
+                        if *idx != from && r.contains(pos) {
+                            actions.push(OverlayAction::QueueReorder { from, to: *idx });
+                            break;
+                        }
+                    }
+                }
+            }
         });
     });
 

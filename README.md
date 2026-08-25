@@ -36,6 +36,10 @@ Phase 1 skeleton — playback foundation:
 - Transport: per-tile chip transport row (prev / -10s / +10s / next buttons
   plus a scrub bar), keyboard Left/Right seeks ±10s on the focused screen,
   N/P load the next/previous queue item on each tile.
+- Queue management: the up-next strip is interactive — click an entry to make
+  it load next, right-click to remove it, drag entries to reorder the
+  pending tail, and shuffle / A–Z buttons re-sort it. Currently-playing and
+  already-played items are never touched (tiles hold their own items).
 - Click a tile to pause/resume it, Space to pause/resume a screen, Esc to quit
 
 Phase 0 benchmarking (see git history / docs when added) measured, on a

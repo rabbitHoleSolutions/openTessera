@@ -91,6 +91,46 @@ impl PlaybackQueue {
         out
     }
 
+    /// The pending tail: items after the cursor in load order, NO wrapping
+    /// (what will actually load next). Returns (index, item) pairs so the
+    /// caller can reference entries in management operations.
+    pub fn pending(&self, n: usize) -> Vec<(usize, &MediaItem)> {
+        let cur = self.current_index();
+        let end = (cur + 1 + n).min(self.items.len());
+        (cur + 1..end).map(|i| (i, &self.items[i])).collect()
+    }
+
+    /// Moves a pending item to the front of the pending tail: it loads next.
+    pub fn move_pending_to_front(&mut self, index: usize) {
+        let cur = self.current_index();
+        if index > cur && index < self.items.len() {
+            let item = self.items.remove(index);
+            self.items.insert(cur + 1, item);
+        }
+    }
+
+    /// Removes a pending item from the queue. History and the current item
+    /// (index <= cursor) are refused — tiles hold clones of those.
+    pub fn remove_pending(&mut self, index: usize) {
+        let cur = self.current_index();
+        if index > cur && index < self.items.len() {
+            self.items.remove(index);
+        }
+    }
+
+    /// Reorders within the pending tail: the item at `from` is inserted
+    /// immediately before the item currently at `to`.
+    pub fn move_pending(&mut self, from: usize, to: usize) {
+        let cur = self.current_index();
+        if from > cur && from < self.items.len() && to > cur && to < self.items.len() && from != to {
+            let item = self.items.remove(from);
+            // After removal, positions above `from` shift down by one;
+            // "insert before original `to`" accounts for that.
+            let insert_at = if to > from { to - 1 } else { to };
+            self.items.insert(insert_at, item);
+        }
+    }
+
     pub fn items(&self) -> &[MediaItem] {
         &self.items
     }
@@ -187,5 +227,83 @@ mod tests {
         q.add_items(vec![item("aa")]);
         assert_eq!(q.current().unwrap().title, "b");
         assert_eq!(q.items()[0].title, "a");
+    }
+
+    fn filled() -> PlaybackQueue {
+        let mut q = PlaybackQueue::new(QueueOrder::Name);
+        q.add_items(vec![item("a"), item("b"), item("c"), item("d"), item("e")]);
+        q.advance(); // cursor -> 1 ("b")
+        q
+    }
+
+    #[test]
+    fn pending_lists_tail_without_wrap() {
+        let q = filled();
+        let titles: Vec<&str> = q.pending(10).iter().map(|(_, m)| m.title.as_str()).collect();
+        assert_eq!(titles, vec!["c", "d", "e"]);
+        assert!(q.pending(0).is_empty());
+    }
+
+    #[test]
+    fn move_pending_to_front() {
+        let mut q = filled();
+        q.move_pending_to_front(3); // "d" before "c"
+        let titles: Vec<&str> = q.items().iter().map(|m| m.title.as_str()).collect();
+        assert_eq!(titles, vec!["a", "b", "d", "c", "e"]);
+        assert_eq!(q.current().unwrap().title, "b"); // cursor still on "b"
+        // history/current indices are refused
+        q.move_pending_to_front(0);
+        assert_eq!(q.items()[0].title, "a");
+    }
+
+    #[test]
+    fn remove_pending_only() {
+        let mut q = filled();
+        q.remove_pending(2); // "c"
+        let titles: Vec<&str> = q.items().iter().map(|m| m.title.as_str()).collect();
+        assert_eq!(titles, vec!["a", "b", "d", "e"]);
+        q.remove_pending(0); // refused: history
+        q.remove_pending(1); // refused: current
+        assert_eq!(q.items().len(), 4);
+        assert_eq!(q.current().unwrap().title, "b");
+    }
+
+    #[test]
+    fn move_pending_both_directions() {
+        // backward: drag a later item before an earlier one
+        let mut q = filled();
+        q.move_pending(4, 2); // "e" before "c"
+        let titles: Vec<&str> = q.items().iter().map(|m| m.title.as_str()).collect();
+        assert_eq!(titles, vec!["a", "b", "e", "c", "d"]);
+        // forward: drag an earlier item onto a later one
+        let mut q = filled();
+        q.move_pending(2, 4); // "c" before "e"
+        let titles: Vec<&str> = q.items().iter().map(|m| m.title.as_str()).collect();
+        assert_eq!(titles, vec!["a", "b", "d", "c", "e"]);
+        // adjacent no-op: drop on the entry right after the source
+        let mut q = filled();
+        q.move_pending(2, 3);
+        let titles: Vec<&str> = q.items().iter().map(|m| m.title.as_str()).collect();
+        assert_eq!(titles, vec!["a", "b", "c", "d", "e"]);
+        // history/current indices refused
+        let mut q = filled();
+        q.move_pending(1, 3);
+        q.move_pending(2, 1);
+        assert_eq!(q.items().iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), vec!["a", "b", "c", "d", "e"]);
+    }
+
+    #[test]
+    fn set_order_reshuffles_pending() {
+        let mut q = filled();
+        q.set_order(QueueOrder::Shuffle);
+        let titles: Vec<String> = q.pending(10).iter().map(|(_, m)| m.title.clone()).collect();
+        assert_eq!(titles.len(), 3);
+        // membership preserved regardless of shuffle outcome
+        let mut sorted = titles.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec!["c".to_string(), "d".to_string(), "e".to_string()]);
+        // history and current untouched
+        assert_eq!(q.items()[0].title, "a");
+        assert_eq!(q.current().unwrap().title, "b");
     }
 }
