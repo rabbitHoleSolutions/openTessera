@@ -73,7 +73,23 @@ opentessera --screens 2 --advance /path/to/videos/
 
 # a dozen streams of the same source
 opentessera --tiles 12 vid1.mkv vid1.mkv vid1.mkv vid1.mkv ...
+
+# everything in the Plex "Movies" library
+opentessera --plex --plex-library Movies
+
+# local files plus two remote servers, one shared queue
+opentessera --jellyfin --jellyfin-library Movies --plex /path/to/local/
 ```
+
+- Remote sources: Plex and Jellyfin. `--plex` / `--jellyfin` add a server's
+  movie libraries (optionally restricted with `--plex-library` /
+  `--jellyfin-library`); items stream over HTTP via each server's
+  direct-play endpoint (original file bytes, range requests — no
+  transcoding), so mpv treats them exactly like local files, seeking
+  included. Credentials live in `~/.config/opentessera/sources.conf`
+  (`plex_url`/`plex_token`/`jellyfin_url`/`jellyfin_key`) with
+  `TESSERA_*` env-var overrides. Local paths and remote sources can be
+  freely mixed in one launch.
 
 Controls: `Esc` quit · `Tab` show/hide the overlay UI · `Space` pause/resume
 all tiles on the focused screen · click a tile to pause/resume it · with

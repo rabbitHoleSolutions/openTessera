@@ -40,6 +40,10 @@ struct Args {
     ceiling: f64,
     status_interval: u64,
     overlay: bool,
+    plex: bool,
+    jellyfin: bool,
+    plex_library: Option<String>,
+    jellyfin_library: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -54,6 +58,10 @@ fn parse_args() -> Result<Args, String> {
         ceiling: tessera_core::budget::DEFAULT_CEILING_EQUIVALENTS,
         status_interval: 5,
         overlay: false,
+        plex: false,
+        jellyfin: false,
+        plex_library: None,
+        jellyfin_library: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -74,6 +82,10 @@ fn parse_args() -> Result<Args, String> {
             "--ceiling" => args.ceiling = value()?.parse().map_err(|_| "bad --ceiling")?,
             "--status-interval" => args.status_interval = value()?.parse().map_err(|_| "bad --status-interval")?,
             "--overlay" => args.overlay = true,
+            "--plex" => args.plex = true,
+            "--jellyfin" => args.jellyfin = true,
+            "--plex-library" => args.plex_library = Some(value()?),
+            "--jellyfin-library" => args.jellyfin_library = Some(value()?),
             "--audio" => args.audio = true,
             "--advance" => args.advance = true,
             "--loop" => args.advance = false,
@@ -85,8 +97,8 @@ fn parse_args() -> Result<Args, String> {
             s => args.files.push(PathBuf::from(s)),
         }
     }
-    if args.files.is_empty() {
-        return Err("no files or directories given".into());
+    if args.files.is_empty() && !args.plex && !args.jellyfin {
+        return Err("no files or directories given (or use --plex / --jellyfin)".into());
     }
     if args.tiles == 0 {
         return Err("--tiles must be >= 1".into());
@@ -112,6 +124,12 @@ OPTIONS:
   --ceiling N        Budget: 1080p30-equivalent decode ceiling (default 96)
   --status-interval S  Seconds between status prints (default 5)
   --overlay          Start with the overlay UI visible (Tab toggles it)
+  --plex             Add the Plex server from ~/.config/opentessera/sources.conf
+                     (or TESSERA_PLEX_URL / TESSERA_PLEX_TOKEN env vars)
+  --jellyfin         Add the Jellyfin server the same way
+                     (TESSERA_JELLYFIN_URL / TESSERA_JELLYFIN_KEY)
+  --plex-library N         Only list this Plex library (by title)
+  --jellyfin-library N     Only list this Jellyfin library (by name)
 
 CONTROLS:
   Esc                Quit
@@ -135,9 +153,36 @@ fn main() {
         }
     };
 
-    let items = tessera_core::media::collect_items(&args.files);
+    let mut items = tessera_core::media::collect_items(&args.files);
+    if args.plex || args.jellyfin {
+        let cfg = tessera_core::sources::SourceConfig::load();
+        if args.plex {
+            match cfg.plex {
+                Some(srv) => match (tessera_core::sources::PlexSource { base: srv.url.clone(), token: srv.token.clone() }).list(args.plex_library.as_deref()) {
+                    Ok(list) => {
+                        println!("plex: {} item(s) from {}", list.len(), srv.url);
+                        items.extend(list);
+                    }
+                    Err(e) => eprintln!("warning: plex source failed: {e}"),
+                },
+                None => eprintln!("warning: --plex but no server configured (sources.conf / env)"),
+            }
+        }
+        if args.jellyfin {
+            match cfg.jellyfin {
+                Some(srv) => match (tessera_core::sources::JellyfinSource { base: srv.url.clone(), api_key: srv.token.clone() }).list(args.jellyfin_library.as_deref()) {
+                    Ok(list) => {
+                        println!("jellyfin: {} item(s) from {}", list.len(), srv.url);
+                        items.extend(list);
+                    }
+                    Err(e) => eprintln!("warning: jellyfin source failed: {e}"),
+                },
+                None => eprintln!("warning: --jellyfin but no server configured (sources.conf / env)"),
+            }
+        }
+    }
     if items.is_empty() {
-        eprintln!("error: no video files found in the given paths");
+        eprintln!("error: no video items found (no readable local paths, or all remote sources failed)");
         std::process::exit(2);
     }
     println!(

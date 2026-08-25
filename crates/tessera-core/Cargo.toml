@@ -6,3 +6,5 @@ license.workspace = true
 description = "Source-agnostic media model, playback queues, layout solver, decode budget"
 
 [dependencies]
+ureq = { workspace = true }
+serde_json = { workspace = true }
