@@ -85,7 +85,9 @@ impl Tile {
     }
 
     pub fn set_paused(&self, paused: bool) {
-        let _ = self.mpv.command(&["set_property", "pause", if paused { "yes" } else { "no" }]);
+        if let Err(e) = self.mpv.command(&["set", "pause", if paused { "yes" } else { "no" }]) {
+            eprintln!("tile {}: set pause failed: {e}", self.id);
+        }
     }
 
     pub fn is_paused(&self) -> bool {
@@ -97,7 +99,9 @@ impl Tile {
     /// whole audio pipeline is disabled per-tile.
     pub fn toggle_mute(&self) -> bool {
         let muted = self.is_muted();
-        let _ = self.mpv.command(&["set_property", "mute", if muted { "no" } else { "yes" }]);
+        if let Err(e) = self.mpv.command(&["set", "mute", if muted { "no" } else { "yes" }]) {
+            eprintln!("tile {}: set mute failed: {e}", self.id);
+        }
         !muted
     }
 
@@ -107,7 +111,9 @@ impl Tile {
 
     pub fn set_volume(&self, percent: i64) {
         let v = percent.clamp(0, 130).to_string();
-        let _ = self.mpv.command(&["set_property", "volume", &v]);
+        if let Err(e) = self.mpv.command(&["set", "volume", &v]) {
+            eprintln!("tile {}: set volume failed: {e}", self.id);
+        }
     }
 
     pub fn volume(&self) -> i64 {
