@@ -17,6 +17,8 @@ winit = "0.29"
 glutin = "0.31"
 glutin-winit = "0.4"
 glow = "0.13"
+egui = "0.27"
+egui_glow = { version = "0.27", features = ["winit"] }
 raw-window-handle = "0.5"
 tessera-mpv = { path = "crates/tessera-mpv" }
 tessera-core = { path = "crates/tessera-core" }

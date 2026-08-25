@@ -26,6 +26,7 @@ pub struct Tile {
     tex_h: i32,
     pub frames: u64,
     pub last_time_pos: f64,
+    pub duration: f64,
     pub min_rate: f64,
     pub loaded: bool,
 }
@@ -75,6 +76,7 @@ impl Tile {
             tex_h: 0,
             frames: 0,
             last_time_pos: -1.0,
+            duration: -1.0,
             min_rate: f64::MAX,
             loaded: false,
         })
@@ -160,6 +162,7 @@ impl Tile {
                         self.id, w, h, fps, codec, pixfmt, hwdec, ao
                     );
                     self.loaded = true;
+                    self.duration = self.mpv.get_f64("duration").unwrap_or(-1.0);
                     events.push(TileEvent::Loaded { width: w, height: h, fps, codec });
                 }
                 MpvEvent::EndFile { reason: tessera_mpv::EndFileReason::Eof, .. } => {

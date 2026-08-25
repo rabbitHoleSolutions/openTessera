@@ -6,13 +6,15 @@ use tessera_core::{DecodeBudget, PlaybackQueue, Rect, StreamSpec};
 use winit::window::Window;
 
 use crate::compositor::Compositor;
+use crate::overlay::{self, BudgetUi, OverlayState, TileUiInfo};
 use crate::tile::{Tile, TileEvent};
 
 pub struct Screen {
     pub window: Arc<Window>,
     pub surface: glutin::surface::Surface<glutin::surface::WindowSurface>,
     pub context: glutin::context::PossiblyCurrentContext,
-    pub gl: glow::Context,
+    pub gl: Arc<glow::Context>,
+    pub egui: egui_glow::EguiGlow,
     pub compositor: Compositor,
     pub monitor_index: usize,
     pub tiles: Vec<Tile>,
@@ -28,7 +30,8 @@ impl Screen {
         window: Arc<Window>,
         surface: glutin::surface::Surface<glutin::surface::WindowSurface>,
         context: glutin::context::PossiblyCurrentContext,
-        gl: glow::Context,
+        gl: Arc<glow::Context>,
+        egui: egui_glow::EguiGlow,
         monitor_index: usize,
         queue: PlaybackQueue,
     ) -> Screen {
@@ -39,6 +42,7 @@ impl Screen {
             surface,
             context,
             gl,
+            egui,
             compositor,
             monitor_index,
             tiles: Vec::new(),
@@ -76,8 +80,9 @@ impl Screen {
     }
 
     /// One render pass: poll tile events, render new frames into tile FBOs,
-    /// composite to the window, swap. Handles queue advancement on EOF.
-    pub fn tick(&mut self, budget: &mut DecodeBudget, advance: bool) {
+    /// composite to the window, draw the overlay, swap. Handles queue
+    /// advancement on EOF.
+    pub fn tick(&mut self, budget: &mut DecodeBudget, advance: bool, overlay: &mut OverlayState) {
         self.context.make_current(&self.surface).ok();
 
         let mut ended: Vec<usize> = Vec::new();
@@ -137,28 +142,108 @@ impl Screen {
                 self.compositor.draw(&self.gl, tex, cell, aspect, w, h);
             }
         }
-        if let Some((dir, tag)) = self.pending_screenshot.take() {
-            let mut buf = vec![0u8; (w as usize) * (h as usize) * 3];
-            unsafe {
-                self.gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
-                self.gl.read_pixels(0, 0, w, h, glow::RGB, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(&mut buf));
+        let dump_overlay = std::env::var("TESSERA_DUMP_OVERLAY").map(|v| v != "0").unwrap_or(false);
+        if !dump_overlay {
+            self.take_screenshot();
+        }
+        // Overlay (egui). A full pass runs every frame — with an empty UI when
+        // hidden — so egui input state stays fresh and stale widgets can't
+        // swallow clicks. Painted after the screenshot read so dumps stay
+        // pure video.
+        let tiles_ui: Vec<TileUiInfo> = self
+            .tiles
+            .iter()
+            .map(|t| TileUiInfo {
+                id: t.id,
+                title: t.item.title.clone(),
+                paused: t.is_paused(),
+                muted: t.is_muted(),
+                audio_enabled: t.audio_enabled(),
+                time_pos: t.last_time_pos,
+                duration: t.duration,
+            })
+            .collect();
+        let cells = self.layout.clone();
+        let monitor_index = self.monitor_index;
+        let upcoming: Vec<String> = self.queue.upcoming(12).iter().map(|m| m.title.clone()).collect();
+        let budget_ui = BudgetUi {
+            utilization: budget.utilization(),
+            used_mbps: budget.used_mbps(),
+            ceiling_mbps: budget.effective_ceiling_mbps(),
+            adaptive: budget.adaptive(),
+            active: budget.active_count(),
+            max_streams: budget.max_streams(),
+            evictions: budget.total_evictions(),
+        };
+        let visible = overlay.visible;
+        let mut actions = Vec::new();
+        let pending_here = overlay
+            .pending_click
+            .as_ref()
+            .filter(|pc| pc.window_id == self.window.id());
+        let mut click_on_ui = false;
+        let window = self.window.clone();
+        self.egui.run(&window, |ctx| {
+            if visible {
+                overlay::draw(ctx, monitor_index, &tiles_ui, &cells, &upcoming, &budget_ui, &mut actions);
             }
-            let path = dir.join(format!("screen{}-{}.png", self.monitor_index, tag));
-            match crate::png_util::write_png_rgb(&path, w, h, &buf) {
-                Ok(()) => println!("screenshot: {}", path.display()),
-                Err(e) => eprintln!("screenshot failed: {e}"),
+            if let Some(pc) = pending_here {
+                // Frame-fresh verdict with the exact click position: if any
+                // painted layer owns it, the raw click is dropped (widgets
+                // respond via their own actions instead). The implicit
+                // full-screen Background layer does NOT count — egui adds it
+                // every pass whether we painted a central panel or not.
+                let ppp = ctx.pixels_per_point();
+                click_on_ui = matches!(
+                    ctx.layer_id_at(egui::pos2(pc.x / ppp, pc.y / ppp)),
+                    Some(layer) if layer.order != egui::Order::Background
+                );
             }
-            for tile in self.tiles.iter() {
-                let path = dir.join(format!("screen{}-tile{}-{}.png", self.monitor_index, tile.id, tag));
-                if let Err(e) = tile.dump_fbo(&self.gl, &path) {
-                    eprintln!("tile fbo dump failed: {e}");
-                } else {
-                    println!("screenshot: {}", path.display());
-                }
-            }
+        });
+        if click_on_ui {
+            overlay.pending_click = None;
+        }
+        self.egui.paint(&window);
+        overlay.actions.append(&mut actions);
+        unsafe {
+            // egui's painter may leave scissor enabled; don't let it clip the
+            // next frame's clears and draws.
+            self.gl.disable(glow::SCISSOR_TEST);
+        }
+        if dump_overlay {
+            self.take_screenshot();
         }
         self.surface.swap_buffers(&self.context).ok();
         self.frames_drawn += 1;
+    }
+
+    /// Reads back the composite frame (plus per-tile FBOs) if a screenshot
+    /// was requested. With TESSERA_DUMP_OVERLAY the read happens after the
+    /// egui pass, so the dump shows the overlay as well.
+    fn take_screenshot(&mut self) {
+        let Some((dir, tag)) = self.pending_screenshot.take() else {
+            return;
+        };
+        let size = self.window.inner_size();
+        let (w, h) = (size.width as i32, size.height as i32);
+        let mut buf = vec![0u8; (w as usize) * (h as usize) * 3];
+        unsafe {
+            self.gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+            self.gl.read_pixels(0, 0, w, h, glow::RGB, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(&mut buf));
+        }
+        let path = dir.join(format!("screen{}-{}.png", self.monitor_index, tag));
+        match crate::png_util::write_png_rgb(&path, w, h, &buf) {
+            Ok(()) => println!("screenshot: {}", path.display()),
+            Err(e) => eprintln!("screenshot failed: {e}"),
+        }
+        for tile in self.tiles.iter() {
+            let path = dir.join(format!("screen{}-tile{}-{}.png", self.monitor_index, tile.id, tag));
+            if let Err(e) = tile.dump_fbo(&self.gl, &path) {
+                eprintln!("tile fbo dump failed: {e}");
+            } else {
+                println!("screenshot: {}", path.display());
+            }
+        }
     }
 
     /// Requests a composited-frame screenshot (taken at the next tick).
@@ -264,5 +349,6 @@ impl Screen {
         }
         self.tiles.clear();
         self.compositor.destroy(&self.gl);
+        self.egui.destroy();
     }
 }

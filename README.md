@@ -27,6 +27,12 @@ Phase 1 skeleton — playback foundation:
   admission and may evict.
 - Cursor-based wrapping playback queue per screen (name/date/size/shuffle
   ordering, pending-tail re-sorting that preserves the current item)
+- Overlay UI (egui, Tab to toggle, `--overlay` to start visible): status bar
+  with live budget/stream/eviction counters and a play/pause-all button,
+  per-tile info chips (title, play state, position/duration, mute; click the
+  chip to pause/resume the tile through the budget), and an up-next queue
+  strip. UI interactions execute with the same budget-aware semantics as
+  clicks on the video itself.
 - Click a tile to pause/resume it, Space to pause/resume a screen, Esc to quit
 
 Phase 0 benchmarking (see git history / docs when added) measured, on a
@@ -66,18 +72,19 @@ opentessera --screens 2 --advance /path/to/videos/
 opentessera --tiles 12 vid1.mkv vid1.mkv vid1.mkv vid1.mkv ...
 ```
 
-Controls: `Esc` quit · `Space` pause/resume all tiles on the focused screen ·
-click a tile to pause/resume it · with `--audio`: right-click a tile to
-unmute/mute it (all tiles start muted — a wall of simultaneous streams should
-be selectively audible, not a cacophony), `Up`/`Down` adjust volume of unmuted
-tiles on the focused screen.
+Controls: `Esc` quit · `Tab` show/hide the overlay UI · `Space` pause/resume
+all tiles on the focused screen · click a tile to pause/resume it · with
+`--audio`: right-click a tile to unmute/mute it (all tiles start muted — a
+wall of simultaneous streams should be selectively audible, not a cacophony),
+`Up`/`Down` adjust volume of unmuted tiles on the focused screen.
 
 Status (playback rate per tile, composited fps, hwdec mode, decoder drops,
 budget utilization) prints every 5 seconds; adjust with `--status-interval`.
 
 Env vars: `TESSERA_VSYNC=1` enable vsync (off by default — an X11 swap stall
 was observed with vsync on occluded windows), `TESSERA_MPV_LIB` path to libmpv,
-`TESSERA_MPV_LOG=v` verbose mpv logs.
+`TESSERA_MPV_LOG=v` verbose mpv logs, `TESSERA_DUMP_DIR` screenshot dumps each
+status interval (add `TESSERA_DUMP_OVERLAY=1` to include the overlay UI).
 
 ## Workspace layout
 

@@ -1,4 +1,5 @@
 mod compositor;
+mod overlay;
 mod png_util;
 mod screen;
 mod tile;
@@ -18,6 +19,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, WindowBuilder};
 
 use compositor::set_gl_loader;
+use overlay::{OverlayAction, OverlayState};
 use screen::Screen;
 use tile::{Tile, TileOptions};
 
@@ -37,6 +39,7 @@ struct Args {
     max_streams: usize,
     ceiling: f64,
     status_interval: u64,
+    overlay: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -50,6 +53,7 @@ fn parse_args() -> Result<Args, String> {
         max_streams: tessera_core::budget::DEFAULT_MAX_STREAMS,
         ceiling: tessera_core::budget::DEFAULT_CEILING_EQUIVALENTS,
         status_interval: 5,
+        overlay: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -69,6 +73,7 @@ fn parse_args() -> Result<Args, String> {
             "--max-streams" => args.max_streams = value()?.parse().map_err(|_| "bad --max-streams")?,
             "--ceiling" => args.ceiling = value()?.parse().map_err(|_| "bad --ceiling")?,
             "--status-interval" => args.status_interval = value()?.parse().map_err(|_| "bad --status-interval")?,
+            "--overlay" => args.overlay = true,
             "--audio" => args.audio = true,
             "--advance" => args.advance = true,
             "--loop" => args.advance = false,
@@ -106,9 +111,11 @@ OPTIONS:
   --max-streams N    Budget: max concurrent streams (default 16)
   --ceiling N        Budget: 1080p30-equivalent decode ceiling (default 96)
   --status-interval S  Seconds between status prints (default 5)
+  --overlay          Start with the overlay UI visible (Tab toggles it)
 
 CONTROLS:
   Esc                Quit
+  Tab                Show/hide the overlay UI
   Space              Pause/resume all tiles on the focused screen
   Left click         Pause/resume the clicked tile
   Right click        Mute/unmute the clicked tile (needs --audio)
@@ -279,13 +286,15 @@ fn main() {
         }
         queue.add_items(assigned);
 
-        let gl = unsafe {
+        let gl = Arc::new(unsafe {
             glow::Context::from_loader_function(|s| {
                 let c = std::ffi::CString::new(s).unwrap();
                 display.get_proc_address(&c) as *const std::os::raw::c_void
             })
-        };
-        let screen = Screen::new(window.clone(), surface, context, gl, monitor_index, queue);
+        });
+        // EguiGlow compiles its shaders now, so the GL context must be current.
+        let egui = egui_glow::EguiGlow::new(&event_loop, gl.clone(), None, None);
+        let screen = Screen::new(window.clone(), surface, context, gl, egui, monitor_index, queue);
         screens.push(screen);
     }
 
@@ -295,6 +304,7 @@ fn main() {
     }
 
     let mut cursor_pos: Vec<(f32, f32)> = vec![(0.0, 0.0); screens.len()];
+    let mut overlay = OverlayState { visible: args.overlay, ..Default::default() };
 
     for screen_idx in 0..screens.len() {
         let target_tiles = screens[screen_idx].queue.len().clamp(1, args.tiles);
@@ -359,8 +369,32 @@ fn main() {
                 Event::NewEvents(StartCause::Init)
                 | Event::NewEvents(StartCause::ResumeTimeReached { .. })
                 | Event::NewEvents(StartCause::WaitCancelled { .. }) => {
-                    for screen in screens.iter_mut() {
-                        screen.tick(&mut budget, args.advance);
+                    for screen_idx in 0..screens.len() {
+                        screens[screen_idx].tick(&mut budget, args.advance, &mut overlay);
+                        // UI actions from this screen's overlay: execute after
+                        // the tick (pause/resume needs cross-screen budget
+                        // access, which the drawing code can't have).
+                        for action in std::mem::take(&mut overlay.actions) {
+                            handle_overlay_action(&mut screens, &mut budget, action, screen_idx);
+                        }
+                    }
+                    // A deferred click that no egui layer claimed: execute as
+                    // a raw video-wall click.
+                    if let Some(pc) = overlay.pending_click.take() {
+                        if let Some(idx) = screens.iter().position(|s| s.window.id() == pc.window_id) {
+                            if pc.right {
+                                screens[idx].click_mute(pc.x, pc.y);
+                            } else if let Some(id) = screens[idx].tile_at(pc.x, pc.y) {
+                                let playing = screens
+                                    .iter()
+                                    .any(|s| s.tiles.iter().any(|t| t.id == id && !t.is_paused()));
+                                if playing {
+                                    pause_and_release(&mut screens, &mut budget, id, "user pause");
+                                } else {
+                                    resume_tile(&mut screens, &mut budget, id);
+                                }
+                            }
+                        }
                     }
                     if last_status.elapsed() >= Duration::from_secs(args.status_interval) {
                         let dt = last_status.elapsed().as_secs_f64();
@@ -421,6 +455,21 @@ fn main() {
                         Some(i) => i,
                         None => return,
                     };
+                    // Tab toggles the overlay; checked before egui sees the
+                    // event so it can't be swallowed for focus navigation.
+                    if let WindowEvent::KeyboardInput { event: ke, .. } = &event {
+                        if ke.state == ElementState::Pressed && ke.logical_key == Key::Named(NamedKey::Tab) {
+                            overlay.visible = !overlay.visible;
+                            return;
+                        }
+                    }
+                    // Forward everything to egui so its input state stays
+                    // fresh. Event-time consumption is NOT used to gate raw
+                    // input: egui's pointer position lags one frame, so
+                    // clicks are deferred and hit-tested during the next
+                    // frame's egui pass (see OverlayState::pending_click).
+                    let window = screens[idx].window.clone();
+                    let _ = screens[idx].egui.on_window_event(&window, &event);
                     match event {
                         WindowEvent::CloseRequested => {
                             for screen in screens.iter_mut() {
@@ -434,22 +483,14 @@ fn main() {
                         WindowEvent::CursorMoved { position, .. } => {
                             cursor_pos[idx] = (position.x as f32, position.y as f32);
                         }
-                        WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                        WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {
                             let (x, y) = cursor_pos[idx];
-                            if let Some(id) = screens[idx].tile_at(x, y) {
-                                let playing = screens
-                                    .iter()
-                                    .any(|s| s.tiles.iter().any(|t| t.id == id && !t.is_paused()));
-                                if playing {
-                                    pause_and_release(&mut screens, &mut budget, id, "user pause");
-                                } else {
-                                    resume_tile(&mut screens, &mut budget, id);
-                                }
-                            }
-                        }
-                        WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
-                            let (x, y) = cursor_pos[idx];
-                            screens[idx].click_mute(x, y);
+                            overlay.pending_click = Some(overlay::PendingClick {
+                                window_id: window_id,
+                                x,
+                                y,
+                                right: button == MouseButton::Right,
+                            });
                         }
                         WindowEvent::KeyboardInput { event: key_event, .. } => {
                             if key_event.state == ElementState::Pressed {
@@ -562,6 +603,52 @@ fn resume_tile(screens: &mut [Screen], budget: &mut DecodeBudget, id: usize) {
         }
         Admission::RejectedMaxStreams { max } => {
             println!("tile {id}: staying paused — max streams ({max})");
+        }
+    }
+}
+
+/// Executes one queued overlay interaction. `screen_idx` is the screen whose
+/// overlay produced the action.
+fn handle_overlay_action(screens: &mut [Screen], budget: &mut DecodeBudget, action: OverlayAction, screen_idx: usize) {
+    match action {
+        OverlayAction::TogglePause { tile_id } => {
+            let playing = screens
+                .iter()
+                .any(|s| s.tiles.iter().any(|t| t.id == tile_id && !t.is_paused()));
+            if playing {
+                pause_and_release(screens, budget, tile_id, "user pause");
+            } else {
+                resume_tile(screens, budget, tile_id);
+            }
+        }
+        OverlayAction::ToggleMute { tile_id } => {
+            for screen in screens.iter_mut() {
+                if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
+                    if tile.audio_enabled() {
+                        let muted = tile.toggle_mute();
+                        println!(
+                            "screen {} tile {tile_id}: {}",
+                            screen.monitor_index,
+                            if muted { "muted".to_string() } else { format!("audio on (vol {}%)", tile.volume()) }
+                        );
+                    } else {
+                        println!("tile {tile_id}: audio disabled (start with --audio)");
+                    }
+                    return;
+                }
+            }
+        }
+        OverlayAction::PauseAll => {
+            let ids: Vec<usize> = screens[screen_idx].tiles.iter().map(|t| t.id).collect();
+            for id in ids {
+                pause_and_release(screens, budget, id, "user pause");
+            }
+        }
+        OverlayAction::ResumeAll => {
+            let ids: Vec<usize> = screens[screen_idx].tiles.iter().map(|t| t.id).collect();
+            for id in ids {
+                resume_tile(screens, budget, id);
+            }
         }
     }
 }
