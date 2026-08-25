@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tessera-mpv",
+    "crates/tessera-core",
+    "crates/tessera-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+libloading = "0.8"
+winit = "0.29"
+glutin = "0.31"
+glutin-winit = "0.4"
+glow = "0.13"
+raw-window-handle = "0.5"
+tessera-mpv = { path = "crates/tessera-mpv" }
+tessera-core = { path = "crates/tessera-core" }
+
+[profile.release]
+lto = "thin"

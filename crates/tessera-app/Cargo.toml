@@ -1,0 +1,20 @@
+[package]
+name = "tessera-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "openTessera desktop video wall"
+
+[[bin]]
+name = "opentessera"
+path = "src/main.rs"
+
+[dependencies]
+tessera-mpv = { workspace = true }
+tessera-core = { workspace = true }
+libloading = { workspace = true }
+winit = { workspace = true }
+glutin = { workspace = true }
+glutin-winit = { workspace = true }
+glow = { workspace = true }
+raw-window-handle = { workspace = true }

@@ -1,0 +1,8 @@
+[package]
+name = "tessera-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Source-agnostic media model, playback queues, layout solver, decode budget"
+
+[dependencies]
