@@ -37,6 +37,8 @@ struct Args {
     hwdec: String,
     audio: bool,
     audio_device: Option<String>,
+    ui_scale: Option<f32>,
+    cache_mb: Option<u32>,
     advance: bool,
     max_streams: usize,
     ceiling: f64,
@@ -56,6 +58,8 @@ fn parse_args() -> Result<Args, String> {
         hwdec: "auto-safe".into(),
         audio: false,
         audio_device: None,
+        ui_scale: None,
+        cache_mb: None,
         advance: false,
         max_streams: tessera_core::budget::DEFAULT_MAX_STREAMS,
         ceiling: tessera_core::budget::DEFAULT_CEILING_EQUIVALENTS,
@@ -91,6 +95,8 @@ fn parse_args() -> Result<Args, String> {
             "--jellyfin-library" => args.jellyfin_library = Some(value()?),
             "--audio" => args.audio = true,
             "--audio-device" => args.audio_device = Some(value()?),
+            "--ui-scale" => args.ui_scale = Some(value()?.parse().map_err(|_| "bad --ui-scale")?),
+            "--cache-mb" => args.cache_mb = Some(value()?.parse().map_err(|_| "bad --cache-mb")?),
             "--advance" => args.advance = true,
             "--loop" => args.advance = false,
             "-h" | "--help" => {
@@ -125,6 +131,8 @@ OPTIONS:
   --audio            Enable audio (default muted)
   --audio-device DEV mpv audio device, e.g. pulse/alsa_output.pci-...hdmi-stereo
                      (default: system default; check `pactl list sinks short`)
+  --ui-scale F       Overlay UI scale, 0.75-3.0 (default 1.0; also in settings)
+  --cache-mb N       Demuxer cache per stream in MiB (default 512; also in settings)
   --hwdec MODE       mpv hardware decode mode (default auto-safe)
   --max-streams N    Budget: max concurrent streams (default 16)
   --ceiling N        Budget: 1080p30-equivalent decode ceiling (default 96)
@@ -280,10 +288,21 @@ fn main() {
         }
     }
 
-    let tile_opts = TileOptions {
+    let mut settings = load_settings();
+    if args.audio {
+        settings.audio = true;
+    }
+    if let Some(s) = args.ui_scale {
+        settings.ui_scale = s.clamp(0.75, 3.0);
+    }
+    if let Some(c) = args.cache_mb {
+        settings.cache_mb = c.clamp(64, 8192);
+    }
+    let mut tile_opts = TileOptions {
         hwdec: args.hwdec.clone(),
-        audio: args.audio,
+        audio: settings.audio,
         audio_device: args.audio_device.clone(),
+        cache_mb: settings.cache_mb,
         loop_file: !args.advance,
         log_verbose: std::env::var("TESSERA_MPV_LOG").map(|v| v == "v").unwrap_or(false),
     };
@@ -450,8 +469,9 @@ fn main() {
                             }
                         }
                     }
+                    let settings_before = settings;
                     for screen_idx in 0..screens.len() {
-                        screens[screen_idx].tick(&mut budget, args.advance, &mut overlay, cursor_pos[screen_idx]);
+                        screens[screen_idx].tick(&mut budget, args.advance, &mut overlay, cursor_pos[screen_idx], &mut settings);
                         // UI actions from this screen's overlay: execute after
                         // the tick (pause/resume needs cross-screen budget
                         // access, which the drawing code can't have).
@@ -469,6 +489,28 @@ fn main() {
                                 &mut wm_settle_at,
                             );
                         }
+                    }
+                    // Apply settings edited in the gear panel (and persist).
+                    if settings != settings_before {
+                        if settings.audio != settings_before.audio {
+                            for screen in screens.iter_mut() {
+                                for tile in screen.tiles.iter_mut() {
+                                    tile.set_audio_enabled(settings.audio);
+                                }
+                            }
+                            tile_opts.audio = settings.audio;
+                            println!("settings: audio {}", if settings.audio { "enabled" } else { "disabled" });
+                        }
+                        if settings.cache_mb != settings_before.cache_mb {
+                            for screen in screens.iter_mut() {
+                                for tile in screen.tiles.iter_mut() {
+                                    tile.set_cache_mb(settings.cache_mb);
+                                }
+                            }
+                            tile_opts.cache_mb = settings.cache_mb;
+                            println!("settings: cache {} MiB per stream", settings.cache_mb);
+                        }
+                        save_settings(&settings);
                     }
                     // A deferred click that no egui layer claimed: execute as
                     // a raw video-wall click.
@@ -685,6 +727,53 @@ fn main() {
     println!("bye (uptime {:.1}s)", start.elapsed().as_secs_f64());
 }
 
+
+fn load_settings() -> overlay::UiSettings {
+    let mut s = overlay::UiSettings::default();
+    let path = std::env::var_os("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".config/opentessera/settings.conf"))
+        .unwrap_or_default();
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
+                let (k, v) = (k.trim(), v.trim());
+                match k {
+                    "ui_scale" => {
+                        if let Ok(f) = v.parse::<f32>() {
+                            s.ui_scale = f.clamp(0.75, 3.0);
+                        }
+                    }
+                    "cache_mb" => {
+                        if let Ok(n) = v.parse::<u32>() {
+                            s.cache_mb = n.clamp(64, 8192);
+                        }
+                    }
+                    "audio" => s.audio = v == "true" || v == "yes" || v == "on",
+                    _ => {}
+                }
+            }
+        }
+    }
+    s
+}
+
+fn save_settings(s: &overlay::UiSettings) {
+    let Some(home) = std::env::var_os("HOME") else { return };
+    let dir = std::path::PathBuf::from(home).join(".config/opentessera");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let text = format!(
+        "# openTessera settings (also editable at runtime via the gear panel)\nui_scale = {}\ncache_mb = {}\naudio = {}\n",
+        s.ui_scale, s.cache_mb, s.audio
+    );
+    let _ = std::fs::write(dir.join("settings.conf"), text);
+}
+
 fn dump_dir() -> Option<std::path::PathBuf> {
     let dir = std::path::PathBuf::from(std::env::var("TESSERA_DUMP_DIR").ok()?);
     std::fs::create_dir_all(&dir).ok()?;
@@ -866,6 +955,9 @@ fn handle_overlay_action(
         }
         OverlayAction::ToggleHelp => {
             overlay.help_open = !overlay.help_open;
+        }
+        OverlayAction::ToggleSettings => {
+            overlay.settings_open = !overlay.settings_open;
         }
         OverlayAction::ToggleWindowMode => {
             if toggle_window_mode(screens, screen_idx) {

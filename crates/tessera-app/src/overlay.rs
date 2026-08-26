@@ -38,6 +38,25 @@ pub struct OverlayState {
     pub notice: Option<(String, std::time::Instant)>,
     /// Help panel open (? or / toggles).
     pub help_open: bool,
+    /// Settings panel open (gear button).
+    pub settings_open: bool,
+}
+
+/// User-adjustable runtime settings (gear panel / settings.conf).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct UiSettings {
+    /// egui pixels-per-point multiplier for the whole overlay UI.
+    pub ui_scale: f32,
+    /// Demuxer cache size in MiB per stream.
+    pub cache_mb: u32,
+    /// Audio pipeline enabled (tiles still start muted).
+    pub audio: bool,
+}
+
+impl Default for UiSettings {
+    fn default() -> UiSettings {
+        UiSettings { ui_scale: 1.0, cache_mb: 512, audio: false }
+    }
 }
 
 #[derive(Debug)]
@@ -65,6 +84,8 @@ pub enum OverlayAction {
     /// "W" key or status-bar window button: toggle THIS screen's window
     /// between a fullscreen wall and a normal decorated window.
     ToggleWindowMode,
+    /// Gear button: show/hide the settings panel.
+    ToggleSettings,
     /// Transport fullscreen icon / F key: zoom this tile to fill its screen
     /// (toggles back).
     FullscreenToggle { tile_id: usize },
@@ -148,7 +169,7 @@ pub fn draw(
     let ppp = ctx.pixels_per_point();
 
     // Top status bar: budget, streams, evictions, play/pause-all.
-    egui::TopBottomPanel::top("tessera_status").show(ctx, |ui| {
+    let status_bar = egui::TopBottomPanel::top("tessera_status").show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.strong(format!("openTessera — screen {monitor_index}"));
             if pinned {
@@ -180,6 +201,32 @@ pub fn draw(
             ui.label(format!("streams {}/{}", budget.active, budget.max_streams));
             ui.label(format!("evictions {}", budget.evictions));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Settings toggle: painter-drawn gear — no font dependency.
+                {
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(18.0, 16.0),
+                        egui::Sense::click(),
+                    );
+                    let p = ui.painter_at(rect);
+                    let col = if resp.hovered() {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_gray(180)
+                    };
+                    let c = rect.center();
+                    let r = 5.0;
+                    let st = egui::Stroke::new(1.4, col);
+                    p.circle_stroke(c, r, st);
+                    for i in 0..8 {
+                        let a = i as f32 * std::f32::consts::FRAC_PI_4;
+                        let dir = egui::vec2(a.cos(), a.sin());
+                        p.line_segment([c + dir * (r + 1.0), c + dir * (r + 3.5)], st);
+                    }
+                    if resp.clicked() {
+                        actions.push(OverlayAction::ToggleSettings);
+                    }
+                    resp.on_hover_text("settings");
+                }
                 // Windowed-mode toggle: painter-drawn "window" icon (frame
                 // with a title bar) — no font dependency.
                 {
@@ -219,6 +266,7 @@ pub fn draw(
             });
         });
     });
+    let bar_bottom = status_bar.response.rect.bottom();
 
     // Empty screen: one big "+" so the wall can be repopulated.
     if tiles.is_empty() {
@@ -241,7 +289,11 @@ pub fn draw(
         }
         egui::Area::new(egui::Id::new(format!("tile-chip-{}", tile.id)))
             .order(egui::Order::Foreground)
-            .fixed_pos(egui::pos2(cell.x / ppp + 8.0, cell.y / ppp + 8.0))
+            .fixed_pos(egui::pos2(
+                cell.x / ppp + 8.0,
+                // Stay clear of the status bar when the tile is in the top row.
+                (cell.y / ppp + 8.0).max(bar_bottom + 6.0),
+            ))
             .show(ctx, |ui| {
                 egui::Frame::none()
                     .fill(egui::Color32::from_black_alpha(170))
@@ -552,6 +604,51 @@ pub fn draw(
     }
 }
 
+/// Settings panel (gear): UI scale, cache size, audio. Edits apply
+/// immediately — the caller diffs the settings after the frame and applies
+/// them to tiles/saves them.
+pub fn draw_settings(ctx: &egui::Context, settings: &mut UiSettings, open: &mut bool) {
+    egui::Area::new(egui::Id::new("tessera-settings"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            egui::Frame::window(ui.style())
+                .fill(egui::Color32::from_black_alpha(235))
+                .inner_margin(egui::Margin::symmetric(20.0, 14.0))
+                .show(ui, |ui| {
+                    ui.set_width(420.0);
+                    ui.heading("settings");
+                    ui.add_space(8.0);
+                    ui.label("UI scale");
+                    ui.add(
+                        egui::Slider::new(&mut settings.ui_scale, 0.75..=3.0)
+                            .step_by(0.25)
+                            .text("x"),
+                    );
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("cache per stream");
+                        ui.add(
+                            egui::DragValue::new(&mut settings.cache_mb)
+                                .clamp_range(64..=8192)
+                                .suffix(" MiB"),
+                        );
+                    });
+                    ui.add_space(4.0);
+                    let cb = ui.checkbox(&mut settings.audio, "audio enabled (tiles still start muted)");
+                    ui.add_space(6.0);
+                    ui.weak("changes apply immediately and are saved to");
+                    ui.weak("~/.config/opentessera/settings.conf");
+                    ui.add_space(8.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("close").clicked() {
+                            *open = false;
+                        }
+                    });
+                });
+        });
+}
+
 /// Keyboard/mouse help panel, centered. Drawn regardless of the overlay's
 /// auto-hide state (it stays until dismissed).
 pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
@@ -580,6 +677,7 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                                 ("↑/↓", "volume -/+5 on unmuted tiles of this screen"),
                                 ("N / P", "next / previous queue item on each tile"),
                                 ("?", "toggle this help"),
+                                ("gear / top bar", "settings: UI scale, cache, audio"),
                             ];
                             for (k, d) in keys {
                                 ui.strong(*k);

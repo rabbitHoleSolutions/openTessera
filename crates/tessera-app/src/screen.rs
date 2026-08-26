@@ -6,7 +6,7 @@ use tessera_core::{DecodeBudget, PlaybackQueue, Rect, StreamSpec};
 use winit::window::Window;
 
 use crate::compositor::Compositor;
-use crate::overlay::{self, BudgetUi, OverlayState, TileUiInfo};
+use crate::overlay::{self, BudgetUi, OverlayState, TileUiInfo, UiSettings};
 use crate::thumbs::ThumbCache;
 use crate::tile::{Tile, TileEvent};
 
@@ -131,6 +131,7 @@ impl Screen {
         advance: bool,
         overlay: &mut OverlayState,
         cursor: Option<(f32, f32)>,
+        settings: &mut UiSettings,
     ) {
         self.context.make_current(&self.surface).ok();
 
@@ -261,13 +262,20 @@ impl Screen {
         let thumbs = &mut self.thumbs;
         let notice = overlay.notice.clone();
         let mut help_open = overlay.help_open;
+        let mut settings_open = overlay.settings_open;
         let window_fullscreen = self.window.fullscreen().is_some();
         egui.run(&window, |ctx| {
+            // Scale the whole overlay UI (zoom multiplies the native ppp and
+            // persists across frames).
+            ctx.set_pixels_per_point(settings.ui_scale);
             if visible {
                 overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete);
             }
             if help_open {
                 overlay::draw_help(ctx, &mut help_open);
+            }
+            if settings_open {
+                overlay::draw_settings(ctx, settings, &mut settings_open);
             }
             if let Some(n) = &notice {
                 overlay::draw_notice(ctx, n);
@@ -287,6 +295,7 @@ impl Screen {
         });
         overlay.queue_drag = queue_drag;
         overlay.help_open = help_open;
+        overlay.settings_open = settings_open;
         overlay.confirm_delete = confirm_delete;
         if click_on_ui {
             overlay.pending_click = None;

@@ -6,6 +6,7 @@ pub struct TileOptions {
     pub hwdec: String,
     pub audio: bool,
     pub audio_device: Option<String>,
+    pub cache_mb: u32,
     pub loop_file: bool,
     pub log_verbose: bool,
 }
@@ -66,6 +67,9 @@ impl Tile {
         if opts.loop_file {
             options.push(("loop-file", "inf"));
         }
+        options.push(("cache", "yes"));
+        let cache = format!("{}MiB", opts.cache_mb);
+        options.push(("demuxer-max-bytes", &cache));
         options.push(("msg-level", if opts.log_verbose { "all=v" } else { "all=error" }));
 
         let mpv = Mpv::new(lib, &options)?;
@@ -160,6 +164,29 @@ impl Tile {
 
     pub fn audio_enabled(&self) -> bool {
         self.audio_enabled
+    }
+
+    /// Enables/disables the audio pipeline at runtime (settings panel).
+    /// Tiles keep their muted state either way.
+    pub fn set_audio_enabled(&mut self, enabled: bool) {
+        self.audio_enabled = enabled;
+        let v = if enabled { "yes" } else { "no" };
+        if let Err(e) = self.mpv.command(&["set", "audio", v]) {
+            eprintln!("tile {}: set audio failed: {e}", self.id);
+        }
+        if enabled {
+            // audio=no skipped track selection; reselect.
+            let _ = self.mpv.command(&["set", "aid", "auto"]);
+        }
+    }
+
+    /// Adjusts the demuxer cache at runtime (best effort — mpv applies it
+    /// to ongoing demuxing where it can, and fully on the next load).
+    pub fn set_cache_mb(&mut self, cache_mb: u32) {
+        let v = format!("{cache_mb}MiB");
+        if let Err(e) = self.mpv.command(&["set", "demuxer-max-bytes", &v]) {
+            eprintln!("tile {}: set cache size failed: {e}", self.id);
+        }
     }
 
     /// Polls mpv events and renders any new frame into this tile's FBO texture.
