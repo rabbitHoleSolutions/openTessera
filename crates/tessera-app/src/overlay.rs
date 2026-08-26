@@ -179,6 +179,20 @@ pub fn draw(
         });
     });
 
+    // Empty screen: one big "+" so the wall can be repopulated.
+    if tiles.is_empty() {
+        egui::Area::new(egui::Id::new("tessera-empty-add"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                let btn = egui::Button::new(egui::RichText::new("+").size(64.0))
+                    .min_size(egui::vec2(140.0, 140.0));
+                if ui.add(btn).on_hover_text("add a tile (next from queue)").clicked() {
+                    actions.push(OverlayAction::AddPanel);
+                }
+            });
+    }
+
     // Per-tile info chips, anchored at each tile's top-left corner.
     for (tile, cell) in tiles.iter().zip(cells.iter()) {
         if cell.w <= 0.0 || cell.h <= 0.0 {

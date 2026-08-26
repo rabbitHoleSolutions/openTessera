@@ -143,6 +143,7 @@ CONTROLS:
   Left/Right arrows  Seek -/+10s on all tiles of the focused screen
   N / P              Next / previous queue item on each tile of the focused screen
   F                  Fullscreen the tile under the cursor on its screen (F/Esc exits)
+  Shift-F            Toggle this window between windowed and fullscreen (whole wall)
   Esc                Exit fullscreen if zoomed; otherwise quit"
     );
 }
@@ -355,6 +356,7 @@ fn main() {
     }
 
     let mut cursor_pos: Vec<Option<(f32, f32)>> = vec![None; screens.len()];
+    let mut mods = winit::keyboard::ModifiersState::empty();
     let mut overlay = OverlayState { pinned: args.overlay, ..Default::default() };
     let mut last_input = Instant::now();
 
@@ -549,6 +551,9 @@ fn main() {
                         WindowEvent::Resized(size) => {
                             screens[idx].resize(size.width, size.height);
                         }
+                        WindowEvent::ModifiersChanged(m) => {
+                            mods = m.state();
+                        }
                         WindowEvent::CursorMoved { position, .. } => {
                             cursor_pos[idx] = Some((position.x as f32, position.y as f32));
                             last_input = Instant::now();
@@ -605,7 +610,10 @@ fn main() {
                                     Key::Named(NamedKey::ArrowRight) => {
                                         seek_screen(&mut screens[idx], 10.0);
                                     }
-                                    Key::Character(ref c) if c.eq_ignore_ascii_case("f") => {
+                                    Key::Character(ref c) if mods.shift_key() && c.eq_ignore_ascii_case("f") => {
+                                        toggle_window_fullscreen(&mut screens, idx);
+                                    }
+                                    Key::Character(ref c) if !mods.shift_key() && c.eq_ignore_ascii_case("f") => {
                                         if screens[idx].zoomed.is_some() {
                                             toggle_fullscreen(&mut screens, idx, None);
                                         } else if let Some((x, y)) = cursor_pos[idx] {
@@ -930,6 +938,47 @@ fn handle_overlay_action(
                 resume_tile(screens, budget, id);
             }
         }
+    }
+}
+
+/// Toggles the window itself between windowed and borderless-fullscreen on
+/// its current monitor — the whole wall layout, no tile zoom. The focused
+/// window only; other screens are untouched.
+fn toggle_window_fullscreen(screens: &mut [Screen], idx: usize) {
+    let screen = &mut screens[idx];
+    if screen.window.fullscreen().is_some() {
+        screen.zoomed = None;
+        screen.window.set_fullscreen(None);
+        match screen.windowed_restore.take() {
+            Some((pos, size)) => {
+                screen.window.set_outer_position(pos);
+                let _ = screen.window.request_inner_size(size);
+                screen.resize(size.width, size.height);
+            }
+            None => {
+                // Window was created fullscreen (multi-screen mode): fall
+                // back to a sensibly-sized window centered on its monitor.
+                if let Some(m) = screen.window.current_monitor() {
+                    let ms = m.size();
+                    let (w, h) = (ms.width.min(1600), ms.height.min(900));
+                    let _ = screen.window.request_inner_size(winit::dpi::PhysicalSize::new(w, h));
+                    let mp = m.position(); {
+                        let mon_size = m.size();
+                        let x = mp.x + ((mon_size.width - w) as i32) / 2;
+                        let y = mp.y + ((mon_size.height - h) as i32) / 2;
+                        screen.window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
+                    }
+                    screen.resize(w, h);
+                }
+            }
+        }
+    } else {
+        if let Ok(pos) = screen.window.outer_position() {
+            let size = screen.window.inner_size();
+            screen.windowed_restore = Some((pos, size));
+        }
+        let monitor = screen.window.current_monitor();
+        screen.window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(monitor)));
     }
 }
 

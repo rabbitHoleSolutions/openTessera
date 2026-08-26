@@ -53,7 +53,11 @@ Phase 1 skeleton — playback foundation:
   that tile to fill its screen — in windowed mode the window also goes
   borderless-fullscreen on its monitor, so other monitors and windows keep
   working; in multi-screen mode the other screens keep playing untouched.
-  F/Esc toggles back; Esc only quits when nothing is zoomed.
+  F/Esc toggles back; Esc only quits when nothing is zoomed. `Shift-F`
+  toggles the window itself between windowed and borderless fullscreen
+  (the whole wall layout, no tile zoom) — also per-screen.
+- An emptied screen (all tiles removed) shows a large centered "+" to add
+  a tile back.
 - Delete from transport: each tile's transport row has a 🗑 button that
   deletes the tile's current video at its source — the local file, or the
   server-side item (Jellyfin `DELETE /Items/{id}`, Plex
