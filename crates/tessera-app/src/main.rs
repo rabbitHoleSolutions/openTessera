@@ -491,7 +491,9 @@ fn main() {
                         }
                     }
                     // Apply settings edited in the gear panel (and persist).
-                    if settings != settings_before {
+                    // (Mid-drag scale churn is skipped; the final value
+                    // applies on release.)
+                    if settings != settings_before && !settings.scale_dragging {
                         if settings.audio != settings_before.audio {
                             for screen in screens.iter_mut() {
                                 for tile in screen.tiles.iter_mut() {

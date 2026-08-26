@@ -43,7 +43,7 @@ pub struct OverlayState {
 }
 
 /// User-adjustable runtime settings (gear panel / settings.conf).
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct UiSettings {
     /// egui pixels-per-point multiplier for the whole overlay UI.
     pub ui_scale: f32,
@@ -51,11 +51,21 @@ pub struct UiSettings {
     pub cache_mb: u32,
     /// Audio pipeline enabled (tiles still start muted).
     pub audio: bool,
+    /// Transient: the scale slider is being dragged — the UI must NOT
+    /// re-scale mid-drag (the slider would run away from the pointer).
+    /// Excluded from equality/persistence.
+    pub scale_dragging: bool,
+}
+
+impl PartialEq for UiSettings {
+    fn eq(&self, other: &Self) -> bool {
+        self.ui_scale == other.ui_scale && self.cache_mb == other.cache_mb && self.audio == other.audio
+    }
 }
 
 impl Default for UiSettings {
     fn default() -> UiSettings {
-        UiSettings { ui_scale: 1.0, cache_mb: 512, audio: false }
+        UiSettings { ui_scale: 1.0, cache_mb: 512, audio: false, scale_dragging: false }
     }
 }
 
@@ -430,7 +440,7 @@ pub fn draw(
                             }
                             zresp.on_hover_text("fullscreen this tile (F)");
                             // Panel management: remove this tile / add one.
-                            if b(ui, "−", 20.0).on_hover_text("remove this tile").clicked() {
+                            if b(ui, "-", 20.0).on_hover_text("remove this tile").clicked() {
                                 actions.push(OverlayAction::RemovePanel { tile_id: tile.id });
                             }
                             if b(ui, "+", 20.0).on_hover_text("add a tile (next from queue)").clicked() {
@@ -494,7 +504,7 @@ pub fn draw(
                                 if ui.small_button("🔀").clicked() {
                                     actions.push(OverlayAction::QueueShuffle);
                                 }
-                                if ui.small_button("A–Z").clicked() {
+                                if ui.small_button("A-Z").clicked() {
                                     actions.push(OverlayAction::QueueSortName);
                                 }
                                 ui.separator();
@@ -609,7 +619,7 @@ pub fn draw(
 /// them to tiles/saves them.
 pub fn draw_settings(ctx: &egui::Context, settings: &mut UiSettings, open: &mut bool) {
     egui::Area::new(egui::Id::new("tessera-settings"))
-        .order(egui::Order::Foreground)
+        .order(egui::Order::Tooltip)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             egui::Frame::window(ui.style())
@@ -620,11 +630,14 @@ pub fn draw_settings(ctx: &egui::Context, settings: &mut UiSettings, open: &mut 
                     ui.heading("settings");
                     ui.add_space(8.0);
                     ui.label("UI scale");
-                    ui.add(
+                    let slider = ui.add(
                         egui::Slider::new(&mut settings.ui_scale, 0.75..=3.0)
                             .step_by(0.25)
                             .text("x"),
                     );
+                    // Freeze the scale while dragging so the slider doesn't
+                    // move under the pointer; applied on release.
+                    settings.scale_dragging = slider.dragged();
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.label("cache per stream");
@@ -635,7 +648,7 @@ pub fn draw_settings(ctx: &egui::Context, settings: &mut UiSettings, open: &mut 
                         );
                     });
                     ui.add_space(4.0);
-                    let cb = ui.checkbox(&mut settings.audio, "audio enabled (tiles still start muted)");
+                    ui.checkbox(&mut settings.audio, "audio enabled (tiles still start muted)");
                     ui.add_space(6.0);
                     ui.weak("changes apply immediately and are saved to");
                     ui.weak("~/.config/opentessera/settings.conf");
@@ -653,7 +666,7 @@ pub fn draw_settings(ctx: &egui::Context, settings: &mut UiSettings, open: &mut 
 /// auto-hide state (it stays until dismissed).
 pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
     egui::Area::new(egui::Id::new("tessera-help"))
-        .order(egui::Order::Foreground)
+        .order(egui::Order::Tooltip)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             egui::Frame::window(ui.style())
@@ -673,8 +686,8 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                                 ("Space", "pause/resume all tiles on this screen"),
                                 ("F", "fullscreen the tile under the cursor"),
                                 ("W", "toggle this screen: fullscreen wall <-> window"),
-                                ("←/→", "seek -/+10s on all tiles of this screen"),
-                                ("↑/↓", "volume -/+5 on unmuted tiles of this screen"),
+                                ("Left / Right", "seek -/+10s on all tiles of this screen"),
+                                ("Up / Down", "volume -/+5 on unmuted tiles of this screen"),
                                 ("N / P", "next / previous queue item on each tile"),
                                 ("?", "toggle this help"),
                                 ("gear / top bar", "settings: UI scale, cache, audio"),
@@ -700,7 +713,7 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                                 ("click thumb", "play that item on the hovered tile"),
                                 ("right-click thumb", "remove it from the queue"),
                                 ("drag thumb", "reorder the queue"),
-                                ("transport row", "⏮ ⏪ ⏩ ⏭ seek · scrub bar · ⛶ fullscreen · −/+ tiles · 🗑 delete (click twice)"),
+                                ("transport row", "⏮ ⏪ ⏩ ⏭ seek · scrub bar · ⛶ fullscreen · -/+ tiles · 🗑 delete (click twice)"),
                             ];
                             for (k, d) in mouse {
                                 ui.strong(*k);
@@ -733,7 +746,7 @@ pub fn draw_notice(ctx: &egui::Context, notice: &(String, std::time::Instant)) {
         1.0
     };
     egui::Area::new(egui::Id::new("tessera-notice"))
-        .order(egui::Order::Foreground)
+        .order(egui::Order::Tooltip)
         .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 44.0))
         .show(ctx, |ui| {
             egui::Frame::none()

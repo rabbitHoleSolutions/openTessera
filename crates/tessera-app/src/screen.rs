@@ -266,8 +266,11 @@ impl Screen {
         let window_fullscreen = self.window.fullscreen().is_some();
         egui.run(&window, |ctx| {
             // Scale the whole overlay UI (zoom multiplies the native ppp and
-            // persists across frames).
-            ctx.set_pixels_per_point(settings.ui_scale);
+            // persists across frames). Not while the scale slider is being
+            // dragged — re-scaling mid-drag makes the slider run away.
+            if !settings.scale_dragging {
+                ctx.set_pixels_per_point(settings.ui_scale);
+            }
             if visible {
                 overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete);
             }
