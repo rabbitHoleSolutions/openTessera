@@ -141,6 +141,11 @@ pub struct MpvLib {
     terminate_destroy: unsafe extern "C" fn(MpvHandlePtr),
     set_option_string: unsafe extern "C" fn(MpvHandlePtr, *const c_char, *const c_char) -> c_int,
     command: unsafe extern "C" fn(MpvHandlePtr, *const *const c_char) -> c_int,
+    // NB: mpv's ABI here puts reply_userdata SECOND (client.h 0.34:
+    // int mpv_command_async(mpv_handle*, uint64_t reply_userdata,
+    //                       const char **args)) — passing args/userdata in
+    // the documented-in-my-head order segfaults inside libmpv.
+    command_async: unsafe extern "C" fn(MpvHandlePtr, u64, *const *const c_char) -> c_int,
     get_property: unsafe extern "C" fn(MpvHandlePtr, *const c_char, c_int, *mut c_void) -> c_int,
     free: unsafe extern "C" fn(*mut c_void),
     client_api_version: unsafe extern "C" fn() -> u64,
@@ -170,6 +175,7 @@ impl MpvLib {
                 terminate_destroy: sym!(lib, mpv_terminate_destroy),
                 set_option_string: sym!(lib, mpv_set_option_string),
                 command: sym!(lib, mpv_command),
+                command_async: sym!(lib, mpv_command_async),
                 get_property: sym!(lib, mpv_get_property),
                 free: sym!(lib, mpv_free),
                 client_api_version: sym!(lib, mpv_client_api_version),
@@ -245,6 +251,29 @@ impl Mpv {
         } else {
             Ok(())
         }
+    }
+
+    /// Queues a command for asynchronous execution. Returns once the
+    /// command is queued (not completed) — the reply event is ignored.
+    /// Use for anything that can block on I/O (seeks, loads), so the
+    /// render loop never stalls.
+    pub fn command_async(&self, args: &[&str]) -> Result<(), Error> {
+        let cstrs: Vec<CString> = args
+            .iter()
+            .map(|s| CString::new(*s).map_err(|_| Error::Mpv(-4, "command contains NUL".into())))
+            .collect::<Result<_, _>>()?;
+        let mut ptrs: Vec<*const c_char> = cstrs.iter().map(|c| c.as_ptr()).collect();
+        ptrs.push(std::ptr::null());
+        let r = unsafe { (self.lib.command_async)(self.handle, 0, ptrs.as_ptr()) };
+        if r < 0 {
+            Err(Error::Mpv(r, error_name(r).into()))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn load_file_async(&self, path: &str, mode: &str) -> Result<(), Error> {
+        self.command_async(&["loadfile", path, mode])
     }
 
     pub fn load_file(&self, path: &str, mode: &str) -> Result<(), Error> {

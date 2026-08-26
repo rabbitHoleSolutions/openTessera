@@ -249,9 +249,13 @@ impl Screen {
         let egui = &mut self.egui;
         let thumbs = &mut self.thumbs;
         let notice = overlay.notice.clone();
+        let mut help_open = overlay.help_open;
         egui.run(&window, |ctx| {
             if visible {
                 overlay::draw(ctx, monitor_index, pinned, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete);
+            }
+            if help_open {
+                overlay::draw_help(ctx, &mut help_open);
             }
             if let Some(n) = &notice {
                 overlay::draw_notice(ctx, n);
@@ -270,6 +274,7 @@ impl Screen {
             }
         });
         overlay.queue_drag = queue_drag;
+        overlay.help_open = help_open;
         overlay.confirm_delete = confirm_delete;
         if click_on_ui {
             overlay.pending_click = None;
@@ -430,13 +435,17 @@ impl Screen {
         }
     }
 
-    pub fn destroy(&mut self) {
+    /// Frees all GL resources (must run on this screen's GL context) and
+    /// hands the tiles back so their mpv instances can be terminated in
+    /// parallel (see main's shutdown path) — serial mpv teardown is what
+    /// made quitting slow.
+    pub fn destroy(&mut self) -> Vec<Tile> {
         self.context.make_current(&self.surface).ok();
         for tile in self.tiles.iter_mut() {
             tile.destroy_gl(&self.gl);
         }
-        self.tiles.clear();
         self.compositor.destroy(&self.gl);
         self.egui.destroy();
+        std::mem::take(&mut self.tiles)
     }
 }

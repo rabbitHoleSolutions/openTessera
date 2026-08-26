@@ -36,6 +36,8 @@ pub struct OverlayState {
     /// Transient on-screen feedback (shown a few seconds even while the
     /// rest of the overlay is hidden).
     pub notice: Option<(String, std::time::Instant)>,
+    /// Help panel open (? or / toggles).
+    pub help_open: bool,
 }
 
 #[derive(Debug)]
@@ -59,6 +61,8 @@ pub enum OverlayAction {
     DeleteCurrent { tile_id: usize },
     /// Transport "+": add a tile to this screen, taking the next queue item.
     AddPanel,
+    /// "?" key or status-bar button: show/hide the help panel.
+    ToggleHelp,
     /// Transport fullscreen icon / F key: zoom this tile to fill its screen
     /// (toggles back).
     FullscreenToggle { tile_id: usize },
@@ -170,6 +174,9 @@ pub fn draw(
             ui.label(format!("streams {}/{}", budget.active, budget.max_streams));
             ui.label(format!("evictions {}", budget.evictions));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("?").on_hover_text("keyboard & mouse help").clicked() {
+                    actions.push(OverlayAction::ToggleHelp);
+                }
                 let any_playing = tiles.iter().any(|t| !t.paused);
                 let label = if any_playing { "⏸ pause all" } else { "▶ play all" };
                 if ui.small_button(label).clicked() {
@@ -488,6 +495,75 @@ pub fn draw(
                 });
         }
     }
+}
+
+/// Keyboard/mouse help panel, centered. Drawn regardless of the overlay's
+/// auto-hide state (it stays until dismissed).
+pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
+    egui::Area::new(egui::Id::new("tessera-help"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            egui::Frame::window(ui.style())
+                .fill(egui::Color32::from_black_alpha(235))
+                .inner_margin(egui::Margin::symmetric(20.0, 14.0))
+                .show(ui, |ui| {
+                    ui.set_width(520.0);
+                    ui.heading("openTessera — keyboard & mouse");
+                    ui.add_space(6.0);
+                    egui::Grid::new("help-keys")
+                        .num_columns(2)
+                        .spacing(egui::vec2(16.0, 4.0))
+                        .show(ui, |ui| {
+                            let keys: &[(&str, &str)] = &[
+                                ("Esc", "exit fullscreen; otherwise quit"),
+                                ("Tab", "pin/unpin the overlay (auto-hides after 5s idle)"),
+                                ("Space", "pause/resume all tiles on this screen"),
+                                ("F", "fullscreen the tile under the cursor"),
+                                ("Shift-F", "toggle this window: windowed <-> fullscreen"),
+                                ("←/→", "seek -/+10s on all tiles of this screen"),
+                                ("↑/↓", "volume -/+5 on unmuted tiles of this screen"),
+                                ("N / P", "next / previous queue item on each tile"),
+                                ("?", "toggle this help"),
+                            ];
+                            for (k, d) in keys {
+                                ui.strong(*k);
+                                ui.label(*d);
+                                ui.end_row();
+                            }
+                        });
+                    ui.add_space(4.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("mouse").strong());
+                    egui::Grid::new("help-mouse")
+                        .num_columns(2)
+                        .spacing(egui::vec2(16.0, 4.0))
+                        .show(ui, |ui| {
+                            let mouse: &[(&str, &str)] = &[
+                                ("click tile", "pause/resume that tile"),
+                                ("right-click tile", "mute/unmute audio (needs --audio)"),
+                                ("hover tile", "show the queue strip at its bottom"),
+                                ("click thumb", "play that item on the hovered tile"),
+                                ("right-click thumb", "remove it from the queue"),
+                                ("drag thumb", "reorder the queue"),
+                                ("transport row", "⏮ ⏪ ⏩ ⏭ seek · scrub bar · ⛶ fullscreen · −/+ tiles · 🗑 delete (click twice)"),
+                            ];
+                            for (k, d) in mouse {
+                                ui.strong(*k);
+                                ui.label(*d);
+                                ui.end_row();
+                            }
+                        });
+                    ui.add_space(8.0);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("close").clicked() {
+                            *open = false;
+                        }
+                        ui.weak("? or / also closes");
+                    });
+                });
+        });
 }
 
 /// Transient feedback toast, top-center. Drawn even while the rest of the

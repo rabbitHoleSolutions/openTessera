@@ -543,9 +543,7 @@ fn main() {
                     let _ = screens[idx].egui.on_window_event(&window, &event);
                     match event {
                         WindowEvent::CloseRequested => {
-                            for screen in screens.iter_mut() {
-                                screen.destroy();
-                            }
+                            shutdown(&mut screens);
                             target.exit();
                         }
                         WindowEvent::Resized(size) => {
@@ -579,9 +577,7 @@ fn main() {
                                             // when nothing is zoomed.
                                             toggle_fullscreen(&mut screens, idx, None);
                                         } else {
-                                            for screen in screens.iter_mut() {
-                                                screen.destroy();
-                                            }
+                                            shutdown(&mut screens);
                                             target.exit();
                                         }
                                     }
@@ -623,6 +619,9 @@ fn main() {
                                                 println!("F: no tile under the cursor");
                                             }
                                         }
+                                    }
+                                    Key::Character(ref c) if c == "?" || c == "/" => {
+                                        overlay.help_open = !overlay.help_open;
                                     }
                                     Key::Character(ref c) if c.eq_ignore_ascii_case("n") => {
                                         let ids: Vec<usize> = screens[idx].tiles.iter().map(|t| t.id).collect();
@@ -829,6 +828,9 @@ fn handle_overlay_action(
                 break;
             }
         }
+        OverlayAction::ToggleHelp => {
+            overlay.help_open = !overlay.help_open;
+        }
         OverlayAction::AddPanel => {
             let monitor_index = screens[screen_idx].monitor_index;
             if screens[screen_idx].zoomed.is_some() {
@@ -939,6 +941,23 @@ fn handle_overlay_action(
             }
         }
     }
+}
+
+/// Tears the wall down: GL resources are freed per-screen on their own GL
+/// contexts (fast), then every tile's mpv instance is terminated in
+/// parallel — serial teardown was what made quitting slow.
+fn shutdown(screens: &mut [Screen]) {
+    let start = Instant::now();
+    let mut tiles = Vec::new();
+    for screen in screens.iter_mut() {
+        tiles.extend(screen.destroy());
+    }
+    std::thread::scope(|scope| {
+        for tile in tiles {
+            scope.spawn(move || drop(tile));
+        }
+    });
+    println!("shutdown in {:.2}s", start.elapsed().as_secs_f64());
 }
 
 /// Toggles the window itself between windowed and borderless-fullscreen on

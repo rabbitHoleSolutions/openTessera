@@ -14,6 +14,10 @@ pub enum TileEvent {
     Loaded { width: u32, height: u32, fps: f64, codec: String },
 }
 
+// The mpv client API is fully thread-safe; GL resources are destroyed via
+// destroy_gl before tiles are handed to another thread (parallel shutdown).
+unsafe impl Send for Tile {}
+
 pub struct Tile {
     pub render: RenderContext,
     pub mpv: Mpv,
@@ -83,7 +87,9 @@ impl Tile {
     }
 
     pub fn load(&self, item: &MediaItem) -> Result<(), tessera_mpv::Error> {
-        self.mpv.load_file(&item.uri, "replace")
+        // Async: opening a file can block on I/O (network sources), which
+        // would stall the whole render loop.
+        self.mpv.load_file_async(&item.uri, "replace")
     }
 
     pub fn set_paused(&self, paused: bool) {
@@ -95,11 +101,13 @@ impl Tile {
     /// Seeks the stream. `absolute` targets a position from the start;
     /// otherwise `seconds` is relative to the current position.
     pub fn seek(&self, seconds: f64, absolute: bool) {
+        // Async: a seek flushes the demuxer (and re-requests over HTTP for
+        // remote sources) — synchronous seeks stall every tile's playback.
         let v = format!("{seconds:.3}");
         let r = if absolute {
-            self.mpv.command(&["seek", &v, "absolute"])
+            self.mpv.command_async(&["seek", &v, "absolute"])
         } else {
-            self.mpv.command(&["seek", &v])
+            self.mpv.command_async(&["seek", &v])
         };
         if let Err(e) = r {
             eprintln!("tile {}: seek failed: {e}", self.id);

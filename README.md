@@ -131,8 +131,11 @@ to unmute/mute it
 selectively audible, not a cacophony), `Up`/`Down` adjust volume of unmuted
 tiles on the focused screen.
 
-Status (playback rate per tile, composited fps, hwdec mode, decoder drops,
-budget utilization) prints every 5 seconds; adjust with `--status-interval`.
+Seeks and file loads are issued asynchronously (mpv's async command API), so
+skipping one tile never stalls the others; quit tears down all mpv instances
+in parallel. Status (playback rate per tile, composited fps, hwdec mode,
+decoder drops, budget utilization) prints every 5 seconds; adjust with
+`--status-interval`.
 
 Env vars: `TESSERA_VSYNC=1` enable vsync (off by default — an X11 swap stall
 was observed with vsync on occluded windows), `TESSERA_MPV_LIB` path to libmpv,
