@@ -348,6 +348,30 @@ fn jellyfin_items_from_query(json: &Value, base: &str, api_key: &str) -> Vec<Med
     items
 }
 
+/// Deletes a media item at its source: removes the local file, or issues
+/// the server's delete API (Jellyfin `DELETE /Items/{id}`, Plex
+/// `DELETE /library/metadata/{ratingKey}/delete`).
+pub fn delete_item(item: &MediaItem) -> Result<(), String> {
+    match item.kind {
+        SourceKind::Local => std::fs::remove_file(&item.uri).map_err(|e| e.to_string()),
+        SourceKind::Jellyfin => {
+            let cfg = SourceConfig::load();
+            let srv = cfg.jellyfin.ok_or("jellyfin server not configured")?;
+            let id = item.id.strip_prefix("jellyfin|").ok_or("bad jellyfin item id")?;
+            let url = format!("{}/Items/{id}?api_key={}", srv.url, srv.token);
+            ureq::delete(&url).call().map(|_| ()).map_err(|e| e.to_string())
+        }
+        SourceKind::Plex => {
+            let cfg = SourceConfig::load();
+            let srv = cfg.plex.ok_or("plex server not configured")?;
+            let key = item.id.strip_prefix("plex|").ok_or("bad plex item id")?;
+            let url = format!("{}/library/metadata/{key}/delete?X-Plex-Token={}", srv.url, srv.token);
+            ureq::delete(&url).call().map(|_| ()).map_err(|e| e.to_string())
+        }
+        SourceKind::Smb => Err("smb delete not supported (mount it locally instead)".into()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests (JSON mapping is pure; no server needed)
 // ---------------------------------------------------------------------------
@@ -417,6 +441,19 @@ mod tests {
             it.thumb_url.as_deref(),
             Some("http://x:8096/Items/abc123/Images/Primary?maxWidth=160&quality=90&api_key=key")
         );
+    }
+
+    #[test]
+    fn delete_local_item_removes_file() {
+        let dir = std::env::temp_dir().join(format!("tessera-del-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("doomed.mp4");
+        std::fs::write(&path, b"not really a video").unwrap();
+        let item = crate::MediaItem::from_path(&path);
+        assert!(path.exists());
+        delete_item(&item).unwrap();
+        assert!(!path.exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

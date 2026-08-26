@@ -118,6 +118,24 @@ impl PlaybackQueue {
         }
     }
 
+    /// Removes the item with this id from anywhere in the queue (history,
+    /// current, or pending), adjusting the cursor so the next advance still
+    /// yields a fresh item. Returns the removed item.
+    pub fn remove_item(&mut self, id: &str) -> Option<MediaItem> {
+        let idx = self.items.iter().position(|m| m.id == id)?;
+        let item = self.items.remove(idx);
+        if let Some(c) = self.cursor.as_mut() {
+            if *c > idx {
+                *c -= 1;
+            } else if *c == idx {
+                // Point at the item before the removed one so the next
+                // advance lands on the item that followed it.
+                *c = if idx == 0 { self.items.len().saturating_sub(1) } else { idx - 1 };
+            }
+        }
+        Some(item)
+    }
+
     /// Reorders within the pending tail: the item at `from` is inserted
     /// immediately before the item currently at `to`.
     pub fn move_pending(&mut self, from: usize, to: usize) {
@@ -290,6 +308,23 @@ mod tests {
         q.move_pending(1, 3);
         q.move_pending(2, 1);
         assert_eq!(q.items().iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), vec!["a", "b", "c", "d", "e"]);
+    }
+
+    #[test]
+    fn remove_item_adjusts_cursor() {
+        let mut q = filled(); // [a b c d e], cursor=1 ("b")
+        // remove pending "d": cursor unchanged
+        let it = q.remove_item(&"local|/tmp/d.mp4".to_string()).map(|m| m.title).unwrap();
+        assert_eq!(it, "d");
+        assert_eq!(q.items().iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), vec!["a", "b", "c", "e"]);
+        assert_eq!(q.current().unwrap().title, "b");
+        // remove history "a": cursor shifts down
+        q.remove_item(&"local|/tmp/a.mp4".to_string());
+        assert_eq!(q.items().iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), vec!["b", "c", "e"]);
+        assert_eq!(q.current().unwrap().title, "b");
+        // remove current "b": cursor points at previous, next advance -> "c"
+        q.remove_item(&"local|/tmp/b.mp4".to_string());
+        assert_eq!(q.advance().unwrap().title, "c");
     }
 
     #[test]

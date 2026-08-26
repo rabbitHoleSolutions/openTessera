@@ -777,6 +777,9 @@ fn handle_overlay_action(screens: &mut [Screen], budget: &mut DecodeBudget, acti
                 break;
             }
         }
+        OverlayAction::DeleteCurrent { tile_id } => {
+            delete_current(screens, screen_idx, tile_id);
+        }
         OverlayAction::QueueRemove { index } => {
             let monitor_index = screens[screen_idx].monitor_index;
             let q = &mut screens[screen_idx].queue;
@@ -813,6 +816,30 @@ fn handle_overlay_action(screens: &mut [Screen], budget: &mut DecodeBudget, acti
             }
         }
     }
+}
+
+/// Deletes the tile's current video at its source (local file, or the
+/// server's delete API), drops it from the queue, and advances the tile to
+/// the next item.
+fn delete_current(screens: &mut [Screen], screen_idx: usize, tile_id: usize) {
+    let Some(tile) = screens[screen_idx].tiles.iter().find(|t| t.id == tile_id) else {
+        return;
+    };
+    let item = tile.item.clone();
+    let monitor_index = screens[screen_idx].monitor_index;
+    match tessera_core::sources::delete_item(&item) {
+        Ok(()) => println!(
+            "screen {monitor_index} tile {tile_id}: deleted \"{}\" ({})",
+            item.title,
+            item.kind.label()
+        ),
+        Err(e) => {
+            eprintln!("screen {monitor_index} tile {tile_id}: delete failed: {e}");
+            return;
+        }
+    }
+    screens[screen_idx].queue.remove_item(&item.id);
+    tile_next(screens, tile_id, true);
 }
 
 /// Loads the next (or previous) queue item onto the tile, advancing the
