@@ -44,7 +44,6 @@ pub struct OverlayState {
 pub enum OverlayAction {
     /// Click on a tile chip: pause if playing, resume (budget-aware) if paused.
     TogglePause { tile_id: usize },
-    ToggleMute { tile_id: usize },
     /// Scrub bar released (or clicked): seek to an absolute position.
     SeekTo { tile_id: usize, to: f64 },
     /// Relative seek, e.g. +/-10s buttons.
@@ -72,6 +71,9 @@ pub enum OverlayAction {
     /// Transport "−": remove this tile from its screen (other screens are
     /// untouched).
     RemovePanel { tile_id: usize },
+    /// Mute button on a tile chip: toggles mute, or explains why audio is
+    /// unavailable (started without --audio).
+    MuteButton { tile_id: usize },
     /// Queue drag reorder: insert `from` before `to`.
     QueueReorder { from: usize, to: usize },
     /// Reshuffle the pending queue tail.
@@ -270,11 +272,32 @@ pub fn draw(
                             if label.clicked() {
                                 actions.push(OverlayAction::TogglePause { tile_id: tile.id });
                             }
-                            if tile.audio_enabled {
-                                let icon = if tile.muted { "🔇" } else { "🔊" };
-                                if ui.small_button(icon).clicked() {
-                                    actions.push(OverlayAction::ToggleMute { tile_id: tile.id });
+                            // Always-visible mute button with state.
+                            {
+                                let (icon, fill) = if !tile.audio_enabled {
+                                    // Audio pipeline off: gray speaker.
+                                    (egui::RichText::new("🔇").weak(), None)
+                                } else if tile.muted {
+                                    (egui::RichText::new("🔇").color(egui::Color32::from_rgb(240, 110, 110)), Some(egui::Color32::from_rgba_unmultiplied(120, 40, 40, 90)))
+                                } else {
+                                    (egui::RichText::new("🔊").color(egui::Color32::from_rgb(130, 220, 140)), None)
+                                };
+                                let mut btn = egui::Button::new(icon.small()).min_size(egui::vec2(24.0, 16.0));
+                                if let Some(f) = fill {
+                                    btn = btn.fill(f);
                                 }
+                                let resp = ui.add(btn);
+                                if resp.clicked() {
+                                    actions.push(OverlayAction::MuteButton { tile_id: tile.id });
+                                }
+                                let tip = if !tile.audio_enabled {
+                                    "audio is off — start opentessera with --audio".to_string()
+                                } else if tile.muted {
+                                    "muted — click to unmute (right-click video also works)".to_string()
+                                } else {
+                                    "playing — click to mute".to_string()
+                                };
+                                resp.on_hover_text(tip);
                             }
                         });
                         // Transport row: prev, -10s, +10s, next, scrub, time.

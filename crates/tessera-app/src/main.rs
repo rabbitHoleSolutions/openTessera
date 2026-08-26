@@ -36,6 +36,7 @@ struct Args {
     screens: ScreenSel,
     hwdec: String,
     audio: bool,
+    audio_device: Option<String>,
     advance: bool,
     max_streams: usize,
     ceiling: f64,
@@ -54,6 +55,7 @@ fn parse_args() -> Result<Args, String> {
         screens: ScreenSel::All,
         hwdec: "auto-safe".into(),
         audio: false,
+        audio_device: None,
         advance: false,
         max_streams: tessera_core::budget::DEFAULT_MAX_STREAMS,
         ceiling: tessera_core::budget::DEFAULT_CEILING_EQUIVALENTS,
@@ -88,6 +90,7 @@ fn parse_args() -> Result<Args, String> {
             "--plex-library" => args.plex_library = Some(value()?),
             "--jellyfin-library" => args.jellyfin_library = Some(value()?),
             "--audio" => args.audio = true,
+            "--audio-device" => args.audio_device = Some(value()?),
             "--advance" => args.advance = true,
             "--loop" => args.advance = false,
             "-h" | "--help" => {
@@ -120,6 +123,8 @@ OPTIONS:
   --windowed WxH     Single windowed window instead of fullscreen
   --advance          Advance to the next queue item on end (default: loop)
   --audio            Enable audio (default muted)
+  --audio-device DEV mpv audio device, e.g. pulse/alsa_output.pci-...hdmi-stereo
+                     (default: system default; check `pactl list sinks short`)
   --hwdec MODE       mpv hardware decode mode (default auto-safe)
   --max-streams N    Budget: max concurrent streams (default 16)
   --ceiling N        Budget: 1080p30-equivalent decode ceiling (default 96)
@@ -278,6 +283,7 @@ fn main() {
     let tile_opts = TileOptions {
         hwdec: args.hwdec.clone(),
         audio: args.audio,
+        audio_device: args.audio_device.clone(),
         loop_file: !args.advance,
         log_verbose: std::env::var("TESSERA_MPV_LOG").map(|v| v == "v").unwrap_or(false),
     };
@@ -781,7 +787,7 @@ fn handle_overlay_action(
                 resume_tile(screens, budget, tile_id);
             }
         }
-        OverlayAction::ToggleMute { tile_id } => {
+        OverlayAction::MuteButton { tile_id } => {
             for screen in screens.iter_mut() {
                 if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
                     if tile.audio_enabled() {
@@ -792,7 +798,7 @@ fn handle_overlay_action(
                             if muted { "muted".to_string() } else { format!("audio on (vol {}%)", tile.volume()) }
                         );
                     } else {
-                        println!("tile {tile_id}: audio disabled (start with --audio)");
+                        notify(overlay, "audio is off — restart with --audio to enable sound".into());
                     }
                     return;
                 }

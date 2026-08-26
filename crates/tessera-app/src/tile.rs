@@ -5,6 +5,7 @@ use tessera_mpv::{Mpv, MpvEvent, RenderContext};
 pub struct TileOptions {
     pub hwdec: String,
     pub audio: bool,
+    pub audio_device: Option<String>,
     pub loop_file: bool,
     pub log_verbose: bool,
 }
@@ -56,6 +57,9 @@ impl Tile {
             // wall with N simultaneous streams is noise; right-click unmutes
             // an individual tile, mirroring the Quest app's per-tile mute.
             options.push(("mute", "yes"));
+            if let Some(dev) = &opts.audio_device {
+                options.push(("audio-device", dev));
+            }
         } else {
             options.push(("audio", "no"));
         }
