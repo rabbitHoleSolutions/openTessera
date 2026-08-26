@@ -63,6 +63,9 @@ pub enum OverlayAction {
     AddPanel,
     /// "?" key or status-bar button: show/hide the help panel.
     ToggleHelp,
+    /// "W" key or status-bar window button: toggle ALL screens between
+    /// fullscreen walls and normal decorated windows.
+    ToggleWindowed,
     /// Transport fullscreen icon / F key: zoom this tile to fill its screen
     /// (toggles back).
     FullscreenToggle { tile_id: usize },
@@ -174,6 +177,28 @@ pub fn draw(
             ui.label(format!("streams {}/{}", budget.active, budget.max_streams));
             ui.label(format!("evictions {}", budget.evictions));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Windowed-mode toggle: painter-drawn "window" icon (frame
+                // with a title bar) — no font dependency.
+                {
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(18.0, 16.0),
+                        egui::Sense::click(),
+                    );
+                    let p = ui.painter_at(rect);
+                    let col = if resp.hovered() {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_gray(180)
+                    };
+                    let r = rect.shrink(2.0);
+                    let bar = egui::Rect::from_min_max(r.left_top(), egui::pos2(r.right(), r.top() + 5.0));
+                    p.rect_filled(bar, egui::Rounding::same(1.5), col);
+                    p.rect_stroke(r, egui::Rounding::same(1.5), egui::Stroke::new(1.4, col));
+                    if resp.clicked() {
+                        actions.push(OverlayAction::ToggleWindowed);
+                    }
+                    resp.on_hover_text("windowed mode (W): all screens become normal windows");
+                }
                 if ui.small_button("?").on_hover_text("keyboard & mouse help").clicked() {
                     actions.push(OverlayAction::ToggleHelp);
                 }
@@ -520,7 +545,7 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                                 ("Tab", "pin/unpin the overlay (auto-hides after 5s idle)"),
                                 ("Space", "pause/resume all tiles on this screen"),
                                 ("F", "fullscreen the tile under the cursor"),
-                                ("Shift-F", "toggle this window: windowed <-> fullscreen"),
+                                ("W", "windowed mode: all screens become normal windows"),
                                 ("←/→", "seek -/+10s on all tiles of this screen"),
                                 ("↑/↓", "volume -/+5 on unmuted tiles of this screen"),
                                 ("N / P", "next / previous queue item on each tile"),
