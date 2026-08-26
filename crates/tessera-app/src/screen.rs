@@ -204,6 +204,7 @@ impl Screen {
         let visible = overlay.visible;
         let pinned = overlay.pinned;
         let mut queue_drag = overlay.queue_drag;
+        let mut confirm_remove = overlay.confirm_remove.clone();
         let mut actions = Vec::new();
         let pending_here = overlay
             .pending_click
@@ -216,7 +217,7 @@ impl Screen {
         let thumbs = &mut self.thumbs;
         egui.run(&window, |ctx| {
             if visible {
-                overlay::draw(ctx, monitor_index, pinned, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, thumbs, &mut actions, &mut queue_drag);
+                overlay::draw(ctx, monitor_index, pinned, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, thumbs, &mut actions, &mut queue_drag, &mut confirm_remove);
             }
             if let Some(pc) = pending_here {
                 // Frame-fresh verdict with the exact click position: if any
@@ -232,6 +233,7 @@ impl Screen {
             }
         });
         overlay.queue_drag = queue_drag;
+        overlay.confirm_remove = confirm_remove;
         if click_on_ui {
             overlay.pending_click = None;
         }

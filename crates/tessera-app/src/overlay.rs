@@ -29,6 +29,9 @@ pub struct OverlayState {
     pub pending_click: Option<PendingClick>,
     /// Queue strip drag in progress: the source entry's queue index.
     pub queue_drag: Option<usize>,
+    /// Queue remove confirmation armed: (item id, armed at). Clicking the
+    /// trash a second time within CONFIRM_SECS removes the item.
+    pub confirm_remove: Option<(String, std::time::Instant)>,
 }
 
 #[derive(Debug)]
@@ -114,7 +117,9 @@ pub fn draw(
     thumbs: &mut ThumbCache,
     actions: &mut Vec<OverlayAction>,
     queue_drag: &mut Option<usize>,
+    confirm_remove: &mut Option<(String, std::time::Instant)>,
 ) {
+    const CONFIRM_SECS: f64 = 4.0;
     let ppp = ctx.pixels_per_point();
 
     // Top status bar: budget, streams, evictions, play/pause-all.
@@ -253,6 +258,11 @@ pub fn draw(
     // Per-tile hover queue: anchored at the bottom of the tile the cursor is
     // over. Click a thumbnail to play it on that tile right now; right-click
     // removes it from the queue; drag reorders; shuffle / A–Z re-sort.
+    if let Some((_, armed_at)) = confirm_remove {
+        if armed_at.elapsed().as_secs_f64() > CONFIRM_SECS {
+            *confirm_remove = None;
+        }
+    }
     if let Some((tile_id, cell)) = hover {
         if !queue.is_empty() {
             let strip_w = ((cell.w / ppp) - 12.0).max(140.0);
@@ -321,7 +331,24 @@ pub fn draw(
                                                 egui::Color32::from_gray(170),
                                             );
                                         }
-                                        if pos == 0 {
+                                        let armed = matches!(confirm_remove, Some((id, _)) if *id == entry.id);
+                                        // Interaction feedback: lighten + white border on hover,
+                                        // red tint + border while delete confirmation is armed.
+                                        if armed {
+                                            painter.rect_filled(rect, egui::Rounding::same(3.0), egui::Color32::from_rgba_unmultiplied(220, 60, 60, 60));
+                                            painter.rect_stroke(
+                                                rect,
+                                                egui::Rounding::same(3.0),
+                                                egui::Stroke::new(2.5, egui::Color32::from_rgb(240, 90, 90)),
+                                            );
+                                        } else if resp.hovered() {
+                                            painter.rect_filled(rect, egui::Rounding::same(3.0), egui::Color32::from_white_alpha(28));
+                                            painter.rect_stroke(
+                                                rect,
+                                                egui::Rounding::same(3.0),
+                                                egui::Stroke::new(2.0, egui::Color32::WHITE),
+                                            );
+                                        } else if pos == 0 {
                                             // Next-to-play highlight.
                                             painter.rect_stroke(
                                                 rect,
@@ -329,8 +356,47 @@ pub fn draw(
                                                 egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 190, 255)),
                                             );
                                         }
+                                        if resp.hovered() {
+                                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        }
+                                        // Trash button in the top-right corner (hover or armed).
+                                        let corner = egui::Rect::from_min_size(
+                                            egui::pos2(rect.right() - 19.0, rect.top() + 1.0),
+                                            egui::vec2(18.0, 17.0),
+                                        );
+                                        if resp.hovered() || armed {
+                                            let (bg, fg) = if armed {
+                                                (egui::Color32::from_rgb(220, 60, 60), egui::Color32::WHITE)
+                                            } else {
+                                                (egui::Color32::from_black_alpha(200), egui::Color32::WHITE)
+                                            };
+                                            painter.circle_filled(corner.center(), 9.0, bg);
+                                            painter.text(
+                                                corner.center(),
+                                                egui::Align2::CENTER_CENTER,
+                                                "🗑",
+                                                egui::FontId::proportional(11.0),
+                                                fg,
+                                            );
+                                        }
+                                        // Click routing: trash corner vs the rest of the thumb.
                                         if resp.clicked() {
-                                            actions.push(OverlayAction::PlayOnTile { tile_id, index: entry.index });
+                                            let click = ui.input(|i| i.pointer.interact_pos());
+                                            let on_trash = click.map(|c| corner.contains(c)).unwrap_or(false);
+                                            if on_trash {
+                                                if armed {
+                                                    actions.push(OverlayAction::QueueRemove { index: entry.index });
+                                                    *confirm_remove = None;
+                                                } else {
+                                                    *confirm_remove = Some((entry.id.clone(), std::time::Instant::now()));
+                                                }
+                                            } else if armed {
+                                                // Any other click cancels the pending removal
+                                                // instead of playing.
+                                                *confirm_remove = None;
+                                            } else {
+                                                actions.push(OverlayAction::PlayOnTile { tile_id, index: entry.index });
+                                            }
                                         }
                                         if resp.clicked_by(egui::PointerButton::Secondary) {
                                             actions.push(OverlayAction::QueueRemove { index: entry.index });
@@ -351,10 +417,17 @@ pub fn draw(
                                             }
                                         }
                                         rects.push((entry.index, rect));
-                                        resp.on_hover_text(format!(
-                                            "{}\nclick: play here · right-click: remove · drag: reorder",
-                                            entry.title
-                                        ));
+                                        if armed {
+                                            resp.on_hover_text(format!(
+                                                "{}\nclick 🗑 again to remove · click elsewhere to cancel",
+                                                entry.title
+                                            ));
+                                        } else {
+                                            resp.on_hover_text(format!(
+                                                "{}\nclick: play here · 🗑: remove · drag: reorder",
+                                                entry.title
+                                            ));
+                                        }
                                     }
                                 });
                                 if let Some(from) = drop_from {
