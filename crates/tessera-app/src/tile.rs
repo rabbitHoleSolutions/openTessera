@@ -161,6 +161,8 @@ impl Tile {
     /// Polls mpv events and renders any new frame into this tile's FBO texture.
     /// Must be called with the tile's screen GL context current.
     pub fn tick(&mut self, gl: &glow::Context) -> Vec<TileEvent> {
+        let profile = std::env::var("TESSERA_PROFILE").map(|v| v != "0").unwrap_or(false);
+        let t0 = std::time::Instant::now();
         let mut events = Vec::new();
         while let Some(ev) = self.mpv.poll_event() {
             match ev {
@@ -207,7 +209,9 @@ impl Tile {
             }
         }
 
+        let t1 = std::time::Instant::now();
         let flags = self.render.update();
+        let t2 = std::time::Instant::now();
         if flags & tessera_mpv::MPV_RENDER_UPDATE_FRAME != 0 {
             self.ensure_texture(gl);
             if let Some(fbo) = self.fbo {
@@ -227,6 +231,19 @@ impl Tile {
                 self.frames += 1;
             }
         }
+        let t3 = std::time::Instant::now();
+
+        if profile {
+            let mut slow = t2.duration_since(t1);
+            let mut label = "render.update";
+            if t3.duration_since(t2) > slow {
+                slow = t3.duration_since(t2);
+                label = "render";
+            }
+            if slow.as_secs_f64() > 0.008 {
+                eprintln!("[prof] tile {} {} blocked {:.1}ms (poll {:.1}ms)", self.id, label, slow.as_secs_f64()*1000.0, t1.duration_since(t0).as_secs_f64()*1000.0);
+            }
+        }
 
         let tp = self.mpv.get_f64("time-pos").unwrap_or(-1.0);
         if tp >= 0.0 && self.last_time_pos >= 0.0 {
@@ -234,6 +251,10 @@ impl Tile {
             if delta >= 0.0 && delta < 10.0 {
                 self.min_rate = self.min_rate.min(delta);
             }
+        }
+        let t4 = std::time::Instant::now();
+        if profile && t4.duration_since(t3).as_secs_f64() > 0.008 {
+            eprintln!("[prof] tile {} property read blocked {:.1}ms", self.id, t4.duration_since(t3).as_secs_f64()*1000.0);
         }
         if tp >= 0.0 {
             self.last_time_pos = tp;

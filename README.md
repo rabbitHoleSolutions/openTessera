@@ -131,9 +131,12 @@ to unmute/mute it
 selectively audible, not a cacophony), `Up`/`Down` adjust volume of unmuted
 tiles on the focused screen.
 
-Seeks and file loads are issued asynchronously (mpv's async command API), so
-skipping one tile never stalls the others; quit tears down all mpv instances
-in parallel. Status (playback rate per tile, composited fps, hwdec mode,
+Seeks and file loads are issued asynchronously (mpv's async command API), and
+quit tears down all mpv instances in parallel. Known limitation: a seek
+still briefly hitches the other tiles on its screen — mpv's render API
+blocks on the seeking core (~250ms), and tiles render sequentially on one
+thread. Fixing it needs per-tile render threads; `TESSERA_PROFILE=1` logs
+blocking render/property phases when investigating. Status (playback rate per tile, composited fps, hwdec mode,
 decoder drops, budget utilization) prints every 5 seconds; adjust with
 `--status-interval`.
 
