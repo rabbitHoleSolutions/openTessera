@@ -55,7 +55,7 @@ fn parse_args() -> Result<Args, String> {
         files: Vec::new(),
         tiles: 12,
         screens: ScreenSel::All,
-        hwdec: "auto-safe".into(),
+        hwdec: "nvdec-copy".into(),
         audio: false,
         audio_device: None,
         ui_scale: None,
@@ -133,7 +133,10 @@ OPTIONS:
                      (default: system default; check `pactl list sinks short`)
   --ui-scale F       Overlay UI scale, 0.75-3.0 (default 1.0; also in settings)
   --cache-mb N       Demuxer cache per stream in MiB (default 512; also in settings)
-  --hwdec MODE       mpv hardware decode mode (default auto-safe)
+  --hwdec MODE       mpv hardware decode mode (default nvdec-copy — hardware
+                     decode without the CUDA/GL zero-copy interop, which
+                     segfaults in mpv 0.34 when many decoders re-initialize;
+                     use auto-safe for zero-copy at your own risk)
   --max-streams N    Budget: max concurrent streams (default 16)
   --ceiling N        Budget: 1080p30-equivalent decode ceiling (default 96)
   --status-interval S  Seconds between status prints (default 5)
@@ -161,7 +164,30 @@ CONTROLS:
     );
 }
 
+/// Debug aid: print a backtrace on fatal signals (no gdb on this box).
+unsafe extern "C" fn fatal_signal(sig: i32, info: *mut libc::siginfo_t, _: *mut libc::c_void) {
+    let addr = unsafe { (*info).si_addr() } as usize;
+    eprintln!(
+        "\nFATAL signal {sig} at address 0x{addr:x}\nbacktrace:\n{}",
+        std::backtrace::Backtrace::force_capture()
+    );
+    std::process::exit(128 + sig);
+}
+
+fn install_fatal_handler() {
+    unsafe {
+        let mut act: libc::sigaction = std::mem::zeroed();
+        act.sa_sigaction = fatal_signal as usize;
+        act.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER;
+        libc::sigemptyset(&mut act.sa_mask);
+        libc::sigaction(libc::SIGSEGV, &act, std::ptr::null_mut());
+        libc::sigaction(libc::SIGABRT, &act, std::ptr::null_mut());
+        libc::sigaction(libc::SIGBUS, &act, std::ptr::null_mut());
+    }
+}
+
 fn main() {
+    install_fatal_handler();
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {

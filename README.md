@@ -80,8 +80,12 @@ saturated the machine at 8x 4K — hence the Rust + libmpv stack decision.
 - libmpv 1.x (`libmpv.so.1`; on Debian/Ubuntu: `mpv` or `libmpv1`; dev headers
   are NOT required — the C ABI is declared in `tessera-mpv` and loaded at
   runtime). Set `TESSERA_MPV_LIB` to point at a specific library file.
-- For hardware decode: NVIDIA (NVDEC), Mesa (VA-API), or macOS (VideoToolbox)
-  — mpv negotiates via `--hwdec auto-safe`
+- For hardware decode: NVIDIA (NVDEC), Mesa (VA-API), or macOS (VideoToolbox).
+  The default is `--hwdec nvdec-copy` — NVDEC decoding with a frame copy
+  rather than the CUDA/OpenGL zero-copy interop, which segfaults reliably
+  (mpv 0.34 + NVIDIA: `cuGraphicsUnregisterResource` race when decoders
+  re-initialize during playback, e.g. loading a 4K HEVC file mid-wall).
+  Override with `--hwdec auto-safe` for zero-copy if you feel lucky.
 
 ## Build
 
