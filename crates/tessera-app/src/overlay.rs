@@ -121,6 +121,8 @@ pub enum OverlayAction {
     /// Mute button on a tile chip: toggles mute, or explains why audio is
     /// unavailable (started without --audio).
     MuteButton { tile_id: usize },
+    /// Volume slider dragged on a tile chip (or wheel): set absolute volume.
+    SetVolume { tile_id: usize, volume: i64 },
     /// Queue drag reorder: insert `from` before `to`.
     QueueReorder { from: usize, to: usize },
     /// Reshuffle the pending queue tail.
@@ -156,6 +158,7 @@ pub struct TileUiInfo {
     pub paused: bool,
     pub muted: bool,
     pub audio_enabled: bool,
+    pub volume: i64,
     pub time_pos: f64,
     pub duration: f64,
 }
@@ -359,6 +362,33 @@ pub fn draw(
                             }
                             if label.clicked() {
                                 actions.push(OverlayAction::TogglePause { tile_id: tile.id });
+                            }
+                            // Inline volume slider: shown when the tile is
+                            // unmuted (or the cursor is over the tile, so a
+                            // muted tile's level can be pre-set). % label
+                            // alongside; live-set on drag.
+                            if tile.audio_enabled {
+                                let tile_hovered = ctx
+                                    .input(|i| i.pointer.hover_pos())
+                                    .map(|p| cell.contains(p.x * ppp, p.y * ppp))
+                                    .unwrap_or(false);
+                                if !tile.muted || tile_hovered {
+                                    let mut vol = tile.volume.clamp(0, 100) as f32;
+                                    let sresp = ui.add_sized(
+                                        [64.0, 14.0],
+                                        egui::Slider::new(&mut vol, 0.0..=100.0).show_value(false),
+                                    );
+                                    if sresp.changed() {
+                                        actions.push(OverlayAction::SetVolume {
+                                            tile_id: tile.id,
+                                            volume: vol.round() as i64,
+                                        });
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(format!("{}%", vol.round() as i64)).small().weak(),
+                                    );
+                                    sresp.on_hover_text("volume (scroll wheel also works)");
+                                }
                             }
                             // Always-visible mute button with state.
                             {
@@ -761,6 +791,7 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                             let mouse: &[(&str, &str)] = &[
                                 ("click tile", "pause/resume that tile"),
                                 ("drag tile", "swap it with another tile on this screen (Esc cancels)"),
+                                ("wheel on tile", "that tile's volume +/-5 (Up/Down = all unmuted tiles)"),
                                 ("right-click tile", "mute/unmute audio (needs --audio)"),
                                 ("hover tile", "show the queue strip at its bottom"),
                                 ("click thumb", "play that item on the hovered tile"),

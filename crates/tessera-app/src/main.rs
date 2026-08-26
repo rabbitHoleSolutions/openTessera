@@ -14,7 +14,7 @@ use glutin::prelude::*;
 use glutin_winit::DisplayBuilder;
 use raw_window_handle::HasRawWindowHandle;
 use tessera_core::{Admission, DecodeBudget, MediaItem, PlaybackQueue, QueueOrder};
-use winit::event::{ElementState, Event, MouseButton, StartCause, WindowEvent};
+use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Fullscreen, WindowBuilder};
@@ -33,6 +33,11 @@ enum ScreenSel {
 /// Pointer travel (px) before a held left press becomes a tile drag —
 /// small enough to feel immediate, big enough that plain clicks stay clicks.
 const DRAG_SLOP_PX: f32 = 8.0;
+
+/// Minimum spacing between applied button-wheel steps. winit/X11 emits a
+/// MouseWheel for BOTH the press and the release of a scroll button, so
+/// without this a single notch would step the volume twice.
+const WHEEL_NOTCH_INTERVAL: Duration = Duration::from_millis(50);
 
 struct Args {
     files: Vec<PathBuf>,
@@ -161,6 +166,7 @@ CONTROLS:
   Drag               Rearrange: drag a tile onto another to swap them (Esc cancels)
   Right click        Mute/unmute the clicked tile (needs --audio)
   Up/Down arrows     Volume +/-5 on unmuted tiles of the focused screen
+  Wheel              Volume +/-5 on the tile under the cursor
   Left/Right arrows  Seek -/+10s on all tiles of the focused screen
   N / P              Next / previous queue item on each tile of the focused screen
   F                  Fullscreen the tile under the cursor on its screen (F/Esc exits)
@@ -452,6 +458,8 @@ fn main() {
     let mut cursor_over: Option<usize> = None;
     // Left mouse button currently held (drag-threshold tracking).
     let mut left_held = false;
+    // When the last button-wheel step was applied (see WHEEL_NOTCH_INTERVAL).
+    let mut last_wheel_at: Option<Instant> = None;
     // Deferred WM-settle check after a window/fullscreen toggle:
     // (deadline, retries left). Retries continue while displaced walls
     // keep being found.
@@ -795,6 +803,52 @@ fn main() {
                             }
                             _ => {}
                         },
+                        WindowEvent::MouseWheel { delta, .. } => {
+                            last_input = Instant::now();
+                            // Scroll over a tile = that tile's volume ±5.
+                            // If the pointer is over an overlay widget (e.g.
+                            // the queue strip), egui owns the wheel instead.
+                            if let Some((x, y)) = cursor_pos[idx] {
+                                if !pos_on_ui(&screens[idx], x, y) {
+                                    let step = match delta {
+                                        MouseScrollDelta::LineDelta(_, l) if l > 0.0 => 5,
+                                        MouseScrollDelta::LineDelta(_, l) if l < 0.0 => -5,
+                                        MouseScrollDelta::PixelDelta(p) if p.y > 0.0 => 5,
+                                        MouseScrollDelta::PixelDelta(p) if p.y < 0.0 => -5,
+                                        _ => 0,
+                                    };
+                                    if step != 0 {
+                                        // winit/X11 reports a MouseWheel for both the press
+                                        // and the release of a scroll button — throttle the
+                                        // duplicate half of each notch (trackpad pixel
+                                        // deltas pass through untouched).
+                                        let from_button = matches!(delta, MouseScrollDelta::LineDelta(..));
+                                        let throttled = from_button
+                                            && matches!(last_wheel_at, Some(at) if at.elapsed() < WHEEL_NOTCH_INTERVAL);
+                                        if !throttled {
+                                            if from_button {
+                                                last_wheel_at = Some(Instant::now());
+                                            }
+                                            let hit = screens[idx].tile_at(x, y);
+                                            let monitor_index = screens[idx].monitor_index;
+                                            if let Some(tile) =
+                                                screens[idx].tiles.iter_mut().find(|t| Some(t.id) == hit)
+                                            {
+                                                if tile.audio_enabled() {
+                                                    tile.set_volume(tile.volume() + step);
+                                                    println!("screen {monitor_index} tile {}: vol {}%", tile.id, tile.volume());
+                                                } else {
+                                                    overlay.notice = Some((
+                                                        "audio is off — restart with --audio to enable sound".into(),
+                                                        Instant::now(),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         WindowEvent::KeyboardInput { event: key_event, .. } => {
                             last_input = Instant::now();
                             if key_event.state == ElementState::Pressed {
@@ -1104,6 +1158,15 @@ fn handle_overlay_action(
                     } else {
                         notify(overlay, "audio is off — restart with --audio to enable sound".into());
                     }
+                    return;
+                }
+            }
+        }
+        OverlayAction::SetVolume { tile_id, volume } => {
+            for screen in screens.iter_mut() {
+                if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
+                    tile.set_volume(volume);
+                    println!("screen {} tile {tile_id}: vol {}%", screen.monitor_index, tile.volume());
                     return;
                 }
             }

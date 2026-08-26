@@ -213,6 +213,7 @@ impl Screen {
                 paused: t.is_paused(),
                 muted: t.is_muted(),
                 audio_enabled: t.audio_enabled(),
+                volume: t.volume(),
                 time_pos: t.last_time_pos,
                 duration: t.duration,
             })

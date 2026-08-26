@@ -57,7 +57,9 @@ between monitors requires teardown/rebuild.
 
 ## 2. Visual volume control
 
-Status: **not started**
+Status: **implemented** — inline slider + % label in the chip row, scroll
+wheel over a tile = ±5 on that tile (throttled: winit/X11 doubles button
+wheel events), Up/Down still screen-wide.
 
 Per-tile volume with a visible control (each tile is its own mpv instance;
 `Tile::set_volume/volume` already exist — tile.rs).
@@ -132,6 +134,7 @@ Status: **not started**
   auto-hide (5s) + Tab pin, toasts, help + settings panels
 - Transport: scrub, ±10s, next/prev, keyboard; async seeks/loads
 - Tile drag-to-rearrange: same-screen drag-to-swap (Phase 1 of #1)
+- Visual volume: per-tile chip slider + scroll wheel (#2)
 - Sources: local, Plex, Jellyfin (direct-play URIs), library filters,
   delete-at-source
 - Panel management: +/- tiles, per-window W toggle, F tile zoom
