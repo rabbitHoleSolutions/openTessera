@@ -201,6 +201,10 @@ fn plex_items_from_section(json: &Value, base: &str, token: &str, lib: &str) -> 
         let title = m.get("title").and_then(Value::as_str).unwrap_or("?").to_owned();
         let year = m.get("year").and_then(Value::as_i64);
         let rating_key = m.get("ratingKey").and_then(Value::as_str).unwrap_or("").to_owned();
+        let thumb_url = m
+            .get("thumb")
+            .and_then(Value::as_str)
+            .map(|t| format!("{base}{t}?X-Plex-Token={token}"));
         let title = match year {
             Some(y) => format!("{title} ({y})"),
             None => title,
@@ -216,6 +220,7 @@ fn plex_items_from_section(json: &Value, base: &str, token: &str, lib: &str) -> 
             codec: m.pointer("/Media/0/videoCodec").and_then(Value::as_str).map(str::to_owned),
             size: part.get("size").and_then(Value::as_i64).map(|v| v.max(0) as u64),
             modified: part.get("updatedAt").and_then(Value::as_i64).map(|v| v.max(0) as u64),
+            thumb_url,
         });
         let _ = lib;
     }
@@ -324,6 +329,7 @@ fn jellyfin_items_from_query(json: &Value, base: &str, api_key: &str) -> Vec<Med
             .pointer("/MediaStreams/0")
             .cloned()
             .unwrap_or(Value::Null);
+        let thumb_url = format!("{base}/Items/{id}/Images/Primary?maxWidth=160&quality=90&api_key={api_key}");
         items.push(MediaItem {
             id: format!("jellyfin|{id}"),
             title,
@@ -335,6 +341,7 @@ fn jellyfin_items_from_query(json: &Value, base: &str, api_key: &str) -> Vec<Med
             codec: video.get("Codec").and_then(Value::as_str).map(str::to_owned),
             size,
             modified: None,
+            thumb_url: Some(thumb_url),
         });
     }
     items.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
@@ -355,6 +362,7 @@ mod tests {
             "MediaContainer": { "Metadata": [
                 {
                     "title": "Gravity", "year": 2013, "ratingKey": "123",
+                    "thumb": "/library/metadata/123/thumb/1700000000",
                     "Media": [{
                         "videoWidth": 3840, "videoHeight": 1080,
                         "videoFrameRate": "NTSC", "videoCodec": "hevc",
@@ -376,6 +384,7 @@ mod tests {
         assert_eq!(it.codec.as_deref(), Some("hevc"));
         assert_eq!(it.size, Some(9_000_000_000));
         assert_eq!(it.modified, Some(1_700_000_000));
+        assert_eq!(it.thumb_url.as_deref(), Some("http://x:32400/library/metadata/123/thumb/1700000000?X-Plex-Token=tok"));
     }
 
     #[test]
@@ -404,6 +413,10 @@ mod tests {
         assert_eq!(it.width, Some(1920));
         assert_eq!(it.fps, Some(23.976));
         assert_eq!(it.size, Some(12345));
+        assert_eq!(
+            it.thumb_url.as_deref(),
+            Some("http://x:8096/Items/abc123/Images/Primary?maxWidth=160&quality=90&api_key=key")
+        );
     }
 
     #[test]

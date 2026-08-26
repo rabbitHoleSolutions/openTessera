@@ -19,5 +19,7 @@ glutin-winit = { workspace = true }
 glow = { workspace = true }
 egui = { workspace = true }
 egui_glow = { workspace = true }
+ureq = { workspace = true }
+image = { version = "0.24", default-features = false, features = ["jpeg", "png"] }
 png = "0.17"
 raw-window-handle = { workspace = true }

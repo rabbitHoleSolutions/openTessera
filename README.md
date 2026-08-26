@@ -36,10 +36,16 @@ Phase 1 skeleton — playback foundation:
 - Transport: per-tile chip transport row (prev / -10s / +10s / next buttons
   plus a scrub bar), keyboard Left/Right seeks ±10s on the focused screen,
   N/P load the next/previous queue item on each tile.
-- Queue management: the up-next strip is interactive — click an entry to make
-  it load next, right-click to remove it, drag entries to reorder the
-  pending tail, and shuffle / A–Z buttons re-sort it. Currently-playing and
-  already-played items are never touched (tiles hold their own items).
+- Queue management (Quest-immersive style): hovering a tile shows its
+  screen's queue as a thumbnail strip along the bottom of that tile — click
+  a thumbnail to play it on that tile immediately, right-click to remove it
+  from the queue, drag to reorder, shuffle / A–Z buttons re-sort the pending
+  tail. Thumbnails come from the media servers (Jellyfin primary art, Plex
+  thumbs) via a background fetch+decode cache; local files show a
+  placeholder.
+- Overlay auto-hide: the UI (status bar, chips, hover queues) shows on any
+  user input and hides after 5 seconds of inactivity; Tab pins/unpins it
+  (`--overlay` starts pinned).
 - Click a tile to pause/resume it, Space to pause/resume a screen, Esc to quit
 
 Phase 0 benchmarking (see git history / docs when added) measured, on a
@@ -95,11 +101,13 @@ opentessera --jellyfin --jellyfin-library Movies --plex /path/to/local/
   `TESSERA_*` env-var overrides. Local paths and remote sources can be
   freely mixed in one launch.
 
-Controls: `Esc` quit · `Tab` show/hide the overlay UI · `Space` pause/resume
-all tiles on the focused screen · click a tile to pause/resume it · with
-`--audio`: right-click a tile to unmute/mute it (all tiles start muted — a
-wall of simultaneous streams should be selectively audible, not a cacophony),
-`Up`/`Down` adjust volume of unmuted tiles on the focused screen.
+Controls: `Esc` quit · `Tab` pin/unpin the overlay UI (auto-hides after 5s
+idle) · `Space` pause/resume all tiles on the focused screen · click a tile
+to pause/resume it · hover a tile to show its queue strip (click a thumbnail
+to play it there) · with `--audio`: right-click a tile to unmute/mute it
+(all tiles start muted — a wall of simultaneous streams should be
+selectively audible, not a cacophony), `Up`/`Down` adjust volume of unmuted
+tiles on the focused screen.
 
 Status (playback rate per tile, composited fps, hwdec mode, decoder drops,
 budget utilization) prints every 5 seconds; adjust with `--status-interval`.

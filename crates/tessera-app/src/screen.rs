@@ -7,6 +7,7 @@ use winit::window::Window;
 
 use crate::compositor::Compositor;
 use crate::overlay::{self, BudgetUi, OverlayState, TileUiInfo};
+use crate::thumbs::ThumbCache;
 use crate::tile::{Tile, TileEvent};
 
 pub struct Screen {
@@ -22,6 +23,7 @@ pub struct Screen {
     layout: Vec<Rect>,
     last_status_tp: Vec<f64>,
     pub frames_drawn: u64,
+    pub thumbs: ThumbCache,
     pending_screenshot: Option<(std::path::PathBuf, String)>,
 }
 
@@ -50,6 +52,7 @@ impl Screen {
             layout: Vec::new(),
             last_status_tp: Vec::new(),
             frames_drawn: 0,
+            thumbs: ThumbCache::new(),
             pending_screenshot: None,
         }
         .with_layout(size.width as i32, size.height as i32)
@@ -82,7 +85,13 @@ impl Screen {
     /// One render pass: poll tile events, render new frames into tile FBOs,
     /// composite to the window, draw the overlay, swap. Handles queue
     /// advancement on EOF.
-    pub fn tick(&mut self, budget: &mut DecodeBudget, advance: bool, overlay: &mut OverlayState) {
+    pub fn tick(
+        &mut self,
+        budget: &mut DecodeBudget,
+        advance: bool,
+        overlay: &mut OverlayState,
+        cursor: Option<(f32, f32)>,
+    ) {
         self.context.make_current(&self.surface).ok();
 
         let mut ended: Vec<usize> = Vec::new();
@@ -169,8 +178,20 @@ impl Screen {
             .queue
             .pending(12)
             .iter()
-            .map(|(i, m)| overlay::QueueEntry { index: *i, title: m.title.clone() })
+            .map(|(i, m)| overlay::QueueEntry {
+                index: *i,
+                id: m.id.clone(),
+                title: m.title.clone(),
+                thumb_url: m.thumb_url.clone(),
+            })
             .collect();
+        let hover = cursor.and_then(|(x, y)| {
+            self.tiles
+                .iter()
+                .zip(self.layout.iter())
+                .find(|(_, cell)| cell.contains(x, y))
+                .map(|(t, cell)| (t.id, *cell))
+        });
         let budget_ui = BudgetUi {
             utilization: budget.utilization(),
             used_mbps: budget.used_mbps(),
@@ -181,6 +202,7 @@ impl Screen {
             evictions: budget.total_evictions(),
         };
         let visible = overlay.visible;
+        let pinned = overlay.pinned;
         let mut queue_drag = overlay.queue_drag;
         let mut actions = Vec::new();
         let pending_here = overlay
@@ -188,9 +210,13 @@ impl Screen {
             .filter(|pc| pc.window_id == self.window.id());
         let mut click_on_ui = false;
         let window = self.window.clone();
-        self.egui.run(&window, |ctx| {
+        // Split borrows: the egui pass closure needs the thumbnail cache
+        // while the EguiGlow itself is borrowed by run().
+        let egui = &mut self.egui;
+        let thumbs = &mut self.thumbs;
+        egui.run(&window, |ctx| {
             if visible {
-                overlay::draw(ctx, monitor_index, &tiles_ui, &cells, &queue_entries, &budget_ui, &mut actions, &mut queue_drag);
+                overlay::draw(ctx, monitor_index, pinned, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, thumbs, &mut actions, &mut queue_drag);
             }
             if let Some(pc) = pending_here {
                 // Frame-fresh verdict with the exact click position: if any
@@ -209,7 +235,7 @@ impl Screen {
         if click_on_ui {
             overlay.pending_click = None;
         }
-        self.egui.paint(&window);
+        egui.paint(&window);
         overlay.actions.append(&mut actions);
         unsafe {
             // egui's painter may leave scissor enabled; don't let it clip the

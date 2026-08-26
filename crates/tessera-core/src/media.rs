@@ -31,6 +31,8 @@ pub struct MediaItem {
     pub codec: Option<String>,
     pub size: Option<u64>,
     pub modified: Option<u64>,
+    /// Remote thumbnail URL (Plex/Jellyfin image endpoint), if any.
+    pub thumb_url: Option<String>,
 }
 
 impl MediaItem {
@@ -54,6 +56,7 @@ impl MediaItem {
             codec: None,
             size,
             modified,
+            thumb_url: None,
         }
     }
 

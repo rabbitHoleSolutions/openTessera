@@ -1,5 +1,6 @@
 mod compositor;
 mod overlay;
+mod thumbs;
 mod png_util;
 mod screen;
 mod tile;
@@ -123,7 +124,8 @@ OPTIONS:
   --max-streams N    Budget: max concurrent streams (default 16)
   --ceiling N        Budget: 1080p30-equivalent decode ceiling (default 96)
   --status-interval S  Seconds between status prints (default 5)
-  --overlay          Start with the overlay UI visible (Tab toggles it)
+  --overlay          Start with the overlay UI pinned on (Tab toggles pinning;
+                     otherwise the UI shows on input and hides after 5s idle)
   --plex             Add the Plex server from ~/.config/opentessera/sources.conf
                      (or TESSERA_PLEX_URL / TESSERA_PLEX_TOKEN env vars)
   --jellyfin         Add the Jellyfin server the same way
@@ -133,7 +135,7 @@ OPTIONS:
 
 CONTROLS:
   Esc                Quit
-  Tab                Show/hide the overlay UI
+  Tab                Pin/unpin the overlay UI (auto-hides after 5s idle)
   Space              Pause/resume all tiles on the focused screen
   Left click         Pause/resume the clicked tile
   Right click        Mute/unmute the clicked tile (needs --audio)
@@ -350,8 +352,9 @@ fn main() {
         std::process::exit(1);
     }
 
-    let mut cursor_pos: Vec<(f32, f32)> = vec![(0.0, 0.0); screens.len()];
-    let mut overlay = OverlayState { visible: args.overlay, ..Default::default() };
+    let mut cursor_pos: Vec<Option<(f32, f32)>> = vec![None; screens.len()];
+    let mut overlay = OverlayState { pinned: args.overlay, ..Default::default() };
+    let mut last_input = Instant::now();
 
     for screen_idx in 0..screens.len() {
         let target_tiles = screens[screen_idx].queue.len().clamp(1, args.tiles);
@@ -416,8 +419,11 @@ fn main() {
                 Event::NewEvents(StartCause::Init)
                 | Event::NewEvents(StartCause::ResumeTimeReached { .. })
                 | Event::NewEvents(StartCause::WaitCancelled { .. }) => {
+                    // Overlay auto-hide: visible while pinned or while user
+                    // input arrived within the last 5 seconds.
+                    overlay.visible = overlay.pinned || last_input.elapsed() < Duration::from_secs(5);
                     for screen_idx in 0..screens.len() {
-                        screens[screen_idx].tick(&mut budget, args.advance, &mut overlay);
+                        screens[screen_idx].tick(&mut budget, args.advance, &mut overlay, cursor_pos[screen_idx]);
                         // UI actions from this screen's overlay: execute after
                         // the tick (pause/resume needs cross-screen budget
                         // access, which the drawing code can't have).
@@ -505,9 +511,13 @@ fn main() {
                     // Tab toggles the overlay; checked before egui sees the
                     // event so it can't be swallowed for focus navigation.
                     if let WindowEvent::KeyboardInput { event: ke, .. } = &event {
-                        if ke.state == ElementState::Pressed && ke.logical_key == Key::Named(NamedKey::Tab) {
-                            overlay.visible = !overlay.visible;
-                            return;
+                        if ke.state == ElementState::Pressed {
+                            last_input = Instant::now();
+                            if ke.logical_key == Key::Named(NamedKey::Tab) {
+                                overlay.pinned = !overlay.pinned;
+                                println!("overlay: {}", if overlay.pinned { "pinned on" } else { "auto-hide" });
+                                return;
+                            }
                         }
                     }
                     // Forward everything to egui so its input state stays
@@ -528,18 +538,22 @@ fn main() {
                             screens[idx].resize(size.width, size.height);
                         }
                         WindowEvent::CursorMoved { position, .. } => {
-                            cursor_pos[idx] = (position.x as f32, position.y as f32);
+                            cursor_pos[idx] = Some((position.x as f32, position.y as f32));
+                            last_input = Instant::now();
                         }
                         WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {
-                            let (x, y) = cursor_pos[idx];
-                            overlay.pending_click = Some(overlay::PendingClick {
-                                window_id: window_id,
-                                x,
-                                y,
-                                right: button == MouseButton::Right,
-                            });
+                            last_input = Instant::now();
+                            if let Some((x, y)) = cursor_pos[idx] {
+                                overlay.pending_click = Some(overlay::PendingClick {
+                                    window_id: window_id,
+                                    x,
+                                    y,
+                                    right: button == MouseButton::Right,
+                                });
+                            }
                         }
                         WindowEvent::KeyboardInput { event: key_event, .. } => {
+                            last_input = Instant::now();
                             if key_event.state == ElementState::Pressed {
                                 match key_event.logical_key {
                                     Key::Named(NamedKey::Escape) => {
@@ -742,12 +756,25 @@ fn handle_overlay_action(screens: &mut [Screen], budget: &mut DecodeBudget, acti
         OverlayAction::Prev { tile_id } => {
             tile_next(screens, tile_id, false);
         }
-        OverlayAction::QueueJumpNext { index } => {
-            let monitor_index = screens[screen_idx].monitor_index;
-            let q = &mut screens[screen_idx].queue;
-            if let Some(m) = q.items().get(index).cloned() {
-                q.move_pending_to_front(index);
-                println!("screen {monitor_index}: queue: \"{}\" plays next", m.title);
+        OverlayAction::PlayOnTile { tile_id, index } => {
+            for si in 0..screens.len() {
+                if !screens[si].tiles.iter().any(|t| t.id == tile_id) {
+                    continue;
+                }
+                let monitor_index = screens[si].monitor_index;
+                let item = screens[si].queue.items().get(index).cloned();
+                if let Some(item) = item {
+                    screens[si].queue.remove_pending(index);
+                    if let Some(tile) = screens[si].tiles.iter_mut().find(|t| t.id == tile_id) {
+                        tile.item = item.clone();
+                        if let Err(e) = tile.load(&item) {
+                            eprintln!("screen {monitor_index} tile {tile_id}: load failed: {e}");
+                        } else {
+                            println!("screen {monitor_index} tile {tile_id}: now playing \"{}\"", item.title);
+                        }
+                    }
+                }
+                break;
             }
         }
         OverlayAction::QueueRemove { index } => {
