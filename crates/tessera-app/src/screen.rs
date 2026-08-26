@@ -21,6 +21,10 @@ pub struct Screen {
     pub tiles: Vec<Tile>,
     pub queue: PlaybackQueue,
     layout: Vec<Rect>,
+    /// Tile currently zoomed to fill the screen (F / transport icon).
+    pub zoomed: Option<usize>,
+    /// Window geometry saved before entering OS fullscreen in windowed mode.
+    pub windowed_restore: Option<(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>)>,
     last_status_tp: Vec<f64>,
     pub frames_drawn: u64,
     pub thumbs: ThumbCache,
@@ -50,12 +54,37 @@ impl Screen {
             tiles: Vec::new(),
             queue,
             layout: Vec::new(),
+            zoomed: None,
+            windowed_restore: None,
             last_status_tp: Vec::new(),
             frames_drawn: 0,
             thumbs: ThumbCache::new(),
             pending_screenshot: None,
         }
         .with_layout(size.width as i32, size.height as i32)
+    }
+
+    /// The layout actually used for compositing and hit-testing: the grid,
+    /// or — while a tile is zoomed — one full-screen cell for that tile and
+    /// zero-size cells for the others.
+    pub fn effective_layout(&self) -> Vec<Rect> {
+        match self.zoomed {
+            Some(zid) => {
+                let size = self.window.inner_size();
+                let (w, h) = (size.width as f32, size.height as f32);
+                self.tiles
+                    .iter()
+                    .map(|t| {
+                        if t.id == zid {
+                            Rect { x: 0.0, y: 0.0, w, h }
+                        } else {
+                            Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }
+                        }
+                    })
+                    .collect()
+            }
+            None => self.layout.clone(),
+        }
     }
 
     fn with_layout(mut self, w: i32, h: i32) -> Screen {
@@ -145,7 +174,11 @@ impl Screen {
             self.gl.clear_color(0.04, 0.04, 0.05, 1.0);
             self.gl.clear(glow::COLOR_BUFFER_BIT);
         }
-        for (tile, cell) in self.tiles.iter_mut().zip(self.layout.iter()) {
+        let zoom_cells = self.effective_layout();
+        for (tile, cell) in self.tiles.iter_mut().zip(zoom_cells.iter()) {
+            if cell.w <= 0.0 || cell.h <= 0.0 {
+                continue; // hidden while another tile is zoomed
+            }
             if let Some(tex) = tile.texture() {
                 let aspect = tile.video_aspect();
                 self.compositor.draw(&self.gl, tex, cell, aspect, w, h);
@@ -172,7 +205,7 @@ impl Screen {
                 duration: t.duration,
             })
             .collect();
-        let cells = self.layout.clone();
+        let cells = self.effective_layout();
         let monitor_index = self.monitor_index;
         let queue_entries: Vec<overlay::QueueEntry> = self
             .queue
@@ -188,7 +221,7 @@ impl Screen {
         let hover = cursor.and_then(|(x, y)| {
             self.tiles
                 .iter()
-                .zip(self.layout.iter())
+                .zip(self.effective_layout().iter())
                 .find(|(_, cell)| cell.contains(x, y))
                 .map(|(t, cell)| (t.id, *cell))
         });
@@ -215,9 +248,13 @@ impl Screen {
         // while the EguiGlow itself is borrowed by run().
         let egui = &mut self.egui;
         let thumbs = &mut self.thumbs;
+        let notice = overlay.notice.clone();
         egui.run(&window, |ctx| {
             if visible {
                 overlay::draw(ctx, monitor_index, pinned, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete);
+            }
+            if let Some(n) = &notice {
+                overlay::draw_notice(ctx, n);
             }
             if let Some(pc) = pending_here {
                 // Frame-fresh verdict with the exact click position: if any
@@ -305,7 +342,7 @@ impl Screen {
     pub fn tile_at(&self, x: f32, y: f32) -> Option<usize> {
         self.tiles
             .iter()
-            .zip(self.layout.iter())
+            .zip(self.effective_layout().iter())
             .find(|(_, cell)| cell.contains(x, y))
             .map(|(tile, _)| tile.id)
     }
@@ -333,7 +370,8 @@ impl Screen {
     /// Right-click: toggles audio on the tile under the cursor. Returns the
     /// tile id if one was hit.
     pub fn click_mute(&mut self, x: f32, y: f32) -> Option<usize> {
-        for (tile, cell) in self.tiles.iter_mut().zip(self.layout.iter()) {
+        let cells = self.effective_layout();
+        for (tile, cell) in self.tiles.iter_mut().zip(cells.iter()) {
             if cell.contains(x, y) {
                 if !tile.audio_enabled() {
                     println!(

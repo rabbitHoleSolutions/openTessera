@@ -46,8 +46,14 @@ Phase 1 skeleton — playback foundation:
 - Panel management: each tile's transport row has "−" (remove that tile —
   its GL resources and stream are freed and the grid re-solves) and "+"
   (add a tile to this screen, taking the next queue item; honors the
-  decode budget, `--tiles` cap, and budget-aware eviction). Other screens
-  are unaffected.
+  decode budget, `--tiles` cap, default 12, and budget-aware eviction).
+  Other screens are unaffected. Failed actions explain themselves in a
+  transient on-screen toast (budget full, tiles cap, empty queue, ...).
+- Fullscreen: "F" (or the corner-bracket icon on a tile's transport) zooms
+  that tile to fill its screen — in windowed mode the window also goes
+  borderless-fullscreen on its monitor, so other monitors and windows keep
+  working; in multi-screen mode the other screens keep playing untouched.
+  F/Esc toggles back; Esc only quits when nothing is zoomed.
 - Delete from transport: each tile's transport row has a 🗑 button that
   deletes the tile's current video at its source — the local file, or the
   server-side item (Jellyfin `DELETE /Items/{id}`, Plex
@@ -111,10 +117,12 @@ opentessera --jellyfin --jellyfin-library Movies --plex /path/to/local/
   `TESSERA_*` env-var overrides. Local paths and remote sources can be
   freely mixed in one launch.
 
-Controls: `Esc` quit · `Tab` pin/unpin the overlay UI (auto-hides after 5s
-idle) · `Space` pause/resume all tiles on the focused screen · click a tile
-to pause/resume it · hover a tile to show its queue strip (click a thumbnail
-to play it there) · with `--audio`: right-click a tile to unmute/mute it
+Controls: `Esc` exit fullscreen if zoomed, otherwise quit · `Tab`
+pin/unpin the overlay UI (auto-hides after 5s idle) · `Space` pause/resume
+all tiles on the focused screen · `F` fullscreen the tile under the cursor ·
+click a tile to pause/resume it · hover a tile to show its queue strip
+(click a thumbnail to play it there) · with `--audio`: right-click a tile
+to unmute/mute it
 (all tiles start muted — a wall of simultaneous streams should be
 selectively audible, not a cacophony), `Up`/`Down` adjust volume of unmuted
 tiles on the focused screen.

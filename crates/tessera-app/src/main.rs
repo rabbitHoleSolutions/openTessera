@@ -50,7 +50,7 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         files: Vec::new(),
-        tiles: 4,
+        tiles: 12,
         screens: ScreenSel::All,
         hwdec: "auto-safe".into(),
         audio: false,
@@ -115,7 +115,7 @@ USAGE:
   opentessera [OPTIONS] <FILE|DIR>...
 
 OPTIONS:
-  --tiles N          Max tiles per screen (default 4)
+  --tiles N          Max tiles per screen (default 12)
   --screens all|N    All monitors fullscreen, or monitor index N (default all)
   --windowed WxH     Single windowed window instead of fullscreen
   --advance          Advance to the next queue item on end (default: loop)
@@ -141,7 +141,9 @@ CONTROLS:
   Right click        Mute/unmute the clicked tile (needs --audio)
   Up/Down arrows     Volume +/-5 on unmuted tiles of the focused screen
   Left/Right arrows  Seek -/+10s on all tiles of the focused screen
-  N / P              Next / previous queue item on each tile of the focused screen"
+  N / P              Next / previous queue item on each tile of the focused screen
+  F                  Fullscreen the tile under the cursor on its screen (F/Esc exits)
+  Esc                Exit fullscreen if zoomed; otherwise quit"
     );
 }
 
@@ -437,6 +439,7 @@ fn main() {
                                 &tile_opts,
                                 &mut next_tile_id,
                                 args.tiles,
+                                &mut overlay,
                             );
                         }
                     }
@@ -566,10 +569,16 @@ fn main() {
                             if key_event.state == ElementState::Pressed {
                                 match key_event.logical_key {
                                     Key::Named(NamedKey::Escape) => {
-                                        for screen in screens.iter_mut() {
-                                            screen.destroy();
+                                        if screens[idx].zoomed.is_some() {
+                                            // Leave fullscreen first; Esc only quits
+                                            // when nothing is zoomed.
+                                            toggle_fullscreen(&mut screens, idx, None);
+                                        } else {
+                                            for screen in screens.iter_mut() {
+                                                screen.destroy();
+                                            }
+                                            target.exit();
                                         }
-                                        target.exit();
                                     }
                                     Key::Named(NamedKey::Space) => {
                                         let ids: Vec<usize> = screens[idx].tiles.iter().map(|t| t.id).collect();
@@ -595,6 +604,17 @@ fn main() {
                                     }
                                     Key::Named(NamedKey::ArrowRight) => {
                                         seek_screen(&mut screens[idx], 10.0);
+                                    }
+                                    Key::Character(ref c) if c.eq_ignore_ascii_case("f") => {
+                                        if screens[idx].zoomed.is_some() {
+                                            toggle_fullscreen(&mut screens, idx, None);
+                                        } else if let Some((x, y)) = cursor_pos[idx] {
+                                            if let Some(t) = screens[idx].tile_at(x, y) {
+                                                toggle_fullscreen(&mut screens, idx, Some(t));
+                                            } else {
+                                                println!("F: no tile under the cursor");
+                                            }
+                                        }
                                     }
                                     Key::Character(ref c) if c.eq_ignore_ascii_case("n") => {
                                         let ids: Vec<usize> = screens[idx].tiles.iter().map(|t| t.id).collect();
@@ -707,7 +727,12 @@ fn handle_overlay_action(
     tile_opts: &TileOptions,
     next_tile_id: &mut usize,
     max_tiles: usize,
+    overlay: &mut OverlayState,
 ) {
+    let notify = |overlay: &mut OverlayState, msg: String| {
+        println!("{msg}");
+        overlay.notice = Some((msg, Instant::now()));
+    };
     match action {
         OverlayAction::TogglePause { tile_id } => {
             let playing = screens
@@ -798,14 +823,18 @@ fn handle_overlay_action(
         }
         OverlayAction::AddPanel => {
             let monitor_index = screens[screen_idx].monitor_index;
+            if screens[screen_idx].zoomed.is_some() {
+                notify(overlay, "exit fullscreen (F) before adding tiles".into());
+                return;
+            }
             if screens[screen_idx].tiles.len() >= max_tiles {
-                println!("screen {monitor_index}: at --tiles {max_tiles} limit, not adding");
+                notify(overlay, format!("not adding: already at the --tiles {max_tiles} limit"));
                 return;
             }
             let item = match screens[screen_idx].queue.advance().cloned() {
                 Some(m) => m,
                 None => {
-                    println!("screen {monitor_index}: queue empty, not adding");
+                    notify(overlay, "not adding: queue is empty".into());
                     return;
                 }
             };
@@ -825,17 +854,15 @@ fn handle_overlay_action(
                         }
                         Err(e) => {
                             budget.release(id);
-                            eprintln!("screen {monitor_index}: tile creation failed: {e}");
+                            notify(overlay, format!("not adding: tile creation failed: {e}"));
                         }
                     }
                 }
                 Admission::RejectedBudget { would_use, ceiling } => {
-                    println!(
-                        "screen {monitor_index}: not adding tile — decode budget full ({would_use:.0}/{ceiling} mbps)"
-                    );
+                    notify(overlay, format!("not adding: decode budget full ({would_use:.0}/{ceiling} mbps)"));
                 }
                 Admission::RejectedMaxStreams { max } => {
-                    println!("screen {monitor_index}: not adding tile — max streams ({max})");
+                    notify(overlay, format!("not adding: max concurrent streams ({max})"));
                 }
             }
         }
@@ -843,6 +870,7 @@ fn handle_overlay_action(
             for si in 0..screens.len() {
                 if screens[si].tiles.iter().any(|t| t.id == tile_id) {
                     let monitor_index = screens[si].monitor_index;
+                    let was_zoomed = screens[si].zoomed == Some(tile_id);
                     budget.release(tile_id);
                     if screens[si].remove_tile(tile_id) {
                         println!(
@@ -850,12 +878,22 @@ fn handle_overlay_action(
                             screens[si].tiles.len()
                         );
                     }
+                    if was_zoomed {
+                        toggle_fullscreen(screens, si, None);
+                    }
                     break;
                 }
             }
         }
+        OverlayAction::FullscreenToggle { tile_id } => {
+            if screens[screen_idx].zoomed.is_some() {
+                toggle_fullscreen(screens, screen_idx, None);
+            } else {
+                toggle_fullscreen(screens, screen_idx, Some(tile_id));
+            }
+        }
         OverlayAction::DeleteCurrent { tile_id } => {
-            delete_current(screens, screen_idx, tile_id);
+            delete_current(screens, screen_idx, tile_id, overlay);
         }
         OverlayAction::QueueRemove { index } => {
             let monitor_index = screens[screen_idx].monitor_index;
@@ -895,10 +933,39 @@ fn handle_overlay_action(
     }
 }
 
+/// Toggles a screen's zoomed/fullscreen state. `tile_id` is the tile to
+/// zoom onto (None just exits zoom). In windowed mode the window itself
+/// also goes borderless-fullscreen on its current monitor — other monitors
+/// and windows are unaffected. In multi-screen mode the windows are already
+/// fullscreen, so only the tile zoom applies.
+fn toggle_fullscreen(screens: &mut [Screen], idx: usize, tile_id: Option<usize>) {
+    let screen = &mut screens[idx];
+    if screen.zoomed.is_some() {
+        screen.zoomed = None;
+        if let Some((pos, size)) = screen.windowed_restore.take() {
+            screen.window.set_fullscreen(None);
+            screen.window.set_outer_position(pos);
+            let _ = screen.window.request_inner_size(size);
+            screen.resize(size.width, size.height);
+        }
+    } else if let Some(id) = tile_id {
+        screen.zoomed = Some(id);
+        if screen.window.fullscreen().is_none() {
+            // Windowed window: also take over the whole monitor.
+            if let Ok(pos) = screen.window.outer_position() {
+                let size = screen.window.inner_size();
+                screen.windowed_restore = Some((pos, size));
+            }
+            let monitor = screen.window.current_monitor();
+            screen.window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(monitor)));
+        }
+    }
+}
+
 /// Deletes the tile's current video at its source (local file, or the
 /// server's delete API), drops it from the queue, and advances the tile to
 /// the next item.
-fn delete_current(screens: &mut [Screen], screen_idx: usize, tile_id: usize) {
+fn delete_current(screens: &mut [Screen], screen_idx: usize, tile_id: usize, overlay: &mut OverlayState) {
     let Some(tile) = screens[screen_idx].tiles.iter().find(|t| t.id == tile_id) else {
         return;
     };
@@ -911,7 +978,8 @@ fn delete_current(screens: &mut [Screen], screen_idx: usize, tile_id: usize) {
             item.kind.label()
         ),
         Err(e) => {
-            eprintln!("screen {monitor_index} tile {tile_id}: delete failed: {e}");
+            println!("delete failed: {e}");
+            overlay.notice = Some((format!("delete failed: {e}"), Instant::now()));
             return;
         }
     }

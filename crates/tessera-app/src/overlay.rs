@@ -33,6 +33,9 @@ pub struct OverlayState {
     /// Clicking the trash a second time within CONFIRM_SECS deletes the
     /// tile's current video and advances it.
     pub confirm_delete: Option<(usize, std::time::Instant)>,
+    /// Transient on-screen feedback (shown a few seconds even while the
+    /// rest of the overlay is hidden).
+    pub notice: Option<(String, std::time::Instant)>,
 }
 
 #[derive(Debug)]
@@ -56,6 +59,9 @@ pub enum OverlayAction {
     DeleteCurrent { tile_id: usize },
     /// Transport "+": add a tile to this screen, taking the next queue item.
     AddPanel,
+    /// Transport fullscreen icon / F key: zoom this tile to fill its screen
+    /// (toggles back).
+    FullscreenToggle { tile_id: usize },
     /// Transport "−": remove this tile from its screen (other screens are
     /// untouched).
     RemovePanel { tile_id: usize },
@@ -175,6 +181,9 @@ pub fn draw(
 
     // Per-tile info chips, anchored at each tile's top-left corner.
     for (tile, cell) in tiles.iter().zip(cells.iter()) {
+        if cell.w <= 0.0 || cell.h <= 0.0 {
+            continue; // hidden while another tile is zoomed
+        }
         egui::Area::new(egui::Id::new(format!("tile-chip-{}", tile.id)))
             .order(egui::Order::Foreground)
             .fixed_pos(egui::pos2(cell.x / ppp + 8.0, cell.y / ppp + 8.0))
@@ -259,6 +268,39 @@ pub fn draw(
                                 .small()
                                 .weak(),
                             );
+                            // Fullscreen this tile (painter-drawn corner-bracket
+                            // icon: no font dependency).
+                            let (zrect, zresp) = ui.allocate_exact_size(
+                                egui::vec2(20.0, 16.0),
+                                egui::Sense::click(),
+                            );
+                            {
+                                let p = ui.painter_at(zrect);
+                                let col = if zresp.hovered() {
+                                    egui::Color32::WHITE
+                                } else {
+                                    egui::Color32::from_gray(180)
+                                };
+                                let r = zrect.shrink(2.0);
+                                let arm = 5.0;
+                                let st = egui::Stroke::new(1.6, col);
+                                let lt = r.left_top();
+                                let rt = r.right_top();
+                                let lb = r.left_bottom();
+                                let rb = r.right_bottom();
+                                p.line_segment([lt, egui::pos2(r.left() + arm, r.top())], st);
+                                p.line_segment([lt, egui::pos2(r.left(), r.top() + arm)], st);
+                                p.line_segment([rt, egui::pos2(r.right() - arm, r.top())], st);
+                                p.line_segment([rt, egui::pos2(r.right(), r.top() + arm)], st);
+                                p.line_segment([lb, egui::pos2(r.left() + arm, r.bottom())], st);
+                                p.line_segment([lb, egui::pos2(r.left(), r.bottom() - arm)], st);
+                                p.line_segment([rb, egui::pos2(r.right() - arm, r.bottom())], st);
+                                p.line_segment([rb, egui::pos2(r.right(), r.bottom() - arm)], st);
+                            }
+                            if zresp.clicked() {
+                                actions.push(OverlayAction::FullscreenToggle { tile_id: tile.id });
+                            }
+                            zresp.on_hover_text("fullscreen this tile (F)");
                             // Panel management: remove this tile / add one.
                             if b(ui, "−", 20.0).on_hover_text("remove this tile").clicked() {
                                 actions.push(OverlayAction::RemovePanel { tile_id: tile.id });
@@ -432,6 +474,34 @@ pub fn draw(
                 });
         }
     }
+}
+
+/// Transient feedback toast, top-center. Drawn even while the rest of the
+/// overlay is hidden, fading out over the last second.
+pub fn draw_notice(ctx: &egui::Context, notice: &(String, std::time::Instant)) {
+    const SHOW_SECS: f64 = 4.0;
+    let age = notice.1.elapsed().as_secs_f64();
+    if age > SHOW_SECS {
+        return;
+    }
+    let alpha = if age > SHOW_SECS - 1.0 {
+        ((SHOW_SECS - age) as f32).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    egui::Area::new(egui::Id::new("tessera-notice"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 44.0))
+        .show(ctx, |ui| {
+            egui::Frame::none()
+                .fill(egui::Color32::from_black_alpha((215.0 * alpha) as u8))
+                .rounding(egui::Rounding::same(6.0))
+                .inner_margin(egui::Margin::symmetric(12.0, 7.0))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_black_alpha((120.0 * alpha) as u8)))
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new(&notice.0).color(egui::Color32::from_white_alpha((255.0 * alpha) as u8)));
+                });
+        });
 }
 
 /// Fits a thumbnail into the thumb box, preserving aspect.
