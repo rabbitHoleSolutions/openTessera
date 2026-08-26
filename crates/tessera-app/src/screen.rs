@@ -23,8 +23,17 @@ pub struct Screen {
     layout: Vec<Rect>,
     /// Tile currently zoomed to fill the screen (F / transport icon).
     pub zoomed: Option<usize>,
-    /// Window geometry saved before entering OS fullscreen in windowed mode.
+    /// The monitor this screen was created on; used to re-assert fullscreen
+    /// when the WM displaces fullscreen windows (observed with pop-shell
+    /// when another window leaves fullscreen).
+    pub intended_monitor: Option<winit::monitor::MonitorHandle>,
+    /// Window geometry saved by W (window-mode toggle) before expanding to
+    /// fullscreen; restored when the window becomes a window again.
     pub windowed_restore: Option<(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>)>,
+    /// Window geometry saved by F (tile zoom) when IT took the window
+    /// fullscreen; restored when the zoom exits. Kept separate so W and F
+    /// never clobber each other's restore state.
+    pub zoom_restore: Option<(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>)>,
     last_status_tp: Vec<f64>,
     pub frames_drawn: u64,
     pub thumbs: ThumbCache,
@@ -55,7 +64,9 @@ impl Screen {
             queue,
             layout: Vec::new(),
             zoomed: None,
+            intended_monitor: None,
             windowed_restore: None,
+            zoom_restore: None,
             last_status_tp: Vec::new(),
             frames_drawn: 0,
             thumbs: ThumbCache::new(),
@@ -250,9 +261,10 @@ impl Screen {
         let thumbs = &mut self.thumbs;
         let notice = overlay.notice.clone();
         let mut help_open = overlay.help_open;
+        let window_fullscreen = self.window.fullscreen().is_some();
         egui.run(&window, |ctx| {
             if visible {
-                overlay::draw(ctx, monitor_index, pinned, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete);
+                overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete);
             }
             if help_open {
                 overlay::draw_help(ctx, &mut help_open);
