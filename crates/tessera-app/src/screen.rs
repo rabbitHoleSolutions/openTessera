@@ -285,6 +285,22 @@ impl Screen {
         self.pending_screenshot = Some((dir, tag.to_string()));
     }
 
+    /// Removes a tile from this screen: frees its GL resources and mpv
+    /// instance, drops its status slot, and re-solves the grid so the
+    /// remaining tiles fill the screen.
+    pub fn remove_tile(&mut self, id: usize) -> bool {
+        let Some(pos) = self.tiles.iter().position(|t| t.id == id) else {
+            return false;
+        };
+        self.context.make_current(&self.surface).ok();
+        let mut tile = self.tiles.remove(pos);
+        tile.destroy_gl(&self.gl);
+        self.last_status_tp.remove(pos);
+        let size = self.window.inner_size();
+        self.relayout(size.width as i32, size.height as i32);
+        true
+    }
+
     /// Hit-tests the cursor (top-left pixel origin) and returns the tile id.
     pub fn tile_at(&self, x: f32, y: f32) -> Option<usize> {
         self.tiles

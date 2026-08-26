@@ -38,12 +38,16 @@ Phase 1 skeleton — playback foundation:
   N/P load the next/previous queue item on each tile.
 - Queue management (Quest-immersive style): hovering a tile shows its
   screen's queue as a thumbnail strip along the bottom of that tile — click
-  a thumbnail to play it on that tile immediately, right-click or the ✕ in
-  the corner to remove it from the queue, drag to reorder, shuffle / A–Z
-  buttons re-sort the pending tail. Hovered thumbnails highlight.
+  a thumbnail to play it on that tile immediately, right-click to remove it
+  from the queue, drag to reorder, shuffle / A–Z buttons re-sort the pending tail. Hovered thumbnails highlight.
   Thumbnails come from the media servers (Jellyfin primary art, Plex
   thumbs) via a background fetch+decode cache; local files show a
   placeholder.
+- Panel management: each tile's transport row has "−" (remove that tile —
+  its GL resources and stream are freed and the grid re-solves) and "+"
+  (add a tile to this screen, taking the next queue item; honors the
+  decode budget, `--tiles` cap, and budget-aware eviction). Other screens
+  are unaffected.
 - Delete from transport: each tile's transport row has a 🗑 button that
   deletes the tile's current video at its source — the local file, or the
   server-side item (Jellyfin `DELETE /Items/{id}`, Plex

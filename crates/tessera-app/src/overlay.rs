@@ -54,6 +54,11 @@ pub enum OverlayAction {
     /// Transport trash clicked twice: delete the tile's current video at its
     /// source and advance to the next queue item.
     DeleteCurrent { tile_id: usize },
+    /// Transport "+": add a tile to this screen, taking the next queue item.
+    AddPanel,
+    /// Transport "−": remove this tile from its screen (other screens are
+    /// untouched).
+    RemovePanel { tile_id: usize },
     /// Queue drag reorder: insert `from` before `to`.
     QueueReorder { from: usize, to: usize },
     /// Reshuffle the pending queue tail.
@@ -254,6 +259,13 @@ pub fn draw(
                                 .small()
                                 .weak(),
                             );
+                            // Panel management: remove this tile / add one.
+                            if b(ui, "−", 20.0).on_hover_text("remove this tile").clicked() {
+                                actions.push(OverlayAction::RemovePanel { tile_id: tile.id });
+                            }
+                            if b(ui, "+", 20.0).on_hover_text("add a tile (next from queue)").clicked() {
+                                actions.push(OverlayAction::AddPanel);
+                            }
                             // Delete current video (click twice to confirm).
                             let armed = matches!(confirm_delete, Some((id, _)) if *id == tile.id);
                             let mut btn = egui::Button::new(
@@ -376,30 +388,8 @@ pub fn draw(
                                         if resp.hovered() {
                                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                                         }
-                                        // X button in the top-right corner: remove from the
-                                        // queue (the file itself is not touched).
-                                        let corner = egui::Rect::from_min_size(
-                                            egui::pos2(rect.right() - 17.0, rect.top() + 1.0),
-                                            egui::vec2(16.0, 15.0),
-                                        );
-                                        if resp.hovered() {
-                                            painter.circle_filled(corner.center(), 8.0, egui::Color32::from_black_alpha(200));
-                                            painter.text(
-                                                corner.center(),
-                                                egui::Align2::CENTER_CENTER,
-                                                "✕",
-                                                egui::FontId::proportional(10.0),
-                                                egui::Color32::WHITE,
-                                            );
-                                        }
                                         if resp.clicked() {
-                                            let click = ui.input(|i| i.pointer.interact_pos());
-                                            let on_x = click.map(|c| corner.contains(c)).unwrap_or(false);
-                                            if on_x {
-                                                actions.push(OverlayAction::QueueRemove { index: entry.index });
-                                            } else {
-                                                actions.push(OverlayAction::PlayOnTile { tile_id, index: entry.index });
-                                            }
+                                            actions.push(OverlayAction::PlayOnTile { tile_id, index: entry.index });
                                         }
                                         if resp.clicked_by(egui::PointerButton::Secondary) {
                                             actions.push(OverlayAction::QueueRemove { index: entry.index });
@@ -421,7 +411,7 @@ pub fn draw(
                                         }
                                         rects.push((entry.index, rect));
                                         resp.on_hover_text(format!(
-                                            "{}\nclick: play here · ✕ / right-click: remove from queue · drag: reorder",
+                                            "{}\nclick: play here · right-click: remove from queue · drag: reorder",
                                             entry.title
                                         ));
                                     }

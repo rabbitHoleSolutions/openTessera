@@ -428,7 +428,16 @@ fn main() {
                         // the tick (pause/resume needs cross-screen budget
                         // access, which the drawing code can't have).
                         for action in std::mem::take(&mut overlay.actions) {
-                            handle_overlay_action(&mut screens, &mut budget, action, screen_idx);
+                            handle_overlay_action(
+                                &mut screens,
+                                &mut budget,
+                                action,
+                                screen_idx,
+                                &mpv_lib,
+                                &tile_opts,
+                                &mut next_tile_id,
+                                args.tiles,
+                            );
                         }
                     }
                     // A deferred click that no egui layer claimed: execute as
@@ -688,7 +697,17 @@ fn resume_tile(screens: &mut [Screen], budget: &mut DecodeBudget, id: usize) {
 
 /// Executes one queued overlay interaction. `screen_idx` is the screen whose
 /// overlay produced the action.
-fn handle_overlay_action(screens: &mut [Screen], budget: &mut DecodeBudget, action: OverlayAction, screen_idx: usize) {
+#[allow(clippy::too_many_arguments)]
+fn handle_overlay_action(
+    screens: &mut [Screen],
+    budget: &mut DecodeBudget,
+    action: OverlayAction,
+    screen_idx: usize,
+    mpv_lib: &std::sync::Arc<tessera_mpv::MpvLib>,
+    tile_opts: &TileOptions,
+    next_tile_id: &mut usize,
+    max_tiles: usize,
+) {
     match action {
         OverlayAction::TogglePause { tile_id } => {
             let playing = screens
@@ -775,6 +794,64 @@ fn handle_overlay_action(screens: &mut [Screen], budget: &mut DecodeBudget, acti
                     }
                 }
                 break;
+            }
+        }
+        OverlayAction::AddPanel => {
+            let monitor_index = screens[screen_idx].monitor_index;
+            if screens[screen_idx].tiles.len() >= max_tiles {
+                println!("screen {monitor_index}: at --tiles {max_tiles} limit, not adding");
+                return;
+            }
+            let item = match screens[screen_idx].queue.advance().cloned() {
+                Some(m) => m,
+                None => {
+                    println!("screen {monitor_index}: queue empty, not adding");
+                    return;
+                }
+            };
+            let id = *next_tile_id;
+            match request_admission(screens, budget, id, &tessera_core::StreamSpec::placeholder()) {
+                Admission::Admitted | Admission::AdmittedEvicting { .. } => {
+                    screens[screen_idx].context.make_current(&screens[screen_idx].surface).ok();
+                    match Tile::new(mpv_lib, id, &item, tile_opts) {
+                        Ok(tile) => {
+                            screens[screen_idx].add_tile(tile);
+                            *next_tile_id += 1;
+                            println!(
+                                "screen {monitor_index}: added tile {id} \"{}\" ({} tiles)",
+                                item.title,
+                                screens[screen_idx].tiles.len()
+                            );
+                        }
+                        Err(e) => {
+                            budget.release(id);
+                            eprintln!("screen {monitor_index}: tile creation failed: {e}");
+                        }
+                    }
+                }
+                Admission::RejectedBudget { would_use, ceiling } => {
+                    println!(
+                        "screen {monitor_index}: not adding tile — decode budget full ({would_use:.0}/{ceiling} mbps)"
+                    );
+                }
+                Admission::RejectedMaxStreams { max } => {
+                    println!("screen {monitor_index}: not adding tile — max streams ({max})");
+                }
+            }
+        }
+        OverlayAction::RemovePanel { tile_id } => {
+            for si in 0..screens.len() {
+                if screens[si].tiles.iter().any(|t| t.id == tile_id) {
+                    let monitor_index = screens[si].monitor_index;
+                    budget.release(tile_id);
+                    if screens[si].remove_tile(tile_id) {
+                        println!(
+                            "screen {monitor_index}: removed tile {tile_id} ({} left)",
+                            screens[si].tiles.len()
+                        );
+                    }
+                    break;
+                }
             }
         }
         OverlayAction::DeleteCurrent { tile_id } => {
