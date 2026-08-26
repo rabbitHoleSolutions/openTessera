@@ -25,10 +25,14 @@ pub struct OverlayState {
     /// A click awaiting its frame-time verdict: if the position lands on an
     /// egui layer, the UI owns it; otherwise it executes as a raw video-wall
     /// click. Event-time consumption can't be trusted — egui's notion of the
-    /// pointer position lags one frame behind.
+    /// pointer position lags one frame behind. Left presses stay parked here
+    /// until release (raw click) or until the pointer moves past the drag
+    /// threshold (tile drag).
     pub pending_click: Option<PendingClick>,
     /// Queue strip drag in progress: the source entry's queue index.
     pub queue_drag: Option<usize>,
+    /// Same-screen tile drag in progress (drag-to-rearrange).
+    pub tile_drag: Option<TileDrag>,
     /// Delete confirmation armed on a tile's transport: (tile id, armed at).
     /// Clicking the trash a second time within CONFIRM_SECS deletes the
     /// tile's current video and advances it.
@@ -49,6 +53,9 @@ pub struct UiSettings {
     pub ui_scale: f32,
     /// Demuxer cache size in MiB per stream.
     pub cache_mb: u32,
+    /// Max concurrent playing streams (budget count cap; the mbps ceiling
+    /// is the real decode-load guard).
+    pub max_streams: u32,
     /// Audio pipeline enabled (tiles still start muted).
     pub audio: bool,
     /// Transient: the scale slider is being dragged — the UI must NOT
@@ -59,13 +66,22 @@ pub struct UiSettings {
 
 impl PartialEq for UiSettings {
     fn eq(&self, other: &Self) -> bool {
-        self.ui_scale == other.ui_scale && self.cache_mb == other.cache_mb && self.audio == other.audio
+        self.ui_scale == other.ui_scale
+            && self.cache_mb == other.cache_mb
+            && self.max_streams == other.max_streams
+            && self.audio == other.audio
     }
 }
 
 impl Default for UiSettings {
     fn default() -> UiSettings {
-        UiSettings { ui_scale: 1.0, cache_mb: 512, audio: false, scale_dragging: false }
+        UiSettings {
+            ui_scale: 1.0,
+            cache_mb: 512,
+            max_streams: tessera_core::budget::DEFAULT_MAX_STREAMS as u32,
+            audio: false,
+            scale_dragging: false,
+        }
     }
 }
 
@@ -123,6 +139,15 @@ pub struct PendingClick {
     pub right: bool,
 }
 
+/// A same-screen tile drag in progress: the dragged tile's id and the
+/// current pointer position (window pixels, top-left origin).
+#[derive(Debug, Clone, Copy)]
+pub struct TileDrag {
+    pub window_id: winit::window::WindowId,
+    pub from_tile: usize,
+    pub pos: (f32, f32),
+}
+
 /// Snapshot of one tile, taken before the egui pass (avoids borrowing the
 /// Screen while egui runs).
 pub struct TileUiInfo {
@@ -170,6 +195,7 @@ pub fn draw(
     queue: &[QueueEntry],
     budget: &BudgetUi,
     hover: Option<(usize, Rect)>,
+    tile_drag: Option<TileDrag>,
     thumbs: &mut ThumbCache,
     actions: &mut Vec<OverlayAction>,
     queue_drag: &mut Option<usize>,
@@ -473,6 +499,27 @@ pub fn draw(
             });
     }
 
+    // Tile drag-to-rearrange feedback: the source cell gets an outline; the
+    // cell under the pointer highlights as the swap target. Drawn on the
+    // debug layer so it sits above every panel.
+    if let Some(drag) = tile_drag {
+        let painter = ctx.debug_painter();
+        let accent = egui::Color32::from_rgb(120, 190, 255);
+        let stroke = egui::Stroke::new(2.0, accent);
+        if let Some((_, src)) = tiles.iter().zip(cells.iter()).find(|(t, _)| t.id == drag.from_tile) {
+            let r = px_rect(src, ppp);
+            painter.rect_stroke(r, egui::Rounding::same(4.0), stroke);
+        }
+        if let Some((_, cell)) = tiles.iter().zip(cells.iter()).find(|(t, c)| {
+            t.id != drag.from_tile && c.w > 0.0 && c.contains(drag.pos.0, drag.pos.1)
+        }) {
+            let r = px_rect(cell, ppp);
+            painter.rect_filled(r, egui::Rounding::same(4.0), egui::Color32::from_rgba_unmultiplied(120, 190, 255, 36));
+            painter.rect_stroke(r, egui::Rounding::same(4.0), stroke);
+        }
+        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
+
     // Per-tile hover queue: anchored at the bottom of the tile the cursor is
     // over. Click a thumbnail to play it on that tile right now; right-click
     // removes it from the queue; drag reorders; shuffle / A–Z re-sort.
@@ -648,6 +695,11 @@ pub fn draw_settings(ctx: &egui::Context, settings: &mut UiSettings, open: &mut 
                         );
                     });
                     ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("max concurrent streams");
+                        ui.add(egui::DragValue::new(&mut settings.max_streams).clamp_range(1..=128));
+                    });
+                    ui.add_space(4.0);
                     ui.checkbox(&mut settings.audio, "audio enabled (tiles still start muted)");
                     ui.add_space(6.0);
                     ui.weak("changes apply immediately and are saved to");
@@ -708,6 +760,7 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                         .show(ui, |ui| {
                             let mouse: &[(&str, &str)] = &[
                                 ("click tile", "pause/resume that tile"),
+                                ("drag tile", "swap it with another tile on this screen (Esc cancels)"),
                                 ("right-click tile", "mute/unmute audio (needs --audio)"),
                                 ("hover tile", "show the queue strip at its bottom"),
                                 ("click thumb", "play that item on the hovered tile"),
@@ -758,6 +811,14 @@ pub fn draw_notice(ctx: &egui::Context, notice: &(String, std::time::Instant)) {
                     ui.label(egui::RichText::new(&notice.0).color(egui::Color32::from_white_alpha((255.0 * alpha) as u8)));
                 });
         });
+}
+
+/// Converts a tessera pixel-space rect to egui points.
+fn px_rect(r: &Rect, ppp: f32) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(r.x / ppp, r.y / ppp),
+        egui::pos2((r.x + r.w) / ppp, (r.y + r.h) / ppp),
+    )
 }
 
 /// Fits a thumbnail into the thumb box, preserving aspect.

@@ -77,7 +77,7 @@ pub const MBPS_1080P30: f64 = 244_800.0;
 /// against NVDEC on an RTX 5080 with enormous headroom remaining.
 pub const DEFAULT_CEILING_EQUIVALENTS: f64 = 96.0;
 
-pub const DEFAULT_MAX_STREAMS: usize = 16;
+pub const DEFAULT_MAX_STREAMS: usize = 128;
 
 /// Sustained decoder drop rate (drops/sec) that triggers adaptive shrink.
 pub const DROP_RATE_THRESHOLD: f64 = 10.0;
@@ -139,6 +139,21 @@ impl DecodeBudget {
 
     pub fn max_streams(&self) -> usize {
         self.max_streams
+    }
+
+    /// Changes the max-streams cap at runtime. When the new cap is below
+    /// the active count, the oldest-started streams are evicted (returned
+    /// so the caller can pause them) until the count fits.
+    pub fn set_max_streams(&mut self, n: usize) -> Vec<usize> {
+        self.max_streams = n;
+        let mut evicted = Vec::new();
+        while self.active.len() > self.max_streams {
+            match self.evict_oldest() {
+                Some(id) => evicted.push(id),
+                None => break,
+            }
+        }
+        evicted
     }
 
     pub fn active_count(&self) -> usize {
@@ -370,6 +385,28 @@ mod tests {
         b.release(2);
         b.release(3);
         assert_eq!(b.request(4, &s(640, 360, 30.0, Codec::Hevc)), Admission::Admitted);
+    }
+
+    #[test]
+    fn set_max_streams_evicts_down_to_cap() {
+        let mut b = DecodeBudget::new(100.0, 8);
+        for id in 1..=4 {
+            b.request(id, &s(640, 360, 30.0, Codec::Hevc));
+        }
+        assert_eq!(b.active_count(), 4);
+        // Lowering below the active count evicts the oldest-started.
+        assert_eq!(b.set_max_streams(2), vec![1, 2]);
+        assert_eq!(b.active_ids(), vec![3, 4]);
+        assert_eq!(b.max_streams(), 2);
+        // The new cap admits again — at the cap, the oldest yields its slot.
+        match b.request(5, &s(640, 360, 30.0, Codec::Hevc)) {
+            Admission::AdmittedEvicting { evicted } => assert_eq!(evicted, 3),
+            other => panic!("expected eviction, got {other:?}"),
+        }
+        // Raising never evicts; new room is available immediately.
+        assert!(b.set_max_streams(16).is_empty());
+        assert_eq!(b.request(6, &s(640, 360, 30.0, Codec::Hevc)), Admission::Admitted);
+        assert_eq!(b.active_ids(), vec![4, 5, 6]);
     }
 
     #[test]

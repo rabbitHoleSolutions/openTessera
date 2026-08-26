@@ -30,6 +30,10 @@ enum ScreenSel {
     Windowed(u32, u32),
 }
 
+/// Pointer travel (px) before a held left press becomes a tile drag —
+/// small enough to feel immediate, big enough that plain clicks stay clicks.
+const DRAG_SLOP_PX: f32 = 8.0;
+
 struct Args {
     files: Vec<PathBuf>,
     tiles: usize,
@@ -39,9 +43,9 @@ struct Args {
     audio_device: Option<String>,
     ui_scale: Option<f32>,
     cache_mb: Option<u32>,
-    advance: bool,
-    max_streams: usize,
+    max_streams: Option<usize>,
     ceiling: f64,
+    advance: bool,
     status_interval: u64,
     overlay: bool,
     plex: bool,
@@ -60,9 +64,9 @@ fn parse_args() -> Result<Args, String> {
         audio_device: None,
         ui_scale: None,
         cache_mb: None,
-        advance: false,
-        max_streams: tessera_core::budget::DEFAULT_MAX_STREAMS,
+        max_streams: None,
         ceiling: tessera_core::budget::DEFAULT_CEILING_EQUIVALENTS,
+        advance: false,
         status_interval: 5,
         overlay: false,
         plex: false,
@@ -85,7 +89,7 @@ fn parse_args() -> Result<Args, String> {
                 args.screens = ScreenSel::Windowed(w.parse().map_err(|_| "bad --windowed W")?, h.parse().map_err(|_| "bad --windowed H")?);
             }
             "--hwdec" => args.hwdec = value()?,
-            "--max-streams" => args.max_streams = value()?.parse().map_err(|_| "bad --max-streams")?,
+            "--max-streams" => args.max_streams = Some(value()?.parse().map_err(|_| "bad --max-streams")?),
             "--ceiling" => args.ceiling = value()?.parse().map_err(|_| "bad --ceiling")?,
             "--status-interval" => args.status_interval = value()?.parse().map_err(|_| "bad --status-interval")?,
             "--overlay" => args.overlay = true,
@@ -137,7 +141,7 @@ OPTIONS:
                      decode without the CUDA/GL zero-copy interop, which
                      segfaults in mpv 0.34 when many decoders re-initialize;
                      use auto-safe for zero-copy at your own risk)
-  --max-streams N    Budget: max concurrent streams (default 16)
+  --max-streams N    Budget: max concurrent streams (default 128; also in settings)
   --ceiling N        Budget: 1080p30-equivalent decode ceiling (default 96)
   --status-interval S  Seconds between status prints (default 5)
   --overlay          Start with the overlay UI pinned on (Tab toggles pinning;
@@ -154,6 +158,7 @@ CONTROLS:
   Tab                Pin/unpin the overlay UI (auto-hides after 5s idle)
   Space              Pause/resume all tiles on the focused screen
   Left click         Pause/resume the clicked tile
+  Drag               Rearrange: drag a tile onto another to swap them (Esc cancels)
   Right click        Mute/unmute the clicked tile (needs --audio)
   Up/Down arrows     Volume +/-5 on unmuted tiles of the focused screen
   Left/Right arrows  Seek -/+10s on all tiles of the focused screen
@@ -186,8 +191,38 @@ fn install_fatal_handler() {
     }
 }
 
+/// Raises the soft fd limit to the hard limit. Every tile's mpv holds
+/// dozens of fds (stream socket, demuxer cache, event pipes, and — with
+/// audio — a pipewire context), so a full wall easily exhausts the GNOME
+/// session's default 1024 soft limit. That doesn't just fail loads: GL
+/// fence creation needs an fd too, and exhausting them wedged the NVIDIA
+/// DRM driver hard enough to take the whole desktop down (2026-08-26).
+fn raise_fd_limit() {
+    unsafe {
+        let mut rl: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) != 0 || rl.rlim_cur >= rl.rlim_max {
+            return;
+        }
+        let (old, target) = (rl.rlim_cur, rl.rlim_max);
+        rl.rlim_cur = target;
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &rl) == 0 {
+            let show = |v: libc::rlim_t| {
+                if v == libc::RLIM_INFINITY { "unlimited".to_string() } else { v.to_string() }
+            };
+            println!("fd limit: raised soft limit {} -> {}", show(old), show(target));
+        }
+    }
+}
+
+/// Current fd usage (open descriptors in /proc/self/fd) for the status
+/// line — fd exhaustion is invisible otherwise.
+fn fd_count() -> usize {
+    std::fs::read_dir("/proc/self/fd").map(|d| d.count()).unwrap_or(0)
+}
+
 fn main() {
     install_fatal_handler();
+    raise_fd_limit();
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
@@ -324,6 +359,9 @@ fn main() {
     if let Some(c) = args.cache_mb {
         settings.cache_mb = c.clamp(64, 8192);
     }
+    if let Some(m) = args.max_streams {
+        settings.max_streams = (m as u32).clamp(1, 128);
+    }
     let mut tile_opts = TileOptions {
         hwdec: args.hwdec.clone(),
         audio: settings.audio,
@@ -335,7 +373,7 @@ fn main() {
 
     let n_screens = windows.len();
     let mut screens: Vec<Screen> = Vec::new();
-    let mut budget = DecodeBudget::new(args.ceiling, args.max_streams);
+    let mut budget = DecodeBudget::new(args.ceiling, settings.max_streams as usize);
     let mut next_tile_id = 0usize;
 
     for (window, monitor_index) in windows {
@@ -412,6 +450,8 @@ fn main() {
     let mut mods = winit::keyboard::ModifiersState::empty();
     // Which screen the mouse cursor is currently over (W applies there).
     let mut cursor_over: Option<usize> = None;
+    // Left mouse button currently held (drag-threshold tracking).
+    let mut left_held = false;
     // Deferred WM-settle check after a window/fullscreen toggle:
     // (deadline, retries left). Retries continue while displaced walls
     // keep being found.
@@ -538,23 +578,34 @@ fn main() {
                             tile_opts.cache_mb = settings.cache_mb;
                             println!("settings: cache {} MiB per stream", settings.cache_mb);
                         }
+                        if settings.max_streams != settings_before.max_streams {
+                            let evicted = budget.set_max_streams(settings.max_streams as usize);
+                            println!(
+                                "settings: max streams {} (was {}){}",
+                                settings.max_streams,
+                                settings_before.max_streams,
+                                if evicted.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" — evicted {} oldest stream(s)", evicted.len())
+                                }
+                            );
+                            for id in evicted {
+                                pause_and_release(&mut screens, &mut budget, id, "evicted: max streams lowered");
+                            }
+                        }
                         save_settings(&settings);
                     }
-                    // A deferred click that no egui layer claimed: execute as
-                    // a raw video-wall click.
-                    if let Some(pc) = overlay.pending_click.take() {
-                        if let Some(idx) = screens.iter().position(|s| s.window.id() == pc.window_id) {
-                            if pc.right {
+                    // Deferred click resolution. Right presses execute now
+                    // (mute toggle); left presses that no UI layer claimed
+                    // stay parked in pending_click until release — they
+                    // become plain clicks (pause/resume) or tile drags once
+                    // the pointer crosses DRAG_SLOP_PX.
+                    if let Some(pc) = overlay.pending_click {
+                        if pc.right {
+                            overlay.pending_click = None;
+                            if let Some(idx) = screens.iter().position(|s| s.window.id() == pc.window_id) {
                                 screens[idx].click_mute(pc.x, pc.y);
-                            } else if let Some(id) = screens[idx].tile_at(pc.x, pc.y) {
-                                let playing = screens
-                                    .iter()
-                                    .any(|s| s.tiles.iter().any(|t| t.id == id && !t.is_paused()));
-                                if playing {
-                                    pause_and_release(&mut screens, &mut budget, id, "user pause");
-                                } else {
-                                    resume_tile(&mut screens, &mut budget, id);
-                                }
                             }
                         }
                     }
@@ -562,7 +613,7 @@ fn main() {
                         let dt = last_status.elapsed().as_secs_f64();
                         last_status = Instant::now();
                         let elapsed = start.elapsed().as_secs();
-                        println!("--- t+{elapsed}s ---");
+                        println!("--- t+{elapsed}s --- fds {}", fd_count());
 
                         // Adaptive decode-budget feedback: sample per-tile
                         // decoder drop rates; sustained drops shrink the
@@ -648,32 +699,113 @@ fn main() {
                             mods = m.state();
                         }
                         WindowEvent::CursorMoved { position, .. } => {
-                            cursor_pos[idx] = Some((position.x as f32, position.y as f32));
+                            let (x, y) = (position.x as f32, position.y as f32);
+                            cursor_pos[idx] = Some((x, y));
                             cursor_over = Some(idx);
                             last_input = Instant::now();
+                            if let Some(drag) = overlay.tile_drag {
+                                if drag.window_id == window_id {
+                                    overlay.tile_drag = Some(overlay::TileDrag { pos: (x, y), ..drag });
+                                } else {
+                                    // Cross-screen drops are Phase 2: cancel.
+                                    overlay.tile_drag = None;
+                                }
+                            } else if left_held {
+                                // A held left press past the drag threshold
+                                // becomes a tile drag and cancels the pending
+                                // plain click. The press must have started on
+                                // a tile, not on an overlay widget.
+                                if let Some(pc) = overlay.pending_click.filter(|pc| !pc.right) {
+                                    let (dx, dy) = (x - pc.x, y - pc.y);
+                                    if dx * dx + dy * dy >= DRAG_SLOP_PX * DRAG_SLOP_PX {
+                                        let sidx = screens
+                                            .iter()
+                                            .position(|s| s.window.id() == pc.window_id)
+                                            .filter(|&sidx| {
+                                                screens[sidx].zoomed.is_none()
+                                                    && !pos_on_ui(&screens[sidx], pc.x, pc.y)
+                                            });
+                                        if let Some(sidx) = sidx {
+                                            if let Some(from) = screens[sidx].tile_at(pc.x, pc.y) {
+                                                overlay.tile_drag = Some(overlay::TileDrag {
+                                                    window_id: pc.window_id,
+                                                    from_tile: from,
+                                                    pos: (x, y),
+                                                });
+                                                overlay.pending_click = None;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                         WindowEvent::CursorLeft { .. } => {
                             if cursor_over == Some(idx) {
                                 cursor_over = None;
                             }
                         }
-                        WindowEvent::MouseInput { state: ElementState::Pressed, button, .. } => {
-                            last_input = Instant::now();
-                            if let Some((x, y)) = cursor_pos[idx] {
-                                overlay.pending_click = Some(overlay::PendingClick {
-                                    window_id: window_id,
-                                    x,
-                                    y,
-                                    right: button == MouseButton::Right,
-                                });
+                        WindowEvent::MouseInput { state, button, .. } => match (state, button) {
+                            (ElementState::Pressed, MouseButton::Left) => {
+                                left_held = true;
+                                last_input = Instant::now();
+                                if let Some((x, y)) = cursor_pos[idx] {
+                                    overlay.pending_click = Some(overlay::PendingClick {
+                                        window_id,
+                                        x,
+                                        y,
+                                        right: false,
+                                    });
+                                }
                             }
-                        }
+                            (ElementState::Pressed, MouseButton::Right) => {
+                                last_input = Instant::now();
+                                if let Some((x, y)) = cursor_pos[idx] {
+                                    overlay.pending_click = Some(overlay::PendingClick {
+                                        window_id,
+                                        x,
+                                        y,
+                                        right: true,
+                                    });
+                                }
+                            }
+                            (ElementState::Released, MouseButton::Left) => {
+                                left_held = false;
+                                last_input = Instant::now();
+                                if let Some(drag) = overlay.tile_drag.take() {
+                                    // Released on its own screen: drop (swap).
+                                    // Anywhere else: just cancel.
+                                    if drag.window_id == window_id {
+                                        finish_tile_drag(&mut screens, drag);
+                                    }
+                                } else if let Some(pc) =
+                                    overlay.pending_click.take().filter(|pc| !pc.right)
+                                {
+                                    // Plain click: never crossed the drag
+                                    // threshold. The extra UI hit-test covers
+                                    // a press+release racing past the frame
+                                    // verdict in a single event batch.
+                                    if let Some(sidx) =
+                                        screens.iter().position(|s| s.window.id() == pc.window_id)
+                                    {
+                                        if !pos_on_ui(&screens[sidx], pc.x, pc.y) {
+                                            raw_tile_click(&mut screens, &mut budget, pc);
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        },
                         WindowEvent::KeyboardInput { event: key_event, .. } => {
                             last_input = Instant::now();
                             if key_event.state == ElementState::Pressed {
                                 match key_event.logical_key {
                                     Key::Named(NamedKey::Escape) => {
-                                        if screens[idx].zoomed.is_some() {
+                                        if overlay.tile_drag.is_some() || overlay.pending_click.is_some() {
+                                            // A tile drag (or its press) in progress: cancel
+                                            // it before touching zoom/quit.
+                                            overlay.tile_drag = None;
+                                            overlay.pending_click = None;
+                                        } else if screens[idx].zoomed.is_some() {
                                             // Leave fullscreen first; Esc only quits
                                             // when nothing is zoomed.
                                             toggle_fullscreen(&mut screens, idx, None);
@@ -780,6 +912,11 @@ fn load_settings() -> overlay::UiSettings {
                             s.cache_mb = n.clamp(64, 8192);
                         }
                     }
+                    "max_streams" => {
+                        if let Ok(n) = v.parse::<u32>() {
+                            s.max_streams = n.clamp(1, 128);
+                        }
+                    }
                     "audio" => s.audio = v == "true" || v == "yes" || v == "on",
                     _ => {}
                 }
@@ -796,8 +933,8 @@ fn save_settings(s: &overlay::UiSettings) {
         return;
     }
     let text = format!(
-        "# openTessera settings (also editable at runtime via the gear panel)\nui_scale = {}\ncache_mb = {}\naudio = {}\n",
-        s.ui_scale, s.cache_mb, s.audio
+        "# openTessera settings (also editable at runtime via the gear panel)\nui_scale = {}\ncache_mb = {}\nmax_streams = {}\naudio = {}\n",
+        s.ui_scale, s.cache_mb, s.max_streams, s.audio
     );
     let _ = std::fs::write(dir.join("settings.conf"), text);
 }
@@ -806,6 +943,56 @@ fn dump_dir() -> Option<std::path::PathBuf> {
     let dir = std::path::PathBuf::from(std::env::var("TESSERA_DUMP_DIR").ok()?);
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
+}
+
+/// True when an egui layer (any painted widget) owns the given window
+/// position — the same verdict the deferred click machinery applies inside
+/// the egui pass. Used outside the pass only for the rare press+release
+/// that lands inside a single event batch, before the frame verdict ran.
+fn pos_on_ui(screen: &Screen, x: f32, y: f32) -> bool {
+    let ctx = &screen.egui.egui_ctx;
+    let ppp = ctx.pixels_per_point();
+    matches!(
+        ctx.layer_id_at(egui::pos2(x / ppp, y / ppp)),
+        Some(layer) if layer.order != egui::Order::Background
+    )
+}
+
+/// Executes a raw (non-UI) left click on the video wall: pause/resume the
+/// tile under the press position, budget-aware.
+fn raw_tile_click(screens: &mut [Screen], budget: &mut DecodeBudget, pc: overlay::PendingClick) {
+    let Some(idx) = screens.iter().position(|s| s.window.id() == pc.window_id) else {
+        return;
+    };
+    if let Some(id) = screens[idx].tile_at(pc.x, pc.y) {
+        let playing = screens
+            .iter()
+            .any(|s| s.tiles.iter().any(|t| t.id == id && !t.is_paused()));
+        if playing {
+            pause_and_release(screens, budget, id, "user pause");
+        } else {
+            resume_tile(screens, budget, id);
+        }
+    }
+}
+
+/// Drop handler for a same-screen tile drag: swap the dragged tile with
+/// the tile under the pointer. Dropping on empty space, outside the grid,
+/// or back on the source cell is a no-op.
+fn finish_tile_drag(screens: &mut [Screen], drag: overlay::TileDrag) {
+    let Some(idx) = screens.iter().position(|s| s.window.id() == drag.window_id) else {
+        return;
+    };
+    let Some(to) = screens[idx].tile_at(drag.pos.0, drag.pos.1) else {
+        return;
+    };
+    if to == drag.from_tile {
+        return;
+    }
+    let monitor_index = screens[idx].monitor_index;
+    if screens[idx].swap_tiles(drag.from_tile, to) {
+        println!("screen {monitor_index}: swapped tiles {} and {}", drag.from_tile, to);
+    }
 }
 
 /// Pauses a tile (wherever it lives) and releases its budget slot. The

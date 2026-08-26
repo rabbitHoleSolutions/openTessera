@@ -230,13 +230,20 @@ impl Screen {
                 thumb_url: m.thumb_url.clone(),
             })
             .collect();
-        let hover = cursor.and_then(|(x, y)| {
-            self.tiles
-                .iter()
-                .zip(self.effective_layout().iter())
-                .find(|(_, cell)| cell.contains(x, y))
-                .map(|(t, cell)| (t.id, *cell))
-        });
+        let hover = if overlay.tile_drag.map(|d| d.window_id) == Some(self.window.id()) {
+            // Hide the hover queue strip while rearranging tiles on this
+            // screen: it would sit right where the user is dropping.
+            None
+        } else {
+            cursor.and_then(|(x, y)| {
+                self.tiles
+                    .iter()
+                    .zip(self.effective_layout().iter())
+                    .find(|(_, cell)| cell.contains(x, y))
+                    .map(|(t, cell)| (t.id, *cell))
+            })
+        };
+        let tile_drag = overlay.tile_drag.filter(|d| d.window_id == self.window.id());
         let budget_ui = BudgetUi {
             utilization: budget.utilization(),
             used_mbps: budget.used_mbps(),
@@ -272,7 +279,7 @@ impl Screen {
                 ctx.set_pixels_per_point(settings.ui_scale);
             }
             if visible {
-                overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete);
+                overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, tile_drag, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete);
             }
             if help_open {
                 overlay::draw_help(ctx, &mut help_open);
@@ -364,6 +371,25 @@ impl Screen {
         self.last_status_tp.remove(pos);
         let size = self.window.inner_size();
         self.relayout(size.width as i32, size.height as i32);
+        true
+    }
+
+    /// Swaps the grid cells of two tiles (same-screen drag-to-rearrange).
+    /// Layout derives from the Vec order, so swapping entries swaps cells;
+    /// FBOs belong to the tiles and move with them. The status-rate slots
+    /// swap too so they keep tracking the same tiles.
+    pub fn swap_tiles(&mut self, a: usize, b: usize) -> bool {
+        let Some(pa) = self.tiles.iter().position(|t| t.id == a) else {
+            return false;
+        };
+        let Some(pb) = self.tiles.iter().position(|t| t.id == b) else {
+            return false;
+        };
+        if pa == pb {
+            return false;
+        }
+        self.tiles.swap(pa, pb);
+        self.last_status_tp.swap(pa, pb);
         true
     }
 

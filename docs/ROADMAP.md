@@ -7,7 +7,8 @@ Effort estimates: `S` (< half session), `M` (~1 session), `L` (multi-session).
 
 ## 1. Tile drag-to-rearrange
 
-Status: **not started** — user approved same-screen first; cross-screen wanted later.
+Status: **Phase 1 implemented** — same-screen drag swaps tiles; Phase 2
+(cross-screen) not started.
 
 ### Phase 1: Same-screen drag (do this first)
 
@@ -130,10 +131,14 @@ Status: **not started**
 - egui overlay: status bar, chips, transport, hover queue strips + thumbnails,
   auto-hide (5s) + Tab pin, toasts, help + settings panels
 - Transport: scrub, ±10s, next/prev, keyboard; async seeks/loads
+- Tile drag-to-rearrange: same-screen drag-to-swap (Phase 1 of #1)
 - Sources: local, Plex, Jellyfin (direct-play URIs), library filters,
   delete-at-source
 - Panel management: +/- tiles, per-window W toggle, F tile zoom
-- Settings persistence: ui_scale, cache_mb, audio (~/.config/opentessera/settings.conf)
+- Settings persistence: ui_scale, cache_mb, max_streams (~/.config/opentessera/settings.conf)
+- Stability: fd-limit raise at startup + fds status line (full-wall fd exhaustion
+  wedged nvidia-drm, 2026-08-26), nvdec-copy default (CUDA/GL interop segfault
+  fix, commit c385501), fatal-signal backtrace handler
 - Audio: per-tile mute, --audio/--audio-device, runtime enable
 - Stability: nvdec-copy default (CUDA/GL interop segfault fix, commit c385501),
   fatal-signal backtrace handler
