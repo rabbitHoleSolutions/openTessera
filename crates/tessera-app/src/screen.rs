@@ -10,13 +10,16 @@ use crate::overlay::{self, BudgetUi, OverlayState, TileUiInfo, UiSettings};
 use crate::thumbs::ThumbCache;
 use crate::tile::{Tile, TileEvent};
 
-/// The parts of the world a browser (library-role) screen draws from and a
-/// wall screen ignores: source listings, and every wall tile there is.
-/// Grouped because a `Screen` cannot see its siblings, so both have to be
-/// handed in from the event loop.
-pub struct BrowserCtx<'a> {
+/// The shared services a screen's UI draws from, none of which a `Screen`
+/// can reach on its own: source listings, every wall tile there is (a
+/// Screen cannot see its siblings), and the sign-in worker. Handed in from
+/// the event loop each frame.
+pub struct Services<'a> {
     pub catalog: &'a mut crate::catalog::SourceCatalog,
     pub wall_tiles: &'a [crate::library::WallTile],
+    pub auth: &'a mut crate::auth::Auth,
+    /// Stable plex.tv device identifier for this install.
+    pub plex_client_id: &'a str,
 }
 
 /// What a window is for. A library window has no tiles and no video: it
@@ -202,7 +205,7 @@ impl Screen {
         &mut self,
         budget: &mut DecodeBudget,
         queue: &mut PlaybackQueue,
-        browser: &mut BrowserCtx,
+        services: &mut Services,
         advance: bool,
         overlay: &mut OverlayState,
         settings: &mut UiSettings,
@@ -374,10 +377,10 @@ impl Screen {
                     ctx,
                     library_state,
                     &settings.sources,
-                    browser.catalog,
+                    services.catalog,
                     thumbs,
                     &queue_view,
-                    browser.wall_tiles,
+                    services.wall_tiles,
                     &mut actions,
                 );
             } else if visible {
@@ -387,7 +390,7 @@ impl Screen {
                 overlay::draw_help(ctx, &mut help_open);
             }
             if settings_open {
-                overlay::draw_settings(ctx, window_id, settings, &mut settings_open);
+                overlay::draw_settings(ctx, window_id, settings, services.auth, services.plex_client_id, &mut settings_open);
             }
             if let Some(n) = &notice {
                 overlay::draw_notice(ctx, n);

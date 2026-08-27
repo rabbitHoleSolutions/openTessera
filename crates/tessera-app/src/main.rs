@@ -1,3 +1,4 @@
+mod auth;
 mod catalog;
 mod compositor;
 mod library;
@@ -464,6 +465,10 @@ fn main() {
     // startup enumeration above is separate — the wall starts playing
     // without waiting on any of this.
     let mut catalog = catalog::SourceCatalog::new();
+    // Server sign-in (Jellyfin discovery/login, plex.tv link) — all of it
+    // blocking, so it lives on its own worker.
+    let mut auth = auth::Auth::new();
+    let plex_client_id = tessera_core::signin::plex_client_id(&config_dir());
 
     let mut screens: Vec<Screen> = Vec::new();
     let mut budget = DecodeBudget::new(args.ceiling, settings.max_streams as usize);
@@ -617,8 +622,13 @@ fn main() {
                         })
                         .collect();
                     for screen_idx in 0..screens.len() {
-                        let mut browser = screen::BrowserCtx { catalog: &mut catalog, wall_tiles: &wall_tiles };
-                        screens[screen_idx].tick(&mut budget, &mut queue, &mut browser, args.advance, &mut overlay, &mut settings);
+                        let mut services = screen::Services {
+                            catalog: &mut catalog,
+                            wall_tiles: &wall_tiles,
+                            auth: &mut auth,
+                            plex_client_id: &plex_client_id,
+                        };
+                        screens[screen_idx].tick(&mut budget, &mut queue, &mut services, args.advance, &mut overlay, &mut settings);
                         // UI actions from this screen's overlay: execute after
                         // the tick (pause/resume needs cross-screen budget
                         // access, which the drawing code can't have).
@@ -1209,6 +1219,14 @@ fn main() {
     println!("bye (uptime {:.1}s)", start.elapsed().as_secs_f64());
 }
 
+
+/// `~/.config/opentessera`, where settings, source credentials and the
+/// plex.tv device id live.
+fn config_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".config/opentessera"))
+        .unwrap_or_default()
+}
 
 fn load_settings() -> overlay::UiSettings {
     let mut s = overlay::UiSettings::default();

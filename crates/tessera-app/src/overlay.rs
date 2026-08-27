@@ -124,6 +124,11 @@ pub struct UiSettings {
     pub src_path: String,
     pub src_token: String,
     pub src_library: String,
+    /// Jellyfin sign-in form. The password is used once to mint a token and
+    /// is never persisted (UiSettings' PartialEq excludes it, and only the
+    /// resulting token reaches settings.conf).
+    pub src_user: String,
+    pub src_pass: String,
     /// Why the last "add source" click didn't take. Shown under the form;
     /// cleared as soon as the user edits the form again.
     pub src_error: String,
@@ -152,6 +157,8 @@ impl Default for UiSettings {
             src_path: String::new(),
             src_token: String::new(),
             src_library: String::new(),
+            src_user: String::new(),
+            src_pass: String::new(),
             src_error: String::new(),
         }
     }
@@ -1003,8 +1010,11 @@ pub fn draw_settings(
     ctx: &egui::Context,
     window_id: winit::window::WindowId,
     settings: &mut UiSettings,
+    auth: &mut crate::auth::Auth,
+    plex_client_id: &str,
     open: &mut bool,
 ) {
+    auth.poll();
     egui::Area::new(egui::Id::new("tessera-settings"))
         .order(PANEL_ORDER)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -1085,14 +1095,24 @@ pub fn draw_settings(
                         println!("settings: removed source \"{}\"", src.label());
                     }
                     ui.add_space(6.0);
-                    // Add form: kind + path/url, plus token/library for servers.
+                    // Add form. Folders take a path; servers get a sign-in
+                    // flow (discovery / login / plex.tv link) with the raw
+                    // token as the fallback, since that is the only path that
+                    // works with no internet or a locked-down server.
                     ui.horizontal(|ui| {
                         egui::ComboBox::from_id_source("src-kind")
                             .selected_text(settings.src_kind.label())
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut settings.src_kind, SourceKind::Folder, "folder");
-                                ui.selectable_value(&mut settings.src_kind, SourceKind::Plex, "plex");
-                                ui.selectable_value(&mut settings.src_kind, SourceKind::Jellyfin, "jellyfin");
+                                for kind in [SourceKind::Folder, SourceKind::Plex, SourceKind::Jellyfin] {
+                                    if ui
+                                        .selectable_value(&mut settings.src_kind, kind, kind.label())
+                                        .clicked()
+                                    {
+                                        // Flows don't carry across kinds.
+                                        auth.reset();
+                                        settings.src_error.clear();
+                                    }
+                                }
                             });
                         let path_hint = match settings.src_kind {
                             SourceKind::Folder => "folder path",
@@ -1110,80 +1130,229 @@ pub fn draw_settings(
                             _ => "server url, e.g. http://nas:8096",
                         });
                     });
+
                     if settings.src_kind != SourceKind::Folder {
                         ui.horizontal(|ui| {
-                            ui.label("token/key");
-                            let tok = ui.add_sized(
-                                [110.0, 16.0],
-                                egui::TextEdit::singleline(&mut settings.src_token)
-                                    .hint_text(if settings.src_kind == SourceKind::Plex { "X-Plex-Token" } else { "API key" })
-                                    .password(true),
-                            );
                             ui.label("library");
                             let lib = ui.add_sized(
-                                [110.0, 16.0],
+                                [140.0, 16.0],
                                 egui::TextEdit::singleline(&mut settings.src_library)
-                                    .hint_text("optional"),
+                                    .hint_text("optional — all if blank"),
                             );
-                            if tok.changed() || lib.changed() {
+                            if lib.changed() {
                                 settings.src_error.clear();
                             }
                         });
                     }
-                    {
-                        let path = settings.src_path.trim();
-                        let token = settings.src_token.trim();
-                        // Deliberately always clickable: a permanently grey
-                        // button reads as "this feature doesn't work". Say
-                        // what is missing instead.
-                        let missing = match settings.src_kind {
-                            SourceKind::Folder if path.is_empty() => Some("enter a folder path first"),
-                            SourceKind::Folder => None,
-                            _ if path.is_empty() => Some("enter the server url first"),
-                            _ if token.is_empty() => Some("enter the server's token/key first"),
-                            _ => None,
-                        };
-                        let add_resp = ui.button("add source");
-                        if let (true, Some(why)) = (add_resp.clicked(), missing) {
-                            settings.src_error = why.to_owned();
-                        }
-                        if add_resp.clicked() && missing.is_none() {
-                            let lib = {
-                                let l = settings.src_library.trim();
-                                (!l.is_empty()).then(|| l.to_owned())
-                            };
-                            let src = match settings.src_kind {
-                                SourceKind::Folder => tessera_core::sources::Source::Folder {
-                                    path: path.to_owned(),
-                                },
-                                SourceKind::Plex => tessera_core::sources::Source::Plex {
-                                    url: path.trim_end_matches('/').to_owned(),
-                                    token: token.to_owned(),
-                                    library: lib,
-                                },
-                                SourceKind::Jellyfin => tessera_core::sources::Source::Jellyfin {
-                                    url: path.trim_end_matches('/').to_owned(),
-                                    api_key: token.to_owned(),
-                                    library: lib,
-                                },
-                            };
-                            if settings.sources.contains(&src) {
-                                println!("settings: source \"{}\" already configured", src.label());
-                                settings.src_error = format!("already configured: {}", src.label());
-                            } else {
-                                println!("settings: added source \"{}\"", src.label());
-                                settings.sources.push(src);
-                                settings.src_error.clear();
-                                settings.src_path.clear();
-                                settings.src_token.clear();
-                                settings.src_library.clear();
+
+                    let mut added: Option<tessera_core::sources::Source> = None;
+                    let lib_filter = || {
+                        let l = settings.src_library.trim();
+                        (!l.is_empty()).then(|| l.to_owned())
+                    };
+
+                    match settings.src_kind {
+                        SourceKind::Jellyfin => {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add_enabled(!auth.state.busy, egui::Button::new("scan network"))
+                                    .on_hover_text("ask Jellyfin servers on this LAN to identify themselves")
+                                    .clicked()
+                                {
+                                    auth.discover();
+                                }
+                                if auth.state.busy && auth.state.plex_code.is_none() {
+                                    ui.weak("working…");
+                                }
+                            });
+                            if auth.state.scanned && auth.state.discovered.is_empty() {
+                                ui.weak("no servers answered on this network");
+                            }
+                            for srv in &auth.state.discovered {
+                                if ui
+                                    .selectable_label(settings.src_path == srv.address, &srv.name)
+                                    .on_hover_text(&srv.address)
+                                    .clicked()
+                                {
+                                    settings.src_path = srv.address.clone();
+                                }
+                            }
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label("user");
+                                ui.add_sized(
+                                    [90.0, 16.0],
+                                    egui::TextEdit::singleline(&mut settings.src_user),
+                                );
+                                ui.label("password");
+                                ui.add_sized(
+                                    [90.0, 16.0],
+                                    egui::TextEdit::singleline(&mut settings.src_pass).password(true),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add_enabled(!auth.state.busy, egui::Button::new("sign in & add"))
+                                    .on_hover_text("exchanges your password for an access token — the password is not stored")
+                                    .clicked()
+                                {
+                                    if settings.src_path.trim().is_empty() {
+                                        settings.src_error = "pick or type a server url first".into();
+                                    } else if settings.src_user.trim().is_empty() {
+                                        settings.src_error = "enter your Jellyfin username".into();
+                                    } else {
+                                        settings.src_error.clear();
+                                        let (u, p) = (settings.src_user.clone(), settings.src_pass.clone());
+                                        auth.jellyfin_login(&settings.src_path, &u, &p);
+                                    }
+                                }
+                                ui.weak("or paste an API key:");
+                                ui.add_sized(
+                                    [110.0, 16.0],
+                                    egui::TextEdit::singleline(&mut settings.src_token)
+                                        .hint_text("API key")
+                                        .password(true),
+                                );
+                                if ui.button("add").clicked() {
+                                    let (url, key) =
+                                        (settings.src_path.trim(), settings.src_token.trim());
+                                    if url.is_empty() || key.is_empty() {
+                                        settings.src_error =
+                                            "a server url and an API key are both needed".into();
+                                    } else {
+                                        added = Some(tessera_core::sources::Source::Jellyfin {
+                                            url: url.trim_end_matches('/').to_owned(),
+                                            api_key: key.to_owned(),
+                                            library: lib_filter(),
+                                        });
+                                    }
+                                }
+                            });
+                            // A completed sign-in becomes a source here, where
+                            // the library filter from the form is in scope.
+                            if let Some((url, token)) = auth.take_jellyfin_token() {
+                                added = Some(tessera_core::sources::Source::Jellyfin {
+                                    url: url.trim_end_matches('/').to_owned(),
+                                    api_key: token,
+                                    library: lib_filter(),
+                                });
                             }
                         }
-                        if !settings.src_error.is_empty() {
-                            ui.colored_label(
-                                egui::Color32::from_rgb(240, 140, 140),
-                                &settings.src_error,
-                            );
+                        SourceKind::Plex => {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add_enabled(!auth.state.busy, egui::Button::new("link with plex.tv"))
+                                    .on_hover_text("no token typing: enter a short code at plex.tv/link")
+                                    .clicked()
+                                {
+                                    auth.plex_link(plex_client_id);
+                                }
+                                if let Some(code) = &auth.state.plex_code {
+                                    ui.label(
+                                        egui::RichText::new(code)
+                                            .strong()
+                                            .size(20.0)
+                                            .color(egui::Color32::from_rgb(230, 180, 80)),
+                                    );
+                                    ui.weak("enter this at plex.tv/link, then wait here");
+                                } else if auth.state.busy {
+                                    ui.weak("working…");
+                                }
+                            });
+                            for choice in &auth.state.plex_servers {
+                                ui.horizontal(|ui| {
+                                    let base = choice.reachable.clone().unwrap_or_else(|| choice.fallback.clone());
+                                    let label = format!(
+                                        "{}{}",
+                                        choice.name,
+                                        if choice.owned { "" } else { " (shared)" }
+                                    );
+                                    if ui.button(label).on_hover_text(&base).clicked() {
+                                        added = Some(tessera_core::sources::Source::Plex {
+                                            url: base.trim_end_matches('/').to_owned(),
+                                            token: choice.token.clone(),
+                                            library: lib_filter(),
+                                        });
+                                    }
+                                    match &choice.reachable {
+                                        Some(u) => ui.weak(u.clone()),
+                                        None => ui.colored_label(
+                                            egui::Color32::from_rgb(230, 180, 80),
+                                            "didn't answer — try anyway",
+                                        ),
+                                    };
+                                });
+                            }
+                            ui.horizontal(|ui| {
+                                ui.weak("or paste a token:");
+                                ui.add_sized(
+                                    [110.0, 16.0],
+                                    egui::TextEdit::singleline(&mut settings.src_token)
+                                        .hint_text("X-Plex-Token")
+                                        .password(true),
+                                );
+                                if ui.button("add").clicked() {
+                                    let (url, tok) =
+                                        (settings.src_path.trim(), settings.src_token.trim());
+                                    if url.is_empty() || tok.is_empty() {
+                                        settings.src_error =
+                                            "a server url and a token are both needed".into();
+                                    } else {
+                                        added = Some(tessera_core::sources::Source::Plex {
+                                            url: url.trim_end_matches('/').to_owned(),
+                                            token: tok.to_owned(),
+                                            library: lib_filter(),
+                                        });
+                                    }
+                                }
+                            });
+                        }
+                        SourceKind::Folder => {
+                            let path = settings.src_path.trim();
+                            // Deliberately always clickable: a permanently grey
+                            // button reads as "this feature doesn't work". Say
+                            // what is missing instead.
+                            if ui.button("add source").clicked() {
+                                if path.is_empty() {
+                                    settings.src_error = "enter a folder path first".into();
+                                } else {
+                                    added = Some(tessera_core::sources::Source::Folder {
+                                        path: path.to_owned(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    if !auth.state.error.is_empty() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(240, 140, 140),
+                            &auth.state.error,
+                        );
+                    }
+                    if !settings.src_error.is_empty() {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(240, 140, 140),
+                            &settings.src_error,
+                        );
+                    }
+
+                    if let Some(src) = added {
+                        if settings.sources.contains(&src) {
+                            println!("settings: source \"{}\" already configured", src.label());
+                            settings.src_error = format!("already configured: {}", src.label());
+                        } else {
+                            println!("settings: added source \"{}\"", src.label());
+                            settings.sources.push(src);
+                            settings.src_error.clear();
+                            settings.src_path.clear();
+                            settings.src_token.clear();
+                            settings.src_library.clear();
+                            settings.src_user.clear();
+                            settings.src_pass.clear();
+                            auth.reset();
                         }
                     }
                     ui.add_space(8.0);

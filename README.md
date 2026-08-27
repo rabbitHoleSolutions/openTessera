@@ -139,6 +139,14 @@ opentessera --plex --plex-library Movies
 opentessera --jellyfin --jellyfin-library Movies --plex /path/to/local/
 ```
 
+- Adding a server without typing a token: the gear panel's add-source form
+  scans the LAN for Jellyfin servers (UDP 7359 broadcast) and signs in with
+  a username and password (the password is exchanged once for an access
+  token and never stored); Plex links through plex.tv — click "link with
+  plex.tv", enter the 4-character code it shows at plex.tv/link, and pick
+  from your account's servers, each already probed for a reachable LAN
+  address. Pasting a raw token/API key still works and is the fallback when
+  there is no internet.
 - Remote sources: Plex and Jellyfin. `--plex` / `--jellyfin` add a server's
   movie libraries (optionally restricted with `--plex-library` /
   `--jellyfin-library`); items stream over HTTP via each server's

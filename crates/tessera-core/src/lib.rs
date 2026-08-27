@@ -2,6 +2,7 @@ pub mod budget;
 pub mod layout;
 pub mod media;
 pub mod queue;
+pub mod signin;
 pub mod sources;
 
 pub use budget::{Admission, Codec, DecodeBudget, StreamSpec};

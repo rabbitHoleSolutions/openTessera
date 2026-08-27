@@ -309,6 +309,82 @@ X repeats indefinitely.
 
 ---
 
+## 9. Credential and key management
+
+Status: **not started** — deliberately deferred, see below.
+
+Credentials currently live in plaintext: `~/.config/opentessera/sources.conf`
+(`plex_token`, `jellyfin_key`) and, since sources moved into the settings
+panel, inside the `sources = [...]` JSON line of `settings.conf`. The
+friendlier sign-in flows (#10) do not change that — they only mean the user
+never has to *handle* the token; one still ends up on disk.
+
+This is knowingly fine for now (single developer, one machine, services
+reachable only on the LAN) and knowingly not fine as soon as any of those
+stops being true. It should be designed properly rather than patched in:
+
+- **Where secrets live.** Out of `settings.conf` and into either the
+  platform secret store (Secret Service / `libsecret` on Linux, Keychain on
+  macOS) or a separate, mode-0600 credentials file — with the plaintext
+  path kept as an explicit opt-out for headless boxes.
+- **What is stored.** Prefer a revocable, per-device token over an account
+  password; never persist passwords. Record which server minted it so it
+  can be invalidated.
+- **File permissions and migration.** `settings.conf` is written 0644 today
+  and has held tokens; a migration needs to move existing secrets out AND
+  tighten or rewrite the old file.
+- **Logging and screenshots.** `Source::label()` is printed at startup, put
+  in window titles and drawn in the settings/library panels. Audit that no
+  path can surface a token, including `TESSERA_DUMP_DIR` screenshots and
+  panic backtraces.
+- **Scope.** Camera sources are planned for the same `Source` enum and will
+  bring their own credentials; the design should cover them.
+
+**Effort**: M
+
+---
+
+## 10. Friendlier server sign-in
+
+Status: **implemented** (2026-08-27)
+
+Typing an API key or `X-Plex-Token` is the least friendly part of adding a
+source. All three of these already exist in the Quest app and port over:
+
+1. **Jellyfin username/password** — `AuthenticateByName` returns an access
+   token, so the user types what they already know instead of digging a key
+   out of the admin dashboard.
+2. **Discovery** — Jellyfin answers a UDP broadcast on 7359
+   (`JellyfinDiscovery.kt`); Plex's resource list returns server addresses
+   once linked. Turns "type an IP" into "pick from a list".
+3. **Plex plex.tv link** — mint a PIN, show a 4-character code, poll until
+   the user enters it at plex.tv/link, then list the account's servers
+   (`PlexLinkClient.kt`). No token, no IP typing. The manual token path
+   stays as the offline fallback.
+
+All three shipped, in `tessera-core::signin` (blocking, with the fiddly
+parsing split out and unit-tested) behind `tessera-app::auth` (a worker, so
+none of it touches the render thread — the Plex poll can run for minutes).
+The settings panel's add-source form grew a sign-in section per server kind;
+the raw token/API-key path stays as the fallback, since it is the only one
+that works with no internet or a locked-down server.
+
+Notes from the port:
+- Plex candidate URLs are ordered LAN `http://ip:port` first, then the LAN
+  `plex.direct` HTTPS URIs, then remote — and relay connections are dropped
+  outright, because they proxy through plex.tv and can never direct-play.
+  Each server's first *reachable* candidate is probed before it is offered.
+- `plex-client-id` is persisted in the config dir. plex.tv keys the PIN and
+  the account's device list on it, so it must not change between creating
+  and checking a PIN, nor across runs.
+- Jellyfin sign-in exchanges the password for an access token once and
+  never stores the password.
+
+Whatever these produce still lands on disk, so #9 is the follow-up, not an
+alternative.
+
+---
+
 ## Implemented features (for context)
 
 - Phase 2 budget: eviction (OLDEST_STARTED), adaptive ceiling, single-stream rule
