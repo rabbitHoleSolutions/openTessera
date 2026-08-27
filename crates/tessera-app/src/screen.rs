@@ -31,6 +31,10 @@ pub struct Screen {
     /// when the WM displaces fullscreen windows (observed with pop-shell
     /// when another window leaves fullscreen).
     pub intended_monitor: Option<winit::monitor::MonitorHandle>,
+    /// The wall wants this window fullscreen (fullscreen screens at
+    /// startup, W toggles back). Windowed screens (--windowed, W toggle)
+    /// are left alone by fix_displaced_walls.
+    pub should_fullscreen: bool,
     /// Window geometry saved by W (window-mode toggle) before expanding to
     /// fullscreen; restored when the window becomes a window again.
     pub windowed_restore: Option<(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>)>,
@@ -70,6 +74,7 @@ impl Screen {
             zoomed: None,
             pinned: None,
             intended_monitor: None,
+            should_fullscreen: false,
             windowed_restore: None,
             zoom_restore: None,
             last_status_tp: Vec::new(),

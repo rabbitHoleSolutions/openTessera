@@ -479,6 +479,7 @@ fn main() {
         let screen = Screen::new(window.clone(), surface, context, gl, egui, monitor_index, queue);
         let mut screen = screen;
         screen.intended_monitor = Some(monitors[monitor_index].clone());
+        screen.should_fullscreen = !matches!(args.screens, ScreenSel::Windowed(_, _));
         screens.push(screen);
     }
 
@@ -497,11 +498,12 @@ fn main() {
     let mut last_wheel_at: Option<Instant> = None;
     // Deferred WM-settle check after a window/fullscreen toggle:
     // (deadline, retries left). Retries continue while displaced walls
-    // keep being found. Armed at startup too: pop-shell sometimes places
-    // freshly mapped fullscreen windows on the wrong monitor and can take
-    // several re-anchor attempts before it sticks.
+    // keep being found. Armed at startup too: pop-shell grabs freshly
+    // mapped windows (tiling them onto the focused monitor, fullscreen
+    // request ignored) until they receive focus — the settle re-asserts
+    // fullscreen on the intended monitors, which also grabs focus.
     let mut wm_settle_at: Option<(Instant, u32)> =
-        Some((Instant::now() + Duration::from_millis(1500), 8));
+        Some((Instant::now() + Duration::from_millis(1500), 5));
     let mut overlay = OverlayState { pinned: args.overlay, ..Default::default() };
     let mut last_input = Instant::now();
 
@@ -1752,6 +1754,7 @@ fn toggle_window_mode(screens: &mut [Screen], idx: usize) -> bool {
         schedule_fix = true;
         // Fullscreen wall -> normal window.
         screen.zoomed = None;
+        screen.should_fullscreen = false;
         window.set_fullscreen(None);
         window.set_decorations(true);
         let restore = screen
@@ -1779,32 +1782,42 @@ fn toggle_window_mode(screens: &mut [Screen], idx: usize) -> bool {
         }
         println!("screen {monitor_index}: window mode");
     } else {
-        // Normal window -> fullscreen wall.
+        // Normal window -> fullscreen wall. Aim at the intended monitor:
+        // winit moves the window there and grabs focus, which pop-shell
+        // needs before it honors fullscreen for a window it has tiled.
+        screen.should_fullscreen = true;
         if screen.windowed_restore.is_none() {
             if let Ok(pos) = window.outer_position() {
                 let size = window.inner_size();
                 screen.windowed_restore = Some((pos, size));
             }
         }
-        let monitor = window.current_monitor();
+        let monitor = screen
+            .intended_monitor
+            .clone()
+            .or_else(|| window.current_monitor());
         window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(monitor)));
         println!("screen {monitor_index}: fullscreen wall");
     }
     schedule_fix
 }
 
-/// Snaps fullscreen walls back onto their intended monitors. The tiling
-/// WM relocates other fullscreen windows (piling them onto the primary
-/// monitor) when one window leaves fullscreen; the relocation lands
-/// asynchronously, so this runs on a short timer after a mode toggle and
-/// retries while it keeps finding displaced walls. Fullscreen can't be
-/// aimed at a monitor on X11: un-fullscreen, move, fullscreen again.
+/// Snaps the walls back onto their intended monitors. Two displacements
+/// are fixed, both from pop-shell: (a) a tiling WM grabs freshly mapped
+/// windows, ignoring their fullscreen request and tiling them onto the
+/// focused monitor until they get focus; (b) it relocates other fullscreen
+/// windows (piling them onto the primary) when one window leaves
+/// fullscreen. Either way the cure is the same single call:
+/// set_fullscreen(Borderless(Some(monitor))) — winit moves the window to
+/// the monitor origin AND grabs input focus, which pop-shell needs before
+/// it honors fullscreen. Runs on a short timer at startup and after mode
+/// toggles, retrying while displaced windows keep being found.
 /// (Detection uses the real window rect — winit's current_monitor() is
 /// unreliable here.)
 fn fix_displaced_walls(screens: &mut [Screen]) -> bool {
     let mut fixed_any = false;
     for screen in screens.iter_mut() {
-        if screen.window.fullscreen().is_none() {
+        if !screen.should_fullscreen {
             continue;
         }
         let Some(m) = screen.intended_monitor.clone() else { continue };
@@ -1816,14 +1829,15 @@ fn fix_displaced_walls(screens: &mut [Screen]) -> bool {
             && center.0 < mp.x + ms.width as i32
             && center.1 >= mp.y
             && center.1 < mp.y + ms.height as i32;
-        if !inside {
-            let window = screen.window.clone();
-            window.set_fullscreen(None);
-            window.set_outer_position(mp);
-            window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
-            println!("screen {}: re-anchored to its monitor", screen.monitor_index);
-            fixed_any = true;
+        // Non-fullscreen (tiled by the WM) or fullscreen on the wrong
+        // monitor: re-assert fullscreen aimed at the intended monitor.
+        if screen.window.fullscreen().is_some() && inside {
+            continue;
         }
+        let window = screen.window.clone();
+        window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(Some(m))));
+        println!("screen {}: re-anchored to its monitor", screen.monitor_index);
+        fixed_any = true;
     }
     fixed_any
 }
