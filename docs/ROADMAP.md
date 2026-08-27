@@ -169,6 +169,33 @@ Needs --audio; toast explains otherwise.
 
 ---
 
+## 6. Sources in settings
+
+Status: **implemented** (2026-08-26)
+
+The gear panel has a sources section: list with remove buttons, plus an
+add form (kind selector: folder / plex / jellyfin; path-or-url field,
+token/key + optional library filter for servers). Sources persist as one
+JSON line (`sources = [...]`) in settings.conf — saved on every settings
+change alongside ui_scale/cache_mb/max_streams/audio — and are listed at
+startup, so the wall runs with zero CLI arguments. CLI positional paths
+and --plex/--jellyfin still work and are merged (deduplicated) with the
+saved sources. Camera sources will join `tessera_core::sources::Source`
+(a serde-tagged enum) when they land.
+
+Two bugs found and fixed along the way, both of which had made the
+settings/help panels unusable by mouse:
+- The panels were drawn at `Order::Tooltip`, and egui never hit-tests
+  tooltip-order layers — every control in them was inert. Now
+  `Order::Foreground` like the chip panels.
+- App hotkeys fired while typing in text fields (a "/" in a folder path
+  opened the help panel mid-typing, covering the form). Keyboard handling
+  now yields to egui when it wants keyboard input.
+
+**Effort**: M
+
+---
+
 ## Implemented features (for context)
 
 - Phase 2 budget: eviction (OLDEST_STARTED), adaptive ceiling, single-stream rule
@@ -186,7 +213,8 @@ Needs --audio; toast explains otherwise.
   delete-at-source
 - Panel management: +/- tiles (transport buttons and -/+ hotkeys), per-window
   W toggle, F tile zoom, --populate vs --tiles, --screens monitor list
-- Settings persistence: ui_scale, cache_mb, max_streams (~/.config/opentessera/settings.conf)
+- Settings persistence: ui_scale, cache_mb, max_streams, audio, sources
+  (~/.config/opentessera/settings.conf; sources edited in the gear panel)
 - Stability: fd-limit raise at startup + fds status line (full-wall fd exhaustion
   wedged nvidia-drm, 2026-08-26), nvdec-copy default (CUDA/GL interop segfault
   fix, commit c385501), fatal-signal backtrace handler

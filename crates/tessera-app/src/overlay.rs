@@ -60,8 +60,27 @@ pub struct OverlayState {
     pub settings_open: bool,
 }
 
+/// Which kind of source the settings panel's add-form is editing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SourceKind {
+    #[default]
+    Folder,
+    Plex,
+    Jellyfin,
+}
+
+impl SourceKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            SourceKind::Folder => "folder",
+            SourceKind::Plex => "plex",
+            SourceKind::Jellyfin => "jellyfin",
+        }
+    }
+}
+
 /// User-adjustable runtime settings (gear panel / settings.conf).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct UiSettings {
     /// egui pixels-per-point multiplier for the whole overlay UI.
     pub ui_scale: f32,
@@ -72,10 +91,19 @@ pub struct UiSettings {
     pub max_streams: u32,
     /// Audio pipeline enabled (tiles still start muted).
     pub audio: bool,
+    /// Media sources (folders / Plex / Jellyfin), applied at startup.
+    /// Persisted as one JSON line in settings.conf.
+    pub sources: Vec<tessera_core::sources::Source>,
     /// Transient: the scale slider is being dragged — the UI must NOT
     /// re-scale mid-drag (the slider would run away from the pointer).
     /// Excluded from equality/persistence.
     pub scale_dragging: bool,
+    /// Transient add-source form state in the settings panel. Excluded
+    /// from equality/persistence.
+    pub src_kind: SourceKind,
+    pub src_path: String,
+    pub src_token: String,
+    pub src_library: String,
 }
 
 impl PartialEq for UiSettings {
@@ -84,6 +112,7 @@ impl PartialEq for UiSettings {
             && self.cache_mb == other.cache_mb
             && self.max_streams == other.max_streams
             && self.audio == other.audio
+            && self.sources == other.sources
     }
 }
 
@@ -94,7 +123,12 @@ impl Default for UiSettings {
             cache_mb: 512,
             max_streams: tessera_core::budget::DEFAULT_MAX_STREAMS as u32,
             audio: false,
+            sources: Vec::new(),
             scale_dragging: false,
+            src_kind: SourceKind::default(),
+            src_path: String::new(),
+            src_token: String::new(),
+            src_library: String::new(),
         }
     }
 }
@@ -852,8 +886,10 @@ pub fn draw(
 /// immediately — the caller diffs the settings after the frame and applies
 /// them to tiles/saves them.
 pub fn draw_settings(ctx: &egui::Context, settings: &mut UiSettings, open: &mut bool) {
+    // NB: NOT Order::Tooltip — tooltip-order layers don't allow interaction
+    // in egui, which would make every control in this panel inert.
     egui::Area::new(egui::Id::new("tessera-settings"))
-        .order(egui::Order::Tooltip)
+        .order(egui::Order::Foreground)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             egui::Frame::window(ui.style())
@@ -888,8 +924,112 @@ pub fn draw_settings(ctx: &egui::Context, settings: &mut UiSettings, open: &mut 
                     });
                     ui.add_space(4.0);
                     ui.checkbox(&mut settings.audio, "audio enabled (tiles still start muted)");
+                    ui.add_space(10.0);
+                    ui.separator();
                     ui.add_space(6.0);
-                    ui.weak("changes apply immediately and are saved to");
+                    ui.label("sources");
+                    ui.weak("where the wall gets its media (applied on restart)");
+                    if settings.sources.is_empty() {
+                        ui.weak("none configured — add one below or pass paths on the command line");
+                    }
+                    let mut remove = None;
+                    for (i, src) in settings.sources.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(src.label()).small());
+                            if ui
+                                .button(egui::RichText::new("✕").small())
+                                .on_hover_text("remove this source")
+                                .clicked()
+                            {
+                                remove = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(i) = remove {
+                        let src = settings.sources.remove(i);
+                        println!("settings: removed source \"{}\"", src.label());
+                    }
+                    ui.add_space(6.0);
+                    // Add form: kind + path/url, plus token/library for servers.
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_source("src-kind")
+                            .selected_text(settings.src_kind.label())
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut settings.src_kind, SourceKind::Folder, "folder");
+                                ui.selectable_value(&mut settings.src_kind, SourceKind::Plex, "plex");
+                                ui.selectable_value(&mut settings.src_kind, SourceKind::Jellyfin, "jellyfin");
+                            });
+                        let path_hint = match settings.src_kind {
+                            SourceKind::Folder => "folder path",
+                            _ => "server url",
+                        };
+                        let path_resp = ui.add_sized(
+                            [230.0, 16.0],
+                            egui::TextEdit::singleline(&mut settings.src_path).hint_text(path_hint),
+                        );
+                        path_resp.on_hover_text(match settings.src_kind {
+                            SourceKind::Folder => "folder (or file) path on disk",
+                            _ => "server url, e.g. http://nas:8096",
+                        });
+                    });
+                    if settings.src_kind != SourceKind::Folder {
+                        ui.horizontal(|ui| {
+                            ui.label("token/key");
+                            ui.add_sized(
+                                [110.0, 16.0],
+                                egui::TextEdit::singleline(&mut settings.src_token)
+                                    .hint_text(if settings.src_kind == SourceKind::Plex { "X-Plex-Token" } else { "API key" })
+                                    .password(true),
+                            );
+                            ui.label("library");
+                            ui.add_sized(
+                                [110.0, 16.0],
+                                egui::TextEdit::singleline(&mut settings.src_library)
+                                    .hint_text("optional"),
+                            );
+                        });
+                    }
+                    {
+                        let path = settings.src_path.trim();
+                        let token = settings.src_token.trim();
+                        let valid = match settings.src_kind {
+                            SourceKind::Folder => !path.is_empty(),
+                            _ => !path.is_empty() && !token.is_empty(),
+                        };
+                        let add_resp = ui.add_enabled(valid, egui::Button::new("add source"));
+                        if add_resp.clicked() {
+                            let lib = {
+                                let l = settings.src_library.trim();
+                                (!l.is_empty()).then(|| l.to_owned())
+                            };
+                            let src = match settings.src_kind {
+                                SourceKind::Folder => tessera_core::sources::Source::Folder {
+                                    path: path.to_owned(),
+                                },
+                                SourceKind::Plex => tessera_core::sources::Source::Plex {
+                                    url: path.trim_end_matches('/').to_owned(),
+                                    token: token.to_owned(),
+                                    library: lib,
+                                },
+                                SourceKind::Jellyfin => tessera_core::sources::Source::Jellyfin {
+                                    url: path.trim_end_matches('/').to_owned(),
+                                    api_key: token.to_owned(),
+                                    library: lib,
+                                },
+                            };
+                            if settings.sources.contains(&src) {
+                                println!("settings: source \"{}\" already configured", src.label());
+                            } else {
+                                println!("settings: added source \"{}\"", src.label());
+                                settings.sources.push(src);
+                            }
+                            settings.src_path.clear();
+                            settings.src_token.clear();
+                            settings.src_library.clear();
+                        }
+                    }
+                    ui.add_space(8.0);
+                    ui.weak("changes apply immediately (sources on restart) and are saved to");
                     ui.weak("~/.config/opentessera/settings.conf");
                     ui.add_space(8.0);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -904,8 +1044,9 @@ pub fn draw_settings(ctx: &egui::Context, settings: &mut UiSettings, open: &mut 
 /// Keyboard/mouse help panel, centered. Drawn regardless of the overlay's
 /// auto-hide state (it stays until dismissed).
 pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
+    // Foreground, not Tooltip: tooltip-order layers don't allow interaction.
     egui::Area::new(egui::Id::new("tessera-help"))
-        .order(egui::Order::Tooltip)
+        .order(egui::Order::Foreground)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             egui::Frame::window(ui.style())

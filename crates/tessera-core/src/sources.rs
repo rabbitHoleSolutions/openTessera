@@ -101,6 +101,68 @@ fn pair(url: Option<String>, token: Option<String>) -> Option<ServerConfig> {
     }
 }
 
+/// One configured media source: a folder on disk, or a Plex/Jellyfin
+/// server. Sources persist in settings.conf (as one JSON line) and are
+/// editable in the settings panel; listing them is shared between startup
+/// and (future) runtime re-scans. Camera sources will join this enum.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Source {
+    /// A folder (or single file) on local disk.
+    Folder { path: String },
+    /// A Plex server: direct-play URLs, token auth, optional library filter.
+    Plex {
+        url: String,
+        token: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library: Option<String>,
+    },
+    /// A Jellyfin server: direct-play URLs, API-key auth, optional library
+    /// filter.
+    Jellyfin {
+        url: String,
+        api_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library: Option<String>,
+    },
+}
+
+impl Source {
+    /// Short human label for logs and the settings panel.
+    pub fn label(&self) -> String {
+        let lib = |l: &Option<String>| {
+            l.as_deref()
+                .map(|l| format!(" ({l})"))
+                .unwrap_or_default()
+        };
+        match self {
+            Source::Folder { path } => format!("folder {path}"),
+            Source::Plex { url, library, .. } => format!("plex {url}{}", lib(library)),
+            Source::Jellyfin { url, library, .. } => format!("jellyfin {url}{}", lib(library)),
+        }
+    }
+
+    /// Lists the source's items. Servers produce direct-play URIs mpv
+    /// consumes like local files; folders go through the media scanner.
+    pub fn list(&self) -> Result<Vec<MediaItem>, SourceError> {
+        match self {
+            Source::Folder { path } => {
+                Ok(crate::media::collect_items(&[PathBuf::from(path)]))
+            }
+            Source::Plex { url, token, library } => PlexSource {
+                base: url.clone(),
+                token: token.clone(),
+            }
+            .list(library.as_deref()),
+            Source::Jellyfin { url, api_key, library } => JellyfinSource {
+                base: url.clone(),
+                api_key: api_key.clone(),
+            }
+            .list(library.as_deref()),
+        }
+    }
+}
+
 fn config_path() -> Option<PathBuf> {
     std::env::var_os("TESSERA_SOURCES_CONF")
         .map(PathBuf::from)
@@ -463,6 +525,45 @@ mod tests {
         assert_eq!(plex_frame_rate(Some("24p")), Some(24.0));
         assert_eq!(plex_frame_rate(Some("nonsense")), None);
         assert_eq!(plex_frame_rate(None), None);
+    }
+
+    #[test]
+    fn source_json_roundtrip() {
+        let sources = vec![
+            Source::Folder { path: "/media/movies".into() },
+            Source::Jellyfin {
+                url: "http://localhost:8096".into(),
+                api_key: "k".into(),
+                library: Some("Movies".into()),
+            },
+            Source::Plex {
+                url: "http://nas:32400".into(),
+                token: "t".into(),
+                library: None,
+            },
+        ];
+        let json = serde_json::to_string(&sources).unwrap();
+        // Optional library is skipped when None.
+        assert!(!json.contains("library\":null"));
+        assert!(!json.contains("library") || json.matches("library").count() == 1);
+        let back: Vec<Source> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, sources);
+        // One settings.conf line must be enough: no newlines in the JSON.
+        assert!(!json.contains('\n'));
+    }
+
+    #[test]
+    fn source_labels() {
+        assert_eq!(Source::Folder { path: "/m".into() }.label(), "folder /m");
+        assert_eq!(
+            Source::Jellyfin {
+                url: "http://h:8096".into(),
+                api_key: "k".into(),
+                library: Some("Movies".into())
+            }
+            .label(),
+            "jellyfin http://h:8096 (Movies)"
+        );
     }
 
     #[test]

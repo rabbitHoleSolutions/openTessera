@@ -7,4 +7,5 @@ description = "Source-agnostic media model, playback queues, layout solver, deco
 
 [dependencies]
 ureq = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }

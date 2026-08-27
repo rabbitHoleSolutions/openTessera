@@ -123,9 +123,9 @@ fn parse_args() -> Result<Args, String> {
             s => args.files.push(PathBuf::from(s)),
         }
     }
-    if args.files.is_empty() && !args.plex && !args.jellyfin {
-        return Err("no files or directories given (or use --plex / --jellyfin)".into());
-    }
+    // NB: no files/flags is NOT an error here — sources saved in the
+    // settings panel (settings.conf) can feed the wall with no CLI args.
+    // The empty-items check after source gathering gives the real verdict.
     if args.tiles == 0 {
         return Err("--tiles must be >= 1".into());
     }
@@ -255,57 +255,83 @@ fn main() {
         }
     };
 
-    let mut items = tessera_core::media::collect_items(&args.files);
+    // Settings first: sources configured in the gear panel (persisted in
+    // settings.conf) feed the wall alongside any CLI paths/flags.
+    let mut settings = load_settings();
+    if args.audio {
+        settings.audio = true;
+    }
+    if let Some(s) = args.ui_scale {
+        settings.ui_scale = s.clamp(0.75, 3.0);
+    }
+    if let Some(c) = args.cache_mb {
+        settings.cache_mb = c.clamp(64, 8192);
+    }
+    if let Some(m) = args.max_streams {
+        settings.max_streams = (m as u32).clamp(1, 128);
+    }
+
+    // Media sources: saved sources, plus positional paths and the
+    // --plex/--jellyfin flags (servers from sources.conf / env vars),
+    // deduplicated.
+    let mut sources: Vec<tessera_core::sources::Source> = settings.sources.clone();
+    let mut push_unique = |src: tessera_core::sources::Source| {
+        if !sources.contains(&src) {
+            sources.push(src);
+        }
+    };
+    for f in &args.files {
+        push_unique(tessera_core::sources::Source::Folder { path: f.display().to_string() });
+    }
     if args.plex || args.jellyfin {
         let cfg = tessera_core::sources::SourceConfig::load();
         if args.plex {
             match cfg.plex {
-                Some(srv) => match (tessera_core::sources::PlexSource { base: srv.url.clone(), token: srv.token.clone() }).list(args.plex_library.as_deref()) {
-                    Ok(list) => {
-                        println!("plex: {} item(s) from {}", list.len(), srv.url);
-                        items.extend(list);
-                    }
-                    Err(e) => eprintln!("warning: plex source failed: {e}"),
-                },
+                Some(srv) => push_unique(tessera_core::sources::Source::Plex {
+                    url: srv.url,
+                    token: srv.token,
+                    library: args.plex_library.clone(),
+                }),
                 None => eprintln!("warning: --plex but no server configured (sources.conf / env)"),
             }
         }
         if args.jellyfin {
             match cfg.jellyfin {
-                Some(srv) => match (tessera_core::sources::JellyfinSource { base: srv.url.clone(), api_key: srv.token.clone() }).list(args.jellyfin_library.as_deref()) {
-                    Ok(list) => {
-                        println!("jellyfin: {} item(s) from {}", list.len(), srv.url);
-                        items.extend(list);
-                    }
-                    Err(e) => eprintln!("warning: jellyfin source failed: {e}"),
-                },
+                Some(srv) => push_unique(tessera_core::sources::Source::Jellyfin {
+                    url: srv.url,
+                    api_key: srv.token,
+                    library: args.jellyfin_library.clone(),
+                }),
                 None => eprintln!("warning: --jellyfin but no server configured (sources.conf / env)"),
             }
         }
     }
+    let mut items = Vec::new();
+    for src in &sources {
+        match src.list() {
+            Ok(list) => {
+                println!("source {}: {} item(s)", src.label(), list.len());
+                items.extend(list);
+            }
+            Err(e) => eprintln!("warning: source {} failed: {e}", src.label()),
+        }
+    }
     if items.is_empty() {
-        eprintln!("error: no video items found (no readable local paths, or all remote sources failed)");
+        eprintln!("error: no video items found (no sources configured — add them in the settings panel, or pass local paths / --plex / --jellyfin)");
+        print_usage();
         std::process::exit(2);
     }
+    println!(
+        "openTessera: {} item(s) from {} source(s), tiles<={}, hwdec={}, audio={}, advance={}",
+        items.len(),
+        sources.len(),
+        args.tiles,
+        args.hwdec,
+        args.audio,
+        args.advance
+    );
     if let Some(p) = args.populate {
-        println!(
-            "openTessera: {} item(s), tiles<={}, populate={}, hwdec={}, audio={}, advance={}",
-            items.len(),
-            args.tiles,
-            p.min(args.tiles),
-            args.hwdec,
-            args.audio,
-            args.advance
-        );
-    } else {
-        println!(
-            "openTessera: {} item(s), tiles<={}, hwdec={}, audio={}, advance={}",
-            items.len(),
-            args.tiles,
-            args.hwdec,
-            args.audio,
-            args.advance
-        );
+        println!("openTessera: populating {} tile(s) per screen", p.min(args.tiles));
     }
 
     let mpv_lib = match tessera_mpv::MpvLib::load() {
@@ -390,19 +416,6 @@ fn main() {
         }
     }
 
-    let mut settings = load_settings();
-    if args.audio {
-        settings.audio = true;
-    }
-    if let Some(s) = args.ui_scale {
-        settings.ui_scale = s.clamp(0.75, 3.0);
-    }
-    if let Some(c) = args.cache_mb {
-        settings.cache_mb = c.clamp(64, 8192);
-    }
-    if let Some(m) = args.max_streams {
-        settings.max_streams = (m as u32).clamp(1, 128);
-    }
     let mut tile_opts = TileOptions {
         hwdec: args.hwdec.clone(),
         audio: settings.audio,
@@ -586,7 +599,7 @@ fn main() {
                             }
                         }
                     }
-                    let settings_before = settings;
+                    let settings_before = settings.clone();
                     for screen_idx in 0..screens.len() {
                         screens[screen_idx].tick(&mut budget, args.advance, &mut overlay, cursor_pos[screen_idx], &mut settings);
                         // UI actions from this screen's overlay: execute after
@@ -723,13 +736,13 @@ fn main() {
                     // Tab toggles the overlay; checked before egui sees the
                     // event so it can't be swallowed for focus navigation.
                     if let WindowEvent::KeyboardInput { event: ke, .. } = &event {
-                        if ke.state == ElementState::Pressed {
-                            last_input = Instant::now();
-                            if ke.logical_key == Key::Named(NamedKey::Tab) {
-                                overlay.pinned = !overlay.pinned;
-                                println!("overlay: {}", if overlay.pinned { "pinned on" } else { "auto-hide" });
-                                return;
-                            }
+                        if ke.state == ElementState::Pressed
+                            && !screens[idx].egui.egui_ctx.wants_keyboard_input()
+                            && ke.logical_key == Key::Named(NamedKey::Tab)
+                        {
+                            overlay.pinned = !overlay.pinned;
+                            println!("overlay: {}", if overlay.pinned { "pinned on" } else { "auto-hide" });
+                            return;
                         }
                     }
                     // Forward everything to egui so its input state stays
@@ -907,7 +920,13 @@ fn main() {
                         }
                         WindowEvent::KeyboardInput { event: key_event, .. } => {
                             last_input = Instant::now();
-                            if key_event.state == ElementState::Pressed {
+                            // While egui holds keyboard focus (typing in a
+                            // text field, e.g. the settings source form),
+                            // keys belong to the UI — the wall's hotkeys
+                            // must not fire mid-typing.
+                            if key_event.state == ElementState::Pressed
+                                && !screens[idx].egui.egui_ctx.wants_keyboard_input()
+                            {
                                 match key_event.logical_key {
                                     Key::Named(NamedKey::Escape) => {
                                         if overlay.tile_drag.is_some() || overlay.pending_click.is_some() {
@@ -1061,6 +1080,10 @@ fn load_settings() -> overlay::UiSettings {
                         }
                     }
                     "audio" => s.audio = v == "true" || v == "yes" || v == "on",
+                    "sources" => match serde_json::from_str::<Vec<tessera_core::sources::Source>>(v) {
+                        Ok(list) => s.sources = list,
+                        Err(e) => eprintln!("warning: bad sources line in settings.conf: {e}"),
+                    },
                     _ => {}
                 }
             }
@@ -1073,13 +1096,16 @@ fn save_settings(s: &overlay::UiSettings) {
     let Some(home) = std::env::var_os("HOME") else { return };
     let dir = std::path::PathBuf::from(home).join(".config/opentessera");
     if std::fs::create_dir_all(&dir).is_err() {
+        eprintln!("warning: cannot create {}", dir.display());
         return;
     }
+    let sources_json = serde_json::to_string(&s.sources).unwrap_or_else(|_| "[]".into());
     let text = format!(
-        "# openTessera settings (also editable at runtime via the gear panel)\nui_scale = {}\ncache_mb = {}\nmax_streams = {}\naudio = {}\n",
-        s.ui_scale, s.cache_mb, s.max_streams, s.audio
+        "# openTessera settings (also editable at runtime via the gear panel)\nui_scale = {}\ncache_mb = {}\nmax_streams = {}\naudio = {}\nsources = {}\n",
+        s.ui_scale, s.cache_mb, s.max_streams, s.audio, sources_json
     );
     let _ = std::fs::write(dir.join("settings.conf"), text);
+    println!("settings: saved to {}", dir.join("settings.conf").display());
 }
 
 fn dump_dir() -> Option<std::path::PathBuf> {
@@ -1660,6 +1686,10 @@ fn handle_overlay_action(
         }
         OverlayAction::ToggleSettings => {
             overlay.settings_open = !overlay.settings_open;
+            println!(
+                "settings panel {}",
+                if overlay.settings_open { "open" } else { "closed" }
+            );
         }
         OverlayAction::ToggleWindowMode => {
             if toggle_window_mode(screens, screen_idx) {
