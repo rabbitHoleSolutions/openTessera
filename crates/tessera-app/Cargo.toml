@@ -6,7 +6,7 @@ license.workspace = true
 description = "openTessera desktop video wall"
 
 [[bin]]
-name = "opentessera"
+name = "tessera"
 path = "src/main.rs"
 
 [dependencies]

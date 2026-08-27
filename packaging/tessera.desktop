@@ -1,0 +1,23 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Tessera
+GenericName=Video Wall
+Comment=Play many videos at once as a wall of tiles
+Exec=tessera %F
+TryExec=tessera
+Icon=tessera
+Terminal=false
+Categories=AudioVideo;Video;Player;
+Keywords=video;wall;multi;mosaic;player;jellyfin;plex;
+# Matches WM_CLASS, which main.rs sets explicitly to APP_ID. Without this
+# the dock shows a second, generic entry instead of lighting up this one.
+StartupWMClass=tessera
+StartupNotify=false
+MimeType=video/x-matroska;video/mp4;video/mpeg;video/quicktime;video/x-msvideo;video/x-ms-wmv;video/webm;video/x-flv;video/3gpp;video/ogg;video/mp2t;video/x-m4v;video/avi;inode/directory;
+Actions=Wall;
+
+# The all-monitors video wall, as a right-click action on the dock icon.
+[Desktop Action Wall]
+Name=Fill every monitor
+Exec=tessera --max

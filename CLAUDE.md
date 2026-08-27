@@ -8,7 +8,8 @@ ideas, no shared code. See `README.md` for the user-facing feature list and
 ## Commands
 
 ```
-cargo build --release          # binary: target/release/opentessera
+cargo build --release          # binary: target/release/tessera
+./packaging/install.sh         # user-local install (bin + icon + .desktop)
 cargo check --workspace        # fast loop while editing
 cargo test --workspace         # 43 tests, mostly tessera-core (layout, budget, queue, sources)
 cargo clippy --workspace       # 7 pre-existing warnings; don't let the count grow
@@ -20,13 +21,13 @@ fullscreen):
 
 ```
 TESSERA_DUMP_DIR=<scratch> TESSERA_DUMP_OVERLAY=1 \
-  ./target/release/opentessera --windowed 1400x900 --populate 2 --ui-scale 1 \
+  ./target/release/tessera --windowed 1400x900 --populate 2 --ui-scale 1 \
   --overlay --status-interval 3 &
 ```
 
 That dumps a full-screen PNG (overlay included) every status interval, which
 is readable directly. The session is X11 with `xdotool` available, so the UI
-can be driven: `xdotool search --classname opentessera`, then
+can be driven: `xdotool search --classname tessera`, then
 `xdotool mousemove --window <id> X Y` (window-relative, matches the PNG's
 pixel coordinates 1:1 at `--ui-scale 1`). Caveats: bare `xdotool click` fires
 press+release in one frame, which egui's drag-only widgets (sliders) ignore —
@@ -200,3 +201,11 @@ segfaults on NVIDIA when decoders re-init mid-playback. Don't "optimize" it back
   widget state on `UiSettings` must be excluded from its hand-written
   `PartialEq`.
 - Update `docs/ROADMAP.md` when a tracked feature lands (status + what shipped).
+- The binary is `tessera`; the project and the config dir stay `openTessera`
+  / `~/.config/opentessera` (renaming the dir would orphan real credentials).
+  `main.rs` sets WM_CLASS explicitly to `APP_ID` — the desktop entry's
+  `StartupWMClass` must match it, or the dock shows a second generic entry
+  instead of lighting up ours.
+- Positional paths on the command line REPLACE the saved sources rather than
+  merging with them: opening a video from the file manager has to play that
+  video. `--plex`/`--jellyfin` still merge, being an explicit ask.

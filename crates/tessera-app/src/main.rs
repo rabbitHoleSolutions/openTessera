@@ -20,6 +20,7 @@ use tessera_core::{Admission, DecodeBudget, PlaybackQueue, QueueOrder};
 use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
+use winit::platform::x11::WindowBuilderExtX11;
 use winit::window::{Fullscreen, WindowBuilder};
 
 use compositor::set_gl_loader;
@@ -36,6 +37,24 @@ enum ScreenSel {
     /// opened at runtime from the status bar's "+" button, and each one
     /// toggles its own fullscreen with W.
     Windowed(u32, u32),
+}
+
+/// WM_CLASS, and the name the desktop entry matches with StartupWMClass.
+/// Set explicitly rather than left to default from the binary name, so
+/// renaming the binary can't silently break the dock association.
+const APP_ID: &str = "tessera";
+
+/// The window/taskbar icon, baked into the binary so a window looks right
+/// even when the app is run straight out of target/release with nothing
+/// installed. The desktop entry uses the installed hicolor icons instead.
+const WINDOW_ICON_PNG: &[u8] = include_bytes!("../../../assets/window-icon-64.png");
+
+/// Decodes the embedded icon. A failure here is cosmetic — the window just
+/// gets the WM's default — so it never stops startup.
+fn window_icon() -> Option<winit::window::Icon> {
+    let img = image::load_from_memory(WINDOW_ICON_PNG).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    winit::window::Icon::from_rgba(img.into_raw(), w, h).ok()
 }
 
 /// Size of the initial window, and of windows opened at runtime, when no
@@ -161,10 +180,10 @@ fn parse_args() -> Result<Args, String> {
 
 fn print_usage() {
     println!(
-        "opentessera — desktop multi-stream video wall
+        "tessera — desktop multi-stream video wall
 
 USAGE:
-  opentessera [OPTIONS] <FILE|DIR>...
+  tessera [OPTIONS] <FILE|DIR>...
 
 OPTIONS:
   --tiles N          Max tiles per screen (default 12)
@@ -302,10 +321,19 @@ fn main() {
         settings.max_streams = (m as u32).clamp(1, 128);
     }
 
-    // Media sources: saved sources, plus positional paths and the
-    // --plex/--jellyfin flags (servers from sources.conf / env vars),
-    // deduplicated.
-    let mut sources: Vec<tessera_core::sources::Source> = settings.sources.clone();
+    // Media sources.
+    //
+    // Positional paths mean "play this". Opening a video from the file
+    // manager or the dock has to play THAT video, not append it to a saved
+    // library of hundreds and start somewhere else — so paths on the
+    // command line replace the saved sources rather than joining them.
+    // A bare launch still uses the saved sources, and --plex/--jellyfin
+    // still merge in, because those are an explicit ask for a server.
+    let mut sources: Vec<tessera_core::sources::Source> = if args.files.is_empty() {
+        settings.sources.clone()
+    } else {
+        Vec::new()
+    };
     let mut push_unique = |src: tessera_core::sources::Source| {
         if !sources.contains(&src) {
             sources.push(src);
@@ -513,7 +541,7 @@ fn main() {
         // Startup population. --max is the video-wall mode: fill every
         // screen to the --tiles cap. A plain window starts at
         // DEFAULT_WINDOW_TILES instead — a wall of 12 streams is not what
-        // you want from a bare `opentessera`. --populate overrides either.
+        // you want from a bare `tessera`. --populate overrides either.
         let default_populate = match args.screens {
             ScreenSel::Windowed(_, _) => DEFAULT_WINDOW_TILES.min(args.tiles),
             _ => args.tiles,
@@ -689,8 +717,8 @@ fn main() {
                         screen.role = role;
                         screen.library.tab = tab;
                         screen.window.set_title(match role {
-                            ScreenRole::Wall => "openTessera",
-                            ScreenRole::Library => "openTessera — library",
+                            ScreenRole::Wall => "Tessera",
+                            ScreenRole::Library => "Tessera — library",
                         });
                         screens.push(screen);
                         let idx = screens.len() - 1;
@@ -2392,7 +2420,7 @@ fn open_window<T>(
     on: Option<&winit::monitor::MonitorHandle>,
 ) -> Option<Arc<winit::window::Window>> {
     let (mut w, mut h) = size;
-    let mut wb = WindowBuilder::new().with_title("openTessera");
+    let mut wb = app_window().with_title("Tessera");
     if let Some(m) = on {
         let (mp, ms) = (m.position(), m.size());
         w = w.min(ms.width);
@@ -2480,12 +2508,21 @@ fn create_screen<T>(
 fn window_builder(args: &Args, monitors: &[winit::monitor::MonitorHandle], index: usize) -> WindowBuilder {
     let monitor = &monitors[index];
     match &args.screens {
-        ScreenSel::Windowed(w, h) => WindowBuilder::new()
-            .with_title("openTessera")
+        ScreenSel::Windowed(w, h) => app_window()
+            .with_title("Tessera")
             .with_inner_size(winit::dpi::PhysicalSize::new(*w, *h)),
-        _ => WindowBuilder::new()
-            .with_title(format!("openTessera — screen {index}"))
+        _ => app_window()
+            .with_title(format!("Tessera — screen {index}"))
             .with_decorations(false)
             .with_fullscreen(Some(Fullscreen::Borderless(Some(monitor.clone())))),
     }
+}
+
+/// A WindowBuilder carrying this app's identity: WM_CLASS (so the desktop
+/// entry's StartupWMClass matches and the dock groups our windows) and the
+/// embedded icon.
+fn app_window() -> WindowBuilder {
+    WindowBuilder::new()
+        .with_name(APP_ID, APP_ID)
+        .with_window_icon(window_icon())
 }

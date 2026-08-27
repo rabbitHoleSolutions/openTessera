@@ -111,32 +111,50 @@ saturated the machine at 8x 4K — hence the Rust + libmpv stack decision.
 ## Build
 
 ```
-cargo build --release
+cargo build --release          # binary: target/release/tessera
 ```
+
+## Install (Linux desktop)
+
+```
+./packaging/install.sh
+```
+
+Installs, for the current user only and without root: the `tessera` binary
+into `~/.local/bin`, the icon into the hicolor theme, and a desktop entry so
+it shows up in the app menu, in the dock, and under **Open With** for video
+files. `--default` additionally makes it the default video player (opt-in,
+since that takes over double-clicking every video on the machine);
+`--uninstall` reverses it. Config in `~/.config/opentessera` is never
+touched either way.
 
 ## Run
 
 ```
 # one window, 4 tiles (the default shape)
-opentessera /path/to/videos/
+tessera /path/to/videos/
+
+# a single file — paths on the command line replace the saved sources, so
+# opening a video from the file manager plays that video
+tessera /path/to/file.mkv
 
 # the video wall: every monitor fullscreen, 4 tiles each
-opentessera --max --tiles 4 /path/to/videos/
+tessera --max --tiles 4 /path/to/videos/
 
 # a window of a particular size
-opentessera --windowed 1600x900 /path/to/file.mkv
+tessera --windowed 1600x900 /path/to/file.mkv
 
 # only monitor 2, fullscreen, advance through a directory instead of looping
-opentessera --screens 2 --advance /path/to/videos/
+tessera --screens 2 --advance /path/to/videos/
 
 # a dozen streams of the same source
-opentessera --tiles 12 vid1.mkv vid1.mkv vid1.mkv vid1.mkv ...
+tessera --tiles 12 vid1.mkv vid1.mkv vid1.mkv vid1.mkv ...
 
 # everything in the Plex "Movies" library
-opentessera --plex --plex-library Movies
+tessera --plex --plex-library Movies
 
 # local files plus two remote servers, one shared queue
-opentessera --jellyfin --jellyfin-library Movies --plex /path/to/local/
+tessera --jellyfin --jellyfin-library Movies --plex /path/to/local/
 ```
 
 - Adding a server without typing a token: the gear panel's add-source form
