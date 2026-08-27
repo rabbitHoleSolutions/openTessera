@@ -14,6 +14,14 @@
 use tessera_core::Rect;
 
 use crate::thumbs::ThumbCache;
+use crate::tile::TrackInfo;
+
+/// Which track row is expanded below a tile's transport.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrackKind {
+    Audio,
+    Subtitle,
+}
 
 #[derive(Default)]
 pub struct OverlayState {
@@ -40,6 +48,8 @@ pub struct OverlayState {
     /// Transient on-screen feedback (shown a few seconds even while the
     /// rest of the overlay is hidden).
     pub notice: Option<(String, std::time::Instant)>,
+    /// Tile track-picker row expanded below the transport (one at a time).
+    pub track_panel: Option<(usize, TrackKind)>,
     /// Help panel open (? or / toggles).
     pub help_open: bool,
     /// Settings panel open (gear button).
@@ -123,6 +133,12 @@ pub enum OverlayAction {
     MuteButton { tile_id: usize },
     /// Volume slider dragged on a tile chip (or wheel): set absolute volume.
     SetVolume { tile_id: usize, volume: i64 },
+    /// A/S button: expand (or collapse) this tile's audio/subtitle track row.
+    ToggleTrackPanel { tile_id: usize, kind: TrackKind },
+    /// Track row: pick an audio track (None = off).
+    SetAudioTrack { tile_id: usize, track: Option<i64> },
+    /// Track row: pick a subtitle track (None = off).
+    SetSubtitleTrack { tile_id: usize, track: Option<i64> },
     /// Queue drag reorder: insert `from` before `to`.
     QueueReorder { from: usize, to: usize },
     /// Reshuffle the pending queue tail.
@@ -161,6 +177,8 @@ pub struct TileUiInfo {
     pub volume: i64,
     pub time_pos: f64,
     pub duration: f64,
+    pub audio_tracks: Vec<TrackInfo>,
+    pub subtitle_tracks: Vec<TrackInfo>,
 }
 
 /// One pending queue entry as shown in the hover queue.
@@ -199,6 +217,7 @@ pub fn draw(
     budget: &BudgetUi,
     hover: Option<(usize, Rect)>,
     tile_drag: Option<TileDrag>,
+    track_panel: Option<(usize, TrackKind)>,
     thumbs: &mut ThumbCache,
     actions: &mut Vec<OverlayAction>,
     queue_drag: &mut Option<usize>,
@@ -342,6 +361,50 @@ pub fn draw(
                     .show(ui, |ui| {
                         ui.set_max_width(460.0);
                         ui.horizontal(|ui| {
+                            // Track pickers (A/S) sit at the row start so their
+                            // position is stable. A only when the file has >1
+                            // audio track; S whenever subtitles exist.
+                            {
+                                let b = |ui: &mut egui::Ui, glyph: &str, open: bool, tip: &str| {
+                                    let mut btn = egui::Button::new(
+                                        egui::RichText::new(glyph).small(),
+                                    )
+                                    .min_size(egui::vec2(18.0, 16.0));
+                                    if open {
+                                        btn = btn.fill(egui::Color32::from_rgb(70, 110, 150));
+                                    }
+                                    let r = ui.add(btn);
+                                    let clicked = r.clicked();
+                                    r.on_hover_text(tip);
+                                    clicked
+                                };
+                                if tile.audio_tracks.len() > 1
+                                    && b(
+                                        ui,
+                                        "A",
+                                        track_panel == Some((tile.id, TrackKind::Audio)),
+                                        "audio tracks",
+                                    )
+                                {
+                                    actions.push(OverlayAction::ToggleTrackPanel {
+                                        tile_id: tile.id,
+                                        kind: TrackKind::Audio,
+                                    });
+                                }
+                                if !tile.subtitle_tracks.is_empty()
+                                    && b(
+                                        ui,
+                                        "S",
+                                        track_panel == Some((tile.id, TrackKind::Subtitle)),
+                                        "subtitle tracks",
+                                    )
+                                {
+                                    actions.push(OverlayAction::ToggleTrackPanel {
+                                        tile_id: tile.id,
+                                        kind: TrackKind::Subtitle,
+                                    });
+                                }
+                            }
                             let state = if tile.paused { "⏸" } else { "▶" };
                             let title = truncate(&tile.title, 38);
                             let color = if tile.paused {
@@ -525,6 +588,54 @@ pub fn draw(
                                 "delete this video (file / library) and play the next"
                             });
                         });
+                        // Expanded track row: off + one button per track, the
+                        // current selection filled. Same panel, below the
+                        // transport — no popup.
+                        if let Some((pid, kind)) = track_panel {
+                            if pid == tile.id {
+                                let (tracks, is_audio) = match kind {
+                                    TrackKind::Audio => (&tile.audio_tracks, true),
+                                    TrackKind::Subtitle => (&tile.subtitle_tracks, false),
+                                };
+                                let sel_fill = egui::Color32::from_rgb(70, 110, 150);
+                                ui.horizontal(|ui| {
+                                    let mut off = egui::Button::new(egui::RichText::new("off").small())
+                                        .min_size(egui::vec2(30.0, 16.0));
+                                    if !tracks.iter().any(|t| t.selected) {
+                                        off = off.fill(sel_fill);
+                                    }
+                                    if ui.add(off).clicked() {
+                                        actions.push(if is_audio {
+                                            OverlayAction::SetAudioTrack { tile_id: tile.id, track: None }
+                                        } else {
+                                            OverlayAction::SetSubtitleTrack { tile_id: tile.id, track: None }
+                                        });
+                                    }
+                                    for t in tracks {
+                                        let mut btn =
+                                            egui::Button::new(egui::RichText::new(t.short_label()).small());
+                                        if t.selected {
+                                            btn = btn.fill(sel_fill);
+                                        }
+                                        let r = ui.add(btn);
+                                        if r.clicked() {
+                                            actions.push(if is_audio {
+                                                OverlayAction::SetAudioTrack {
+                                                    tile_id: tile.id,
+                                                    track: Some(t.id),
+                                                }
+                                            } else {
+                                                OverlayAction::SetSubtitleTrack {
+                                                    tile_id: tile.id,
+                                                    track: Some(t.id),
+                                                }
+                                            });
+                                        }
+                                        r.on_hover_text(t.describe());
+                                    }
+                                });
+                            }
+                        }
                     });
             });
     }
@@ -792,6 +903,7 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                                 ("click tile", "pause/resume that tile"),
                                 ("drag tile", "swap it with another tile on this screen (Esc cancels)"),
                                 ("wheel on tile", "that tile's volume +/-5 (Up/Down = all unmuted tiles)"),
+                                ("A / S buttons", "audio / subtitle track row (expands below the transport)"),
                                 ("right-click tile", "mute/unmute audio (needs --audio)"),
                                 ("hover tile", "show the queue strip at its bottom"),
                                 ("click thumb", "play that item on the hovered tile"),

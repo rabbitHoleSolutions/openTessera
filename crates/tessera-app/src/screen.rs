@@ -216,6 +216,8 @@ impl Screen {
                 volume: t.volume(),
                 time_pos: t.last_time_pos,
                 duration: t.duration,
+                audio_tracks: t.audio_tracks.clone(),
+                subtitle_tracks: t.subtitle_tracks.clone(),
             })
             .collect();
         let cells = self.effective_layout();
@@ -280,7 +282,7 @@ impl Screen {
                 ctx.set_pixels_per_point(settings.ui_scale);
             }
             if visible {
-                overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, tile_drag, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete);
+                overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, tile_drag, overlay.track_panel, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete);
             }
             if help_open {
                 overlay::draw_help(ctx, &mut help_open);

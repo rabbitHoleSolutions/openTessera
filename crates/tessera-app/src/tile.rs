@@ -16,6 +16,51 @@ pub enum TileEvent {
     Loaded { width: u32, height: u32, fps: f64, codec: String },
 }
 
+/// One entry of mpv's track-list (audio or subtitle stream).
+#[derive(Clone, Debug)]
+pub struct TrackInfo {
+    pub id: i64,
+    pub lang: Option<String>,
+    pub title: Option<String>,
+    pub codec: Option<String>,
+    pub default: bool,
+    pub selected: bool,
+}
+
+impl TrackInfo {
+    /// Short chip label: language, else title, else "?".
+    pub fn short_label(&self) -> String {
+        let base = self
+            .lang
+            .as_deref()
+            .or(self.title.as_deref())
+            .unwrap_or("?");
+        let mut s: String = base.chars().take(10).collect();
+        if self.default {
+            s.push('*');
+        }
+        s
+    }
+
+    /// Full description for tooltips.
+    pub fn describe(&self) -> String {
+        let mut parts = vec![format!("#{}", self.id)];
+        if let Some(l) = &self.lang {
+            parts.push(l.clone());
+        }
+        if let Some(c) = &self.codec {
+            parts.push(c.clone());
+        }
+        if let Some(t) = &self.title {
+            parts.push(t.clone());
+        }
+        if self.default {
+            parts.push("default".into());
+        }
+        parts.join(" · ")
+    }
+}
+
 // The mpv client API is fully thread-safe; GL resources are destroyed via
 // destroy_gl before tiles are handed to another thread (parallel shutdown).
 unsafe impl Send for Tile {}
@@ -35,6 +80,10 @@ pub struct Tile {
     pub duration: f64,
     pub min_rate: f64,
     pub loaded: bool,
+    /// Track caches (mpv track-list) refreshed on file load and whenever the
+    /// track panel opens — the overlay snapshot reads them every frame.
+    pub audio_tracks: Vec<TrackInfo>,
+    pub subtitle_tracks: Vec<TrackInfo>,
 }
 
 impl Tile {
@@ -91,6 +140,8 @@ impl Tile {
             duration: -1.0,
             min_rate: f64::MAX,
             loaded: false,
+            audio_tracks: Vec::new(),
+            subtitle_tracks: Vec::new(),
         })
     }
 
@@ -162,6 +213,58 @@ impl Tile {
         self.mpv.get_i64("volume").unwrap_or(100)
     }
 
+    /// Re-reads mpv's track-list into the audio/subtitle caches. track-list
+    /// is a node property; requested as a string mpv returns it as JSON.
+    pub fn refresh_tracks(&mut self) {
+        self.audio_tracks.clear();
+        self.subtitle_tracks.clear();
+        let Some(json) = self.mpv.get_string("track-list") else {
+            return;
+        };
+        let Ok(list) = serde_json::from_str::<Vec<serde_json::Value>>(&json) else {
+            eprintln!("tile {}: track-list parse failed", self.id);
+            return;
+        };
+        for t in list {
+            let kind = t.get("type").and_then(|v| v.as_str());
+            let Some(id) = t.get("id").and_then(|v| v.as_i64()) else {
+                continue;
+            };
+            let info = TrackInfo {
+                id,
+                lang: t.get("lang").and_then(|v| v.as_str()).map(str::to_owned),
+                title: t.get("title").and_then(|v| v.as_str()).map(str::to_owned),
+                codec: t.get("codec").and_then(|v| v.as_str()).map(str::to_owned),
+                default: t.get("default").and_then(|v| v.as_bool()).unwrap_or(false),
+                selected: t.get("selected").and_then(|v| v.as_bool()).unwrap_or(false),
+            };
+            match kind {
+                Some("audio") => self.audio_tracks.push(info),
+                Some("sub") => self.subtitle_tracks.push(info),
+                _ => {}
+            }
+        }
+    }
+
+    /// Selects an audio track (None = off, mpv "aid=no").
+    pub fn set_audio_track(&mut self, track: Option<i64>) {
+        let v = track.map(|i| i.to_string()).unwrap_or_else(|| "no".into());
+        if let Err(e) = self.mpv.command(&["set", "aid", &v]) {
+            eprintln!("tile {}: set aid failed: {e}", self.id);
+        }
+        self.refresh_tracks();
+    }
+
+    /// Selects a subtitle track (None = off, mpv "sid=no"). Subtitles render
+    /// through the existing render-API path (baked into the video frame).
+    pub fn set_subtitle_track(&mut self, track: Option<i64>) {
+        let v = track.map(|i| i.to_string()).unwrap_or_else(|| "no".into());
+        if let Err(e) = self.mpv.command(&["set", "sid", &v]) {
+            eprintln!("tile {}: set sid failed: {e}", self.id);
+        }
+        self.refresh_tracks();
+    }
+
     pub fn audio_enabled(&self) -> bool {
         self.audio_enabled
     }
@@ -223,6 +326,7 @@ impl Tile {
                     );
                     self.loaded = true;
                     self.duration = self.mpv.get_f64("duration").unwrap_or(-1.0);
+                    self.refresh_tracks();
                     events.push(TileEvent::Loaded { width: w, height: h, fps, codec });
                 }
                 MpvEvent::EndFile { reason: tessera_mpv::EndFileReason::Eof, .. } => {

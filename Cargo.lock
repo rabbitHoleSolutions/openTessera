@@ -1564,6 +1564,7 @@ dependencies = [
  "libloading",
  "png",
  "raw-window-handle 0.5.2",
+ "serde_json",
  "tessera-core",
  "tessera-mpv",
  "ureq",

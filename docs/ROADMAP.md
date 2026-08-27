@@ -84,7 +84,11 @@ Per-tile volume with a visible control (each tile is its own mpv instance;
 
 ## 3. Audio track selector
 
-Status: **not started**
+Status: **implemented** (with #4) — no popup (user decision): "A" button in
+the chip row (only when >1 audio track) expands a track row inside the same
+panel, below the transport. Off + one button per track; current selection
+filled. Track caches live on the tile, refreshed on file load and whenever
+the row opens.
 
 **Design**
 - "A" button in tile chip row — only shown when the file has >1 audio track.
@@ -110,7 +114,9 @@ Status: **not started**
 
 ## 4. Subtitle track selector
 
-Status: **not started**
+Status: **implemented** (with #3) — "S" button whenever subtitle tracks
+exist; same inline row, sets mpv `sid`; subtitles render through the
+existing render-API path (baked into the video frame).
 
 **Design**
 - "S" button in tile chip row — only shown when the file has subtitle tracks.
@@ -135,6 +141,7 @@ Status: **not started**
 - Transport: scrub, ±10s, next/prev, keyboard; async seeks/loads
 - Tile drag-to-rearrange: same-screen drag-to-swap (Phase 1 of #1)
 - Visual volume: per-tile chip slider + scroll wheel (#2)
+- Track selectors: inline A/S rows for audio + subtitles, off included (#3, #4)
 - Sources: local, Plex, Jellyfin (direct-play URIs), library filters,
   delete-at-source
 - Panel management: +/- tiles, per-window W toggle, F tile zoom

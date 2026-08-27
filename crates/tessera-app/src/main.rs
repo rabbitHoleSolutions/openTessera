@@ -1171,6 +1171,65 @@ fn handle_overlay_action(
                 }
             }
         }
+        OverlayAction::ToggleTrackPanel { tile_id, kind } => {
+            overlay.track_panel = if overlay.track_panel == Some((tile_id, kind)) {
+                None
+            } else {
+                Some((tile_id, kind))
+            };
+            // Re-read the track cache so the row reflects the current
+            // selection (covers files loaded since the last refresh).
+            for screen in screens.iter_mut() {
+                if screen.tiles.iter().any(|t| t.id == tile_id) {
+                    let monitor_index = screen.monitor_index;
+                    if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
+                        tile.refresh_tracks();
+                        println!(
+                            "screen {monitor_index} tile {tile_id}: {} audio, {} subtitle track(s)",
+                            tile.audio_tracks.len(),
+                            tile.subtitle_tracks.len()
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+        OverlayAction::SetAudioTrack { tile_id, track } => {
+            for screen in screens.iter_mut() {
+                if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
+                    tile.set_audio_track(track);
+                    let label = track
+                        .map(|id| {
+                            tile.audio_tracks
+                                .iter()
+                                .find(|t| t.id == id)
+                                .map(|t| t.describe())
+                                .unwrap_or_else(|| format!("#{id}"))
+                        })
+                        .unwrap_or_else(|| "off".into());
+                    println!("screen {} tile {tile_id}: audio track -> {label}", screen.monitor_index);
+                    return;
+                }
+            }
+        }
+        OverlayAction::SetSubtitleTrack { tile_id, track } => {
+            for screen in screens.iter_mut() {
+                if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
+                    tile.set_subtitle_track(track);
+                    let label = track
+                        .map(|id| {
+                            tile.subtitle_tracks
+                                .iter()
+                                .find(|t| t.id == id)
+                                .map(|t| t.describe())
+                                .unwrap_or_else(|| format!("#{id}"))
+                        })
+                        .unwrap_or_else(|| "off".into());
+                    println!("screen {} tile {tile_id}: subtitle track -> {label}", screen.monitor_index);
+                    return;
+                }
+            }
+        }
         OverlayAction::SeekTo { tile_id, to } => {
             for screen in screens.iter_mut() {
                 if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
@@ -1288,6 +1347,9 @@ fn handle_overlay_action(
             }
         }
         OverlayAction::RemovePanel { tile_id } => {
+            if overlay.track_panel.map(|(id, _)| id) == Some(tile_id) {
+                overlay.track_panel = None;
+            }
             for si in 0..screens.len() {
                 if screens[si].tiles.iter().any(|t| t.id == tile_id) {
                     let monitor_index = screens[si].monitor_index;
