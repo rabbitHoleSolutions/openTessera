@@ -124,6 +124,9 @@ pub struct UiSettings {
     pub src_path: String,
     pub src_token: String,
     pub src_library: String,
+    /// Why the last "add source" click didn't take. Shown under the form;
+    /// cleared as soon as the user edits the form again.
+    pub src_error: String,
 }
 
 impl PartialEq for UiSettings {
@@ -149,6 +152,7 @@ impl Default for UiSettings {
             src_path: String::new(),
             src_token: String::new(),
             src_library: String::new(),
+            src_error: String::new(),
         }
     }
 }
@@ -180,6 +184,19 @@ pub enum OverlayAction {
     ToggleWindowMode,
     /// Gear button: show/hide the settings panel.
     ToggleSettings,
+    /// Library browser: add these items to the shared queue, folded into
+    /// its current order.
+    QueueAdd { items: Vec<tessera_core::MediaItem> },
+    /// Library browser row "+": append one item to the end of the queue
+    /// without re-ordering what is already pending.
+    QueueAppend { item: tessera_core::MediaItem },
+    /// Queue tab: empty the whole queue (arm-then-confirm in the UI).
+    QueueClear,
+    /// Library browser row "▶": play this item now.
+    PlayNow { item: tessera_core::MediaItem },
+    /// Status-bar library button (or L / Q): open a browser window on this
+    /// tab.
+    NewLibraryWindow { tab: crate::library::Tab },
     /// Status-bar "+" button: open another window, on the monitor the
     /// cursor is on, with its own GL context and its own tiles. It draws
     /// from the same shared queue as every other window.
@@ -379,6 +396,32 @@ pub fn draw(
                                 } else {
                                     "fullscreen wall (W): this window fills its screen"
                                 });
+                            }
+                            // Library window: painter-drawn window frame with
+                            // list lines in it (no font dependency).
+                            {
+                                let (rect, resp) = ui
+                                    .allocate_exact_size(egui::vec2(18.0, 16.0), egui::Sense::click());
+                                let p = ui.painter_at(rect);
+                                let col = if resp.hovered() {
+                                    egui::Color32::WHITE
+                                } else {
+                                    egui::Color32::from_gray(180)
+                                };
+                                let r = rect.shrink(2.0);
+                                let st = egui::Stroke::new(1.4, col);
+                                p.rect_stroke(r, egui::Rounding::same(1.5), st);
+                                for i in 0..3 {
+                                    let y = r.top() + 3.0 + i as f32 * 3.0;
+                                    p.line_segment(
+                                        [egui::pos2(r.left() + 3.0, y), egui::pos2(r.right() - 3.0, y)],
+                                        st,
+                                    );
+                                }
+                                if resp.clicked() {
+                                    actions.push(OverlayAction::NewLibraryWindow { tab: crate::library::Tab::Library });
+                                }
+                                resp.on_hover_text("browser window: library (L) and queue (Q) tabs");
                             }
                             // New window: painter-drawn window frame with a "+" in it
                             // (same no-font-dependency rule as the gear).
@@ -1059,6 +1102,9 @@ pub fn draw_settings(
                             [230.0, 16.0],
                             egui::TextEdit::singleline(&mut settings.src_path).hint_text(path_hint),
                         );
+                        if path_resp.changed() {
+                            settings.src_error.clear();
+                        }
                         path_resp.on_hover_text(match settings.src_kind {
                             SourceKind::Folder => "folder (or file) path on disk",
                             _ => "server url, e.g. http://nas:8096",
@@ -1067,29 +1113,41 @@ pub fn draw_settings(
                     if settings.src_kind != SourceKind::Folder {
                         ui.horizontal(|ui| {
                             ui.label("token/key");
-                            ui.add_sized(
+                            let tok = ui.add_sized(
                                 [110.0, 16.0],
                                 egui::TextEdit::singleline(&mut settings.src_token)
                                     .hint_text(if settings.src_kind == SourceKind::Plex { "X-Plex-Token" } else { "API key" })
                                     .password(true),
                             );
                             ui.label("library");
-                            ui.add_sized(
+                            let lib = ui.add_sized(
                                 [110.0, 16.0],
                                 egui::TextEdit::singleline(&mut settings.src_library)
                                     .hint_text("optional"),
                             );
+                            if tok.changed() || lib.changed() {
+                                settings.src_error.clear();
+                            }
                         });
                     }
                     {
                         let path = settings.src_path.trim();
                         let token = settings.src_token.trim();
-                        let valid = match settings.src_kind {
-                            SourceKind::Folder => !path.is_empty(),
-                            _ => !path.is_empty() && !token.is_empty(),
+                        // Deliberately always clickable: a permanently grey
+                        // button reads as "this feature doesn't work". Say
+                        // what is missing instead.
+                        let missing = match settings.src_kind {
+                            SourceKind::Folder if path.is_empty() => Some("enter a folder path first"),
+                            SourceKind::Folder => None,
+                            _ if path.is_empty() => Some("enter the server url first"),
+                            _ if token.is_empty() => Some("enter the server's token/key first"),
+                            _ => None,
                         };
-                        let add_resp = ui.add_enabled(valid, egui::Button::new("add source"));
-                        if add_resp.clicked() {
+                        let add_resp = ui.button("add source");
+                        if let (true, Some(why)) = (add_resp.clicked(), missing) {
+                            settings.src_error = why.to_owned();
+                        }
+                        if add_resp.clicked() && missing.is_none() {
                             let lib = {
                                 let l = settings.src_library.trim();
                                 (!l.is_empty()).then(|| l.to_owned())
@@ -1111,13 +1169,21 @@ pub fn draw_settings(
                             };
                             if settings.sources.contains(&src) {
                                 println!("settings: source \"{}\" already configured", src.label());
+                                settings.src_error = format!("already configured: {}", src.label());
                             } else {
                                 println!("settings: added source \"{}\"", src.label());
                                 settings.sources.push(src);
+                                settings.src_error.clear();
+                                settings.src_path.clear();
+                                settings.src_token.clear();
+                                settings.src_library.clear();
                             }
-                            settings.src_path.clear();
-                            settings.src_token.clear();
-                            settings.src_library.clear();
+                        }
+                        if !settings.src_error.is_empty() {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(240, 140, 140),
+                                &settings.src_error,
+                            );
                         }
                     }
                     ui.add_space(8.0);
@@ -1162,6 +1228,8 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                                 ("N / Shift+P", "next / previous queue item on each tile"),
                                 ("P", "pin the tile under the cursor: it takes most of the screen, the rest share a bottom strip"),
                                 ("- / +", "remove tile under cursor / add a tile"),
+                                ("S", "toggle the settings panel"),
+                                ("L / Q", "browser window, library / queue tab (opens it if there isn't one)"),
                                 ("?", "toggle this help"),
                                 ("gear / top bar", "settings: UI scale, cache, audio"),
                                 ("+ / top bar", "new window: its own tiles, drawn from the same shared queue"),

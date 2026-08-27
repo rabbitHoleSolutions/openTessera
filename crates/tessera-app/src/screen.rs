@@ -10,6 +10,27 @@ use crate::overlay::{self, BudgetUi, OverlayState, TileUiInfo, UiSettings};
 use crate::thumbs::ThumbCache;
 use crate::tile::{Tile, TileEvent};
 
+/// The parts of the world a browser (library-role) screen draws from and a
+/// wall screen ignores: source listings, and every wall tile there is.
+/// Grouped because a `Screen` cannot see its siblings, so both have to be
+/// handed in from the event loop.
+pub struct BrowserCtx<'a> {
+    pub catalog: &'a mut crate::catalog::SourceCatalog,
+    pub wall_tiles: &'a [crate::library::WallTile],
+}
+
+/// What a window is for. A library window has no tiles and no video: it
+/// still owns a GL context (egui needs one) and rides the same per-screen
+/// tick, render and close paths, so everything about window management —
+/// creation, W, closing, drag routing — works on it unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenRole {
+    /// A video wall: tiles fed from the shared queue.
+    Wall,
+    /// The library browser.
+    Library,
+}
+
 pub struct Screen {
     pub window: Arc<Window>,
     pub surface: glutin::surface::Surface<glutin::surface::WindowSurface>,
@@ -18,6 +39,10 @@ pub struct Screen {
     pub egui: egui_glow::EguiGlow,
     pub compositor: Compositor,
     pub monitor_index: usize,
+    pub role: ScreenRole,
+    /// Browser state, used only when `role` is Library. Each library
+    /// window browses independently.
+    pub library: crate::library::LibraryState,
     pub tiles: Vec<Tile>,
     /// Pointer position in this window (top-left pixel origin) as of the
     /// last CursorMoved; None until the pointer has been in this window.
@@ -72,6 +97,8 @@ impl Screen {
             egui,
             compositor,
             monitor_index,
+            role: ScreenRole::Wall,
+            library: crate::library::LibraryState::default(),
             tiles: Vec::new(),
             cursor: None,
             layout: Vec::new(),
@@ -175,6 +202,7 @@ impl Screen {
         &mut self,
         budget: &mut DecodeBudget,
         queue: &mut PlaybackQueue,
+        browser: &mut BrowserCtx,
         advance: bool,
         overlay: &mut OverlayState,
         settings: &mut UiSettings,
@@ -318,6 +346,14 @@ impl Screen {
         // while the EguiGlow itself is borrowed by run().
         let egui = &mut self.egui;
         let thumbs = &mut self.thumbs;
+        let library_state = &mut self.library;
+        let role = self.role;
+        // The browser only reads the queue; taking a view keeps the queue
+        // itself out of the egui closure, which already borrows plenty.
+        let queue_view = crate::library::QueueView {
+            items: queue.items(),
+            current: queue.current_index(),
+        };
         let notice = overlay.notice.clone();
         // The help/settings panels live on exactly one screen — the one
         // that opened them. Every screen used to draw its own copy against
@@ -331,7 +367,20 @@ impl Screen {
             // and persists across frames). `ui_scale` only moves when the
             // scale slider is released, so this is a no-op mid-drag.
             ctx.set_pixels_per_point(settings.ui_scale);
-            if visible {
+            if role == ScreenRole::Library {
+                // A library window has no wall to overlay, and its UI must
+                // not auto-hide the way the wall chrome does.
+                crate::library::draw(
+                    ctx,
+                    library_state,
+                    &settings.sources,
+                    browser.catalog,
+                    thumbs,
+                    &queue_view,
+                    browser.wall_tiles,
+                    &mut actions,
+                );
+            } else if visible {
                 overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, tile_drag, overlay.track_panel, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete);
             }
             if help_open {

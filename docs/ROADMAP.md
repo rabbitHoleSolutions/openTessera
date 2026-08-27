@@ -245,6 +245,70 @@ ported from the Quest app.
 
 ---
 
+## 8. Library browser + queue building
+
+Status: **v1 implemented** (2026-08-27)
+
+Ported the shape of the Quest app's `BrowserScreen`, adapted to the desktop:
+the browser is **its own window** (decision: window, not overlay panel or
+wall tile) opened with `L` or the status-bar list icon. `ScreenRole` on
+`Screen` distinguishes it from a wall window — no tiles, no video, but the
+same GL context, tick, W, drag-routing and close paths, so window management
+works on it unchanged.
+
+- `catalog.rs`: per-source listings fetched on a background worker and
+  cached, polled each frame. `Source::list()` blocks (HTTP for servers, an
+  FS walk for folders) so it can never run on the render thread. Startup
+  enumeration stays separate — the wall plays immediately (decision: keep
+  auto-filling at launch; the browser refines rather than gates).
+- Live title filter, name/date/size ordering, per-row thumbnail (shared
+  `ThumbCache`), size, and a "queued" marker.
+- The two Quest queue semantics, now in `tessera-core`:
+  `PlaybackQueue::add_items` folds into the queue's order (bulk "add N to
+  queue" — a shuffled queue interleaves), `append_items` appends untouched
+  (the per-row "+"). Unit-tested, including that neither disturbs the
+  cursor.
+- Row "▶" plays now on the first wall window's first tile.
+
+**v1 lists each source flat** (decision), rather than the Quest app's
+`DirListing` folder tree: `Source` has no directory model, and search over a
+flat list covers most of "find things and queue them".
+
+### Queue tab (2026-08-27)
+
+The browser window has two tabs — `L` opens it on library, `Q` on queue;
+both keys focus the existing window and just switch its tab.
+
+- **now playing**: every tile on every wall window (a `Screen` can't see its
+  siblings, so `main` snapshots them into `library::WallTile` before the
+  per-screen loop). Pause/resume, mute and volume per tile, reusing the
+  existing tile-id-addressed actions.
+- **queue**: the shared queue with the current item marked, ⏶/⏷ reorder and
+  ✖ remove on pending items only (matching what `PlaybackQueue` will
+  actually do), plus shuffle / A–Z on the pending tail and "clear queue"
+  (`PlaybackQueue::clear`, arm-then-confirm like the transport's delete).
+
+Bug found here: **auto-repeat fired every hotkey continuously.** Toggles
+(W, F, L/Q, S, +/-) now ignore `KeyEvent::repeat`; only the continuous keys
+(seek, volume arrows) still repeat. Held keys were storming the wall — and
+anything that moves focus mid-press can swallow the key release, after which
+X repeats indefinitely.
+
+### Next
+
+- Folder navigation (`DirListing` per adapter: directories for local,
+  libraries/collections for Plex and Jellyfin), with the Quest app's
+  recursive per-folder search and Subfolders toggle.
+- Search history with a settle window (Quest: `SearchHistory`).
+- Per-window vs global queue toggle in settings — the north star noted when
+  the shared queue landed.
+- Row virtualisation: the list is capped at 300 rows and tells you when it
+  truncates; egui has no virtualisation here.
+
+**Effort**: M (actual: ~half session for v1)
+
+---
+
 ## Implemented features (for context)
 
 - Phase 2 budget: eviction (OLDEST_STARTED), adaptive ceiling, single-stream rule

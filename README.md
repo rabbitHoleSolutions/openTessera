@@ -29,6 +29,23 @@ Phase 1 skeleton — playback foundation:
   windows recover it). A single stream is always admissible alone.
   Budget is global across screens; resuming a paused tile re-requests
   admission and may evict.
+- Browser window (`L` library tab / `Q` queue tab, or the list icon in the
+  status bar) — one window, two tabs:
+  - **queue**: what is playing right now on every tile of every wall window
+    (pause/resume, mute, volume per tile, wherever it lives), and the shared
+    queue itself — reorder or remove any pending item, shuffle or A–Z the
+    pending tail. Items already played and the one currently playing stay
+    put, which is what `PlaybackQueue` enforces, so their controls are
+    disabled rather than misleading. "clear queue" empties it outright and
+    takes two clicks (it arms red for 4s); tiles keep playing whatever they
+    already loaded.
+  - **library**: its own window,
+    listing each configured source on demand in the background. Live title
+    filter, name/date/size ordering, and the two ways to queue things — bulk
+    "add N to queue" (folded into the queue's current order, so a shuffled
+    queue interleaves them) and a per-row "+" (appended at the end, leaving
+    the existing order alone). Per-row "▶" plays an item immediately on the
+    first wall window's first tile; rows already in the queue are marked.
 - One cursor-based wrapping playback queue shared by every window — a tile is
   a slot fed from it (name/date/size/shuffle ordering, pending-tail re-sorting
   that preserves the current item). A per-window/global choice is planned
@@ -133,7 +150,8 @@ opentessera --jellyfin --jellyfin-library Movies --plex /path/to/local/
   freely mixed in one launch.
 
 Controls: `W` toggle this window between windowed and fullscreen (on its
-current monitor) · the status bar's `+` opens another window · `Esc` exit
+current monitor) · the status bar's `+` opens another window · `L` / `Q`
+browser window on the library / queue tab · `S` settings · `Esc` exit
 fullscreen if zoomed, otherwise quit · `Tab`
 pin/unpin the overlay UI (auto-hides after 5s idle) · `Space` pause/resume
 all tiles on the focused screen · `F` fullscreen the tile under the cursor ·

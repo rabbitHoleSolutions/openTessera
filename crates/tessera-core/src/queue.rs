@@ -38,9 +38,34 @@ impl PlaybackQueue {
         self.sort_pending();
     }
 
+    /// Adds items and re-sorts the pending tail into the queue's order —
+    /// a shuffled queue interleaves them through what is still to play.
+    /// This is the bulk "add to queue" from the library browser.
     pub fn add_items(&mut self, mut items: Vec<MediaItem>) {
         self.items.append(&mut items);
         self.sort_pending();
+    }
+
+    /// Appends items to the very end WITHOUT re-sorting. A deliberate
+    /// single add ("play this next-ish") must not rewrite the order the
+    /// queue already has — same distinction the Quest app draws between
+    /// enqueue() and enqueueAppend().
+    pub fn append_items(&mut self, mut items: Vec<MediaItem>) {
+        self.items.append(&mut items);
+    }
+
+    /// Empties the queue outright and forgets the cursor. Tiles keep
+    /// playing whatever they already loaded — they own their `MediaItem` —
+    /// but nothing new is fed to them until the queue refills.
+    pub fn clear(&mut self) {
+        self.items.clear();
+        self.cursor = None;
+    }
+
+    /// True if an item with this id is already queued. The browser uses it
+    /// to mark rows that are in the queue already.
+    pub fn contains(&self, id: &str) -> bool {
+        self.items.iter().any(|i| i.id == id)
     }
 
     pub fn current(&self) -> Option<&MediaItem> {
@@ -198,6 +223,62 @@ mod tests {
 
     fn item(name: &str) -> MediaItem {
         MediaItem::from_path(Path::new(&format!("/tmp/{name}.mp4")))
+    }
+
+    #[test]
+    fn add_items_sorts_the_pending_tail_but_append_items_does_not() {
+        // Bulk "add to queue" folds new items into the queue's order...
+        let mut q = PlaybackQueue::new(QueueOrder::Name);
+        q.add_items(vec![item("b"), item("d")]);
+        q.add_items(vec![item("a"), item("c")]);
+        let titles: Vec<&str> = q.items().iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, ["a", "b", "c", "d"]);
+
+        // ...while a deliberate single append lands at the end, untouched.
+        let mut q = PlaybackQueue::new(QueueOrder::Name);
+        q.add_items(vec![item("b"), item("d")]);
+        q.append_items(vec![item("a")]);
+        let titles: Vec<&str> = q.items().iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, ["b", "d", "a"]);
+    }
+
+    #[test]
+    fn appending_never_disturbs_what_is_already_playing() {
+        let mut q = PlaybackQueue::new(QueueOrder::Name);
+        q.add_items(vec![item("b"), item("c"), item("d")]);
+        q.advance(); // cursor on "c"
+        let playing = q.current().unwrap().title.clone();
+        q.add_items(vec![item("a")]);
+        // "a" sorts first, but only the pending tail moves — the cursor
+        // still points at the same item.
+        assert_eq!(q.current().unwrap().title, playing);
+        q.append_items(vec![item("e")]);
+        assert_eq!(q.current().unwrap().title, playing);
+    }
+
+    #[test]
+    fn clear_empties_the_queue_and_resets_the_cursor() {
+        let mut q = PlaybackQueue::new(QueueOrder::Name);
+        q.add_items(vec![item("a"), item("b"), item("c")]);
+        q.advance();
+        q.clear();
+        assert!(q.is_empty());
+        assert_eq!(q.len(), 0);
+        assert!(q.current().is_none());
+        assert!(q.advance().is_none());
+        // Refilling starts clean rather than resuming an old cursor.
+        q.add_items(vec![item("z")]);
+        assert_eq!(q.current().unwrap().title, "z");
+    }
+
+    #[test]
+    fn contains_finds_queued_items_by_id() {
+        let mut q = PlaybackQueue::new(QueueOrder::Name);
+        let a = item("a");
+        let id = a.id.clone();
+        q.add_items(vec![a]);
+        assert!(q.contains(&id));
+        assert!(!q.contains("nope"));
     }
 
     #[test]

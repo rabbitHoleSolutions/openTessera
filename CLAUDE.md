@@ -10,7 +10,7 @@ ideas, no shared code. See `README.md` for the user-facing feature list and
 ```
 cargo build --release          # binary: target/release/opentessera
 cargo check --workspace        # fast loop while editing
-cargo test --workspace         # 35 tests, all in tessera-core (layout, budget, queue, sources)
+cargo test --workspace         # 43 tests, mostly tessera-core (layout, budget, queue, sources)
 cargo clippy --workspace       # 7 pre-existing warnings; don't let the count grow
 ```
 
@@ -50,7 +50,7 @@ Useful at runtime: `--windowed 1600x900` (one ordinary window),
 |---|---|
 | `tessera-mpv` | libmpv render-API wrapper: `dlopen` + hand-declared C ABI (no dev headers). `MpvLib` / `Mpv` / `RenderContext`. |
 | `tessera-core` | Pure logic, no I/O of its own beyond HTTP sources: `MediaItem`/`SourceKind`, `PlaybackQueue`, `solve_grid`, `DecodeBudget`. **This is where tests live** — put new logic here if it can be tested headlessly. |
-| `tessera-app` | The binary. `main.rs` (CLI + event loop + all the cross-screen actions), `screen.rs` (one window/GL context/queue per monitor), `tile.rs` (one mpv instance + FBO), `compositor.rs`, `overlay.rs` (egui), `thumbs.rs`, `png_util.rs`. |
+| `tessera-app` | The binary. `main.rs` (CLI + event loop + all the cross-screen actions), `screen.rs` (one window + GL context per `Screen`, wall or library), `tile.rs` (one mpv instance + FBO), `compositor.rs`, `overlay.rs` (wall egui), `library.rs` (browser egui), `catalog.rs` (background source listing), `thumbs.rs`, `png_util.rs`. |
 
 ## Architecture invariants
 
@@ -65,6 +65,26 @@ handle: never store one across frames. `WindowId` is the durable identity —
 `screens.iter().position(|s| s.window.id() == id)` is the lookup. Anything
 that used to be a `Vec` indexed in parallel with `screens` belongs on
 `Screen` instead (that is why `Screen::cursor` exists).
+
+**A window is a `Screen` with a `ScreenRole`.** `Wall` has tiles and video;
+`Library` has neither but keeps its GL context, egui context and its place
+in every per-screen path (tick, render, W, close, drag routing). Adding a
+window kind means a role, not a parallel window type — but check the role
+wherever an action assumes tiles (`add_tile_action` refuses on a library
+window).
+
+**Hotkeys ignore auto-repeat unless they're continuous.** Seek and volume
+arrows repeat; every toggle checks `!key_event.repeat`. A held key otherwise
+storms the wall, and anything that moves focus mid-press (L/Q focusing the
+browser) can swallow the key release, after which X repeats forever. That
+server-side stuck-key state survives app restarts — if hotkeys start firing
+on their own during testing, `xdotool keyup <key>` clears it.
+
+**Blocking work never runs on the render thread.** `Source::list()` is an
+HTTP round trip or an FS walk; `catalog.rs` puts it on a worker and polls
+the results each frame, the same pattern `thumbs.rs` uses for posters. If
+you reach for anything that can block inside an egui pass, it belongs in a
+worker instead.
 
 **One `PlaybackQueue`, shared by every window** — owned by `main` and passed
 `&mut` alongside `budget`. A tile is a slot fed from it; windows opened at

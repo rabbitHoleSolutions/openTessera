@@ -1,4 +1,6 @@
+mod catalog;
 mod compositor;
+mod library;
 mod overlay;
 mod thumbs;
 mod png_util;
@@ -21,7 +23,7 @@ use winit::window::{Fullscreen, WindowBuilder};
 
 use compositor::set_gl_loader;
 use overlay::{OverlayAction, OverlayState};
-use screen::Screen;
+use screen::{Screen, ScreenRole};
 use tile::{Tile, TileOptions};
 
 enum ScreenSel {
@@ -213,6 +215,9 @@ CONTROLS:
   - / +              Remove the tile under the cursor / add a tile (focused screen)
   F                  Fullscreen the tile under the cursor on its screen (F/Esc exits)
   W                  Toggle THIS screen (cursor's window): fullscreen wall <-> window
+  S                  Toggle the settings panel (gear) on the focused screen
+  L / Q              Browser window on the library / queue tab (opens it if
+                     there isn't one yet)
   Esc                Exit fullscreen if zoomed; otherwise quit"
     );
 }
@@ -455,6 +460,10 @@ fn main() {
     // runtime just pull from it — there is no per-screen slice to assign.
     let mut queue = PlaybackQueue::new(QueueOrder::Name);
     queue.add_items(items);
+    // Listings for the library browser, fetched on demand off-thread. The
+    // startup enumeration above is separate — the wall starts playing
+    // without waiting on any of this.
+    let mut catalog = catalog::SourceCatalog::new();
 
     let mut screens: Vec<Screen> = Vec::new();
     let mut budget = DecodeBudget::new(args.ceiling, settings.max_streams as usize);
@@ -583,16 +592,47 @@ fn main() {
                     let settings_before = settings.clone();
                     // Deferred: a new window has to be created after the
                     // per-screen loop, which is iterating `screens` by index.
-                    let mut new_windows = 0usize;
+                    let mut new_windows: Vec<(ScreenRole, library::Tab)> = Vec::new();
+                    // Snapshot every wall tile for the queue tab: a Screen
+                    // can't see its siblings, so this has to be gathered
+                    // before the per-screen loop borrows them one at a time.
+                    let wall_tiles: Vec<library::WallTile> = screens
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, s)| s.role == ScreenRole::Wall)
+                        .flat_map(|(wi, s)| {
+                            let monitor = s.monitor_index;
+                            s.tiles.iter().map(move |t| library::WallTile {
+                                window: wi,
+                                monitor,
+                                tile_id: t.id,
+                                title: t.item.title.clone(),
+                                paused: t.is_paused(),
+                                muted: t.is_muted(),
+                                audio_enabled: t.audio_enabled(),
+                                volume: t.volume(),
+                                time_pos: t.last_time_pos,
+                                duration: t.duration,
+                            })
+                        })
+                        .collect();
                     for screen_idx in 0..screens.len() {
-                        screens[screen_idx].tick(&mut budget, &mut queue, args.advance, &mut overlay, &mut settings);
+                        let mut browser = screen::BrowserCtx { catalog: &mut catalog, wall_tiles: &wall_tiles };
+                        screens[screen_idx].tick(&mut budget, &mut queue, &mut browser, args.advance, &mut overlay, &mut settings);
                         // UI actions from this screen's overlay: execute after
                         // the tick (pause/resume needs cross-screen budget
                         // access, which the drawing code can't have).
                         for action in std::mem::take(&mut overlay.actions) {
-                            if matches!(action, OverlayAction::NewWindow) {
-                                new_windows += 1;
-                                continue;
+                            match action {
+                                OverlayAction::NewWindow => {
+                                    new_windows.push((ScreenRole::Wall, library::Tab::Library));
+                                    continue;
+                                }
+                                OverlayAction::NewLibraryWindow { tab } => {
+                                    new_windows.push((ScreenRole::Library, tab));
+                                    continue;
+                                }
+                                _ => {}
                             }
                             let mut wall = Wall {
                                 screens: &mut screens,
@@ -608,7 +648,7 @@ fn main() {
                             handle_overlay_action(&mut wall, action, screen_idx);
                         }
                     }
-                    for _ in 0..new_windows {
+                    for (role, tab) in std::mem::take(&mut new_windows) {
                         // Place it on the monitor the cursor is on, else the
                         // one the last window is on.
                         let near = cursor_over
@@ -636,10 +676,22 @@ fn main() {
                         screen.intended_monitor = monitor_under_window(&screen.window).map(|(_, m)| m);
                         // A new window starts as a window; W makes it a wall.
                         screen.should_fullscreen = false;
+                        screen.role = role;
+                        screen.library.tab = tab;
+                        screen.window.set_title(match role {
+                            ScreenRole::Wall => "openTessera",
+                            ScreenRole::Library => "openTessera — library",
+                        });
                         screens.push(screen);
                         let idx = screens.len() - 1;
-                        println!("opened window {} (monitor {monitor_index}), {} total", idx, screens.len());
-                        for _ in 0..NEW_WINDOW_TILES {
+                        println!(
+                            "opened {} window {idx} (monitor {monitor_index}), {} total",
+                            match role { ScreenRole::Wall => "wall", ScreenRole::Library => "library" },
+                            screens.len()
+                        );
+                        // A library window has no tiles.
+                        let tiles = if role == ScreenRole::Library { 0 } else { NEW_WINDOW_TILES };
+                        for _ in 0..tiles {
                             let mut wall = Wall {
                                 screens: &mut screens,
                                 budget: &mut budget,
@@ -759,8 +811,11 @@ fn main() {
                             screen.status(dt);
                         }
                         if let Some(dir) = dump_dir() {
-                            let tag = format!("t{elapsed}s");
-                            for screen in screens.iter_mut() {
+                            // Include the screen index: several windows can
+                            // share a monitor now, and monitor_index alone
+                            // made them overwrite each other's dumps.
+                            for (i, screen) in screens.iter_mut().enumerate() {
+                                let tag = format!("w{i}-t{elapsed}s");
                                 screen.request_screenshot(dir.clone(), &tag);
                             }
                         }
@@ -974,7 +1029,21 @@ fn main() {
                             // text field, e.g. the settings source form),
                             // keys belong to the UI — the wall's hotkeys
                             // must not fire mid-typing.
+                            // Auto-repeat is wanted only for the continuous
+                            // keys (seek, volume). Repeating a toggle storms
+                            // the wall — and a held key is not the only way to
+                            // get repeats: anything that moves focus mid-press
+                            // (L/Q focusing the browser) can swallow the key
+                            // release, after which X repeats it indefinitely.
+                            let repeatable = matches!(
+                                key_event.logical_key,
+                                Key::Named(NamedKey::ArrowLeft)
+                                    | Key::Named(NamedKey::ArrowRight)
+                                    | Key::Named(NamedKey::ArrowUp)
+                                    | Key::Named(NamedKey::ArrowDown)
+                            );
                             if key_event.state == ElementState::Pressed
+                                && (!key_event.repeat || repeatable)
                                 && !screens[idx].egui.egui_ctx.wants_keyboard_input()
                             {
                                 match key_event.logical_key {
@@ -1043,6 +1112,40 @@ fn main() {
                                         let win = screens[idx].window.id();
                                         overlay.help_open =
                                             if overlay.help_open == Some(win) { None } else { Some(win) };
+                                    }
+                                    Key::Character(ref c)
+                                        if c.eq_ignore_ascii_case("l") || c.eq_ignore_ascii_case("q") =>
+                                    {
+                                        // Both keys reach the same browser
+                                        // window; they differ only in which
+                                        // tab it lands on.
+                                        let tab = if c.eq_ignore_ascii_case("q") {
+                                            library::Tab::Queue
+                                        } else {
+                                            library::Tab::Library
+                                        };
+                                        match screens.iter_mut().find(|s| s.role == ScreenRole::Library) {
+                                            Some(lib) => {
+                                                lib.library.tab = tab;
+                                                lib.window.focus_window();
+                                                println!("browser window focused ({tab:?} tab)");
+                                            }
+                                            None => overlay
+                                                .actions
+                                                .push(OverlayAction::NewLibraryWindow { tab }),
+                                        }
+                                    }
+                                    Key::Character(ref c) if c.eq_ignore_ascii_case("s") => {
+                                        // Settings on the focused screen —
+                                        // window-scoped like the help panel.
+                                        let win = screens[idx].window.id();
+                                        overlay.settings_open =
+                                            if overlay.settings_open == Some(win) { None } else { Some(win) };
+                                        println!(
+                                            "settings panel {} (screen {})",
+                                            if overlay.settings_open.is_some() { "open" } else { "closed" },
+                                            screens[idx].monitor_index
+                                        );
                                     }
                                     Key::Character(ref c) if c == "-" || c == "_" => {
                                         // Remove the tile under the cursor on
@@ -1463,6 +1566,10 @@ struct Wall<'a> {
 /// the "+" hotkey. Enforces the zoomed and --tiles limits.
 fn add_tile_action(wall: &mut Wall, screen_idx: usize) {
     let monitor_index = wall.screens[screen_idx].monitor_index;
+    if wall.screens[screen_idx].role == ScreenRole::Library {
+        notify(wall.overlay, "this is a library window — open a wall window for tiles".into());
+        return;
+    }
     if wall.screens[screen_idx].zoomed.is_some() {
         notify(wall.overlay, "exit fullscreen (F) before adding tiles".into());
         return;
@@ -1747,10 +1854,53 @@ fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx: usi
             let win = wall.screens[screen_idx].window.id();
             wall.overlay.help_open = if wall.overlay.help_open == Some(win) { None } else { Some(win) };
         }
-        // Intercepted by the event loop before it gets here: opening a
+        OverlayAction::QueueAdd { items } => {
+            let n = items.len();
+            wall.queue.add_items(items);
+            println!("library: added {n} item(s) to the queue ({} total)", wall.queue.len());
+        }
+        OverlayAction::QueueClear => {
+            let n = wall.queue.len();
+            wall.queue.clear();
+            println!("queue: cleared ({n} item(s))");
+            notify(wall.overlay, format!("queue cleared ({n} item(s))"));
+        }
+        OverlayAction::QueueAppend { item } => {
+            println!("library: queued \"{}\" ({} total)", item.title, wall.queue.len() + 1);
+            wall.queue.append_items(vec![item]);
+        }
+        OverlayAction::PlayNow { item } => {
+            // The first wall window's first tile — a library window has no
+            // tiles of its own to play on.
+            let target = wall
+                .screens
+                .iter()
+                .find(|s| s.role == ScreenRole::Wall && !s.tiles.is_empty())
+                .map(|s| (s.monitor_index, s.tiles[0].id));
+            match target {
+                Some((monitor_index, tile_id)) => {
+                    for screen in wall.screens.iter_mut() {
+                        if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
+                            tile.item = item.clone();
+                            if let Err(e) = tile.load(&item) {
+                                eprintln!("screen {monitor_index} tile {tile_id}: load failed: {e}");
+                            } else {
+                                println!(
+                                    "library: screen {monitor_index} tile {tile_id}: now playing \"{}\"",
+                                    item.title
+                                );
+                            }
+                            break;
+                        }
+                    }
+                }
+                None => notify(wall.overlay, "no wall tile to play on — open a window first".into()),
+            }
+        }
+        // Intercepted by the event loop before they get here: opening a
         // window needs the EventLoopWindowTarget and the shared GL config,
         // and must happen outside the loop iterating `screens` by index.
-        OverlayAction::NewWindow => {}
+        OverlayAction::NewWindow | OverlayAction::NewLibraryWindow { .. } => {}
         OverlayAction::ToggleSettings => {
             let win = wall.screens[screen_idx].window.id();
             wall.overlay.settings_open = if wall.overlay.settings_open == Some(win) { None } else { Some(win) };
