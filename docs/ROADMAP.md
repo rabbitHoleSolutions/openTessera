@@ -7,8 +7,7 @@ Effort estimates: `S` (< half session), `M` (~1 session), `L` (multi-session).
 
 ## 1. Tile drag-to-rearrange
 
-Status: **Phase 1 implemented** — same-screen drag swaps tiles; Phase 2
-(cross-screen) not started.
+Status: **implemented** (Phase 1 + Phase 2).
 
 ### Phase 1: Same-screen drag (do this first)
 
@@ -34,24 +33,37 @@ not insert/shift).
 
 **Effort**: M
 
-### Phase 2: Cross-screen drag (later)
+### Phase 2: Cross-screen drag (implemented 2026-08-26)
 
 A tile's mpv render context is bound to its screen's GL context, so moving
-between monitors requires teardown/rebuild.
+between monitors requires teardown/rebuild — implemented exactly that way.
 
-**Design**
-- Drag to a screen edge → drop → tile moves to that screen's next free slot.
-- Playback continuity: read `time-pos` before teardown, reload with
-  `start=<pos>`; preserve paused state, volume, track selections.
-- Decide queue behavior: move the tile's current queue entries to the target
-  screen's queue, or just the playing item.
+**What shipped**
+- Drop on another screen's window = move: the tile is appended to the
+  target screen and both grids re-flow. Release keeps its X button grab,
+  so the source window keeps reporting motion with out-of-bounds
+  coordinates — the drop position is resolved in global coordinates and
+  hit-tested against every screen's window rect.
+- Snapshot/rebuild (`ResumeState` in tile.rs): item, time-pos (`start=`),
+  paused, volume, mute, and selected aid/sid are applied to the fresh mpv
+  instance before load; `start` is reset on FileLoaded so queue advances
+  aren't affected. The tile keeps its id.
+- Budget: a playing move re-requests admission; on rejection the move
+  still happens but paused (the source instance already released its
+  slot). Paused tiles move without a slot, as everywhere else.
+- Queue decision: only the playing item moves; per-screen queues stay.
+- Target-screen guards: no move while target is zoomed (F) or at its
+  --tiles limit (toast explains).
+- Supporting changes: `--screens` takes a list (`0,2`); `--populate N`
+  opens N tiles per screen at startup while `--tiles` stays the max
+  (default: populate = max); `-`/`+` hotkeys remove the tile under the
+  cursor / add a tile on the focused screen (same logic as the transport
+  buttons, extracted into helpers); the startup WM-settle is armed so
+  pop-shell mis-placement of the 2nd+ fullscreen windows gets re-anchored
+  (retries 8× at 1s — placement still occasionally needs an app restart
+  when the WM wins the fight).
 
-**Implementation notes**
-- Serialize tile state (URI, time-pos, paused, volume, aid/sid selections) →
-  destroy render context → rebuild `Tile` on target screen → `load()` at
-  position. mpv instance does not survive; only its state snapshot does.
-
-**Effort**: M–L
+**Effort**: M–L (actual: ~1 session)
 
 ---
 
@@ -139,12 +151,15 @@ existing render-API path (baked into the video frame).
 - egui overlay: status bar, chips, transport, hover queue strips + thumbnails,
   auto-hide (5s) + Tab pin, toasts, help + settings panels
 - Transport: scrub, ±10s, next/prev, keyboard; async seeks/loads
-- Tile drag-to-rearrange: same-screen drag-to-swap (Phase 1 of #1)
+- Tile drag-to-rearrange: same-screen drag-to-swap; cross-screen drag moves
+  the tile (snapshot/rebuild with position, paused, volume, tracks intact) —
+  all of #1
 - Visual volume: per-tile chip slider + scroll wheel (#2)
 - Track selectors: inline A/S rows for audio + subtitles, off included (#3, #4)
 - Sources: local, Plex, Jellyfin (direct-play URIs), library filters,
   delete-at-source
-- Panel management: +/- tiles, per-window W toggle, F tile zoom
+- Panel management: +/- tiles (transport buttons and -/+ hotkeys), per-window
+  W toggle, F tile zoom, --populate vs --tiles, --screens monitor list
 - Settings persistence: ui_scale, cache_mb, max_streams (~/.config/opentessera/settings.conf)
 - Stability: fd-limit raise at startup + fds status line (full-wall fd exhaustion
   wedged nvidia-drm, 2026-08-26), nvdec-copy default (CUDA/GL interop segfault

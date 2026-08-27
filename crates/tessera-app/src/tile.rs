@@ -84,6 +84,22 @@ pub struct Tile {
     /// track panel opens — the overlay snapshot reads them every frame.
     pub audio_tracks: Vec<TrackInfo>,
     pub subtitle_tracks: Vec<TrackInfo>,
+    /// The resume load set mpv's `start` option; cleared on FileLoaded so
+    /// the NEXT file (queue advance) starts from its own beginning.
+    pending_start_reset: bool,
+}
+
+/// Playback state that survives a screen move. The mpv instance (and its
+/// render context) cannot cross GL contexts, so a moved tile is rebuilt
+/// from this snapshot: same item, resumed at `start`, same volume/mute/
+/// pause and track picks.
+pub struct ResumeState {
+    pub start: f64,
+    pub paused: bool,
+    pub volume: i64,
+    pub muted: bool,
+    pub aid: Option<i64>,
+    pub sid: Option<i64>,
 }
 
 impl Tile {
@@ -92,6 +108,7 @@ impl Tile {
         id: usize,
         item: &MediaItem,
         opts: &TileOptions,
+        resume: Option<&ResumeState>,
     ) -> Result<Tile, tessera_mpv::Error> {
         let mut options: Vec<(&str, &str)> = vec![
             ("vo", "libmpv"),
@@ -123,6 +140,24 @@ impl Tile {
 
         let mpv = Mpv::new(lib, &options)?;
         let render = RenderContext::new_gl(&mpv, crate::compositor::mpv_get_proc_address, std::ptr::null_mut())?;
+        // Restore-before-load: volume/mute/pause/aid/sid are ordinary
+        // runtime properties, and `start` positions the next load. All
+        // set before load_file so the resumed file comes up in the right
+        // state with no visible settling.
+        let mut pending_start_reset = false;
+        if let Some(r) = resume {
+            let _ = mpv.command(&["set", "volume", &r.volume.clamp(0, 130).to_string()]);
+            let _ = mpv.command(&["set", "mute", if r.muted { "yes" } else { "no" }]);
+            let _ = mpv.command(&["set", "start", &format!("{:.3}", r.start.max(0.0))]);
+            if r.paused {
+                let _ = mpv.command(&["set", "pause", "yes"]);
+            }
+            let aid = r.aid.map(|i| i.to_string()).unwrap_or_else(|| "no".into());
+            let _ = mpv.command(&["set", "aid", &aid]);
+            let sid = r.sid.map(|i| i.to_string()).unwrap_or_else(|| "no".into());
+            let _ = mpv.command(&["set", "sid", &sid]);
+            pending_start_reset = true;
+        }
         mpv.load_file(&item.uri, "replace")?;
 
         Ok(Tile {
@@ -142,7 +177,22 @@ impl Tile {
             loaded: false,
             audio_tracks: Vec::new(),
             subtitle_tracks: Vec::new(),
+            pending_start_reset,
         })
+    }
+
+    /// Captures the state a screen move preserves. Refreshes the track
+    /// caches first so the selected audio/subtitle picks are current.
+    pub fn snapshot_resume(&mut self) -> ResumeState {
+        self.refresh_tracks();
+        ResumeState {
+            start: self.time_pos().max(0.0),
+            paused: self.is_paused(),
+            volume: self.volume(),
+            muted: self.is_muted(),
+            aid: self.audio_tracks.iter().find(|t| t.selected).map(|t| t.id),
+            sid: self.subtitle_tracks.iter().find(|t| t.selected).map(|t| t.id),
+        }
     }
 
     pub fn load(&self, item: &MediaItem) -> Result<(), tessera_mpv::Error> {
@@ -301,6 +351,10 @@ impl Tile {
         while let Some(ev) = self.mpv.poll_event() {
             match ev {
                 MpvEvent::FileLoaded => {
+                    if self.pending_start_reset {
+                        let _ = self.mpv.command(&["set", "start", "none"]);
+                        self.pending_start_reset = false;
+                    }
                     let w = self.mpv.get_i64("width").unwrap_or(0) as u32;
                     let h = self.mpv.get_i64("height").unwrap_or(0) as u32;
                     let fps = self

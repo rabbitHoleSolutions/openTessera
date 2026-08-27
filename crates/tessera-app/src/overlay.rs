@@ -157,11 +157,15 @@ pub struct PendingClick {
     pub right: bool,
 }
 
-/// A same-screen tile drag in progress: the dragged tile's id and the
-/// current pointer position (window pixels, top-left origin).
+/// A tile drag in progress. `window_id` is the drag source; `pos` is the
+/// pointer in `pos_window`'s coordinate space (window pixels, top-left
+/// origin). While an X button grab routes motion to the source window,
+/// `pos` runs past that window's bounds — which is exactly what the
+/// cross-screen drop detection needs.
 #[derive(Debug, Clone, Copy)]
 pub struct TileDrag {
     pub window_id: winit::window::WindowId,
+    pub pos_window: winit::window::WindowId,
     pub from_tile: usize,
     pub pos: (f32, f32),
 }
@@ -882,6 +886,7 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                                 ("Left / Right", "seek -/+10s on all tiles of this screen"),
                                 ("Up / Down", "volume -/+5 on unmuted tiles of this screen"),
                                 ("N / P", "next / previous queue item on each tile"),
+                                ("- / +", "remove tile under cursor / add a tile"),
                                 ("?", "toggle this help"),
                                 ("gear / top bar", "settings: UI scale, cache, audio"),
                             ];
@@ -901,7 +906,7 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                         .show(ui, |ui| {
                             let mouse: &[(&str, &str)] = &[
                                 ("click tile", "pause/resume that tile"),
-                                ("drag tile", "swap it with another tile on this screen (Esc cancels)"),
+                                ("drag tile", "drop on another tile to swap; drop on another screen to move it (Esc cancels)"),
                                 ("wheel on tile", "that tile's volume +/-5 (Up/Down = all unmuted tiles)"),
                                 ("A / S buttons", "audio / subtitle track row (expands below the transport)"),
                                 ("right-click tile", "mute/unmute audio (needs --audio)"),
