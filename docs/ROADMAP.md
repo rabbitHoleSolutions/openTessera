@@ -309,6 +309,44 @@ X repeats indefinitely.
 
 ---
 
+## 11. Queue retention, and controls that follow the cursor
+
+Status: **implemented** (2026-08-27)
+
+- **Queue retention** is a setting (default on). On, the queue and its cursor
+  round-trip through `~/.config/opentessera/queue.json`; off, every launch
+  starts empty, and turning it off deletes the saved file rather than leaving
+  a queue to resurrect months later. Written on a 20s timer and at shutdown —
+  the cursor moves on every auto-advance, so saving per mutation would rewrite
+  hundreds of items constantly.
+- A bare launch **no longer enumerates every source at startup**. Nothing used
+  that list except the initial queue, so with retention it is dead weight; the
+  library browser lists on demand. Startup is now instant instead of waiting on
+  an HTTP walk of every server. Positional paths still enumerate, since those
+  mean "play this".
+- **Only the hovered tile shows its chip.** One per tile meant any mouse
+  movement lit up the whole wall, and every control there targets a single
+  tile anyway.
+- **Arrow-key seek follows the cursor** instead of moving every tile on the
+  screen at once.
+- **The scrub bar takes the tile's width.** egui draws a Slider's rail at
+  `spacing.slider_width` (100 by default) and ignores the room `add_sized`
+  gives it, so widening the row alone did nothing — the width has to be set
+  on the spacing.
+
+### Delete now routes to the right server
+
+`MediaItem` carries the label of the `Source` that listed it, stamped in
+`Source::list` so no listing path can forget. `delete_item` resolves that
+against the configured sources instead of re-reading `sources.conf`, which
+could only ever name one server per kind. Previously deletes worked by
+coincidence — one Jellyfin entry in `sources.conf` that happened to match —
+and a second server would have sent the delete to the wrong place. Local
+`sources.conf` stays as the fallback for items listed via `--plex` /
+`--jellyfin`, which never had a configured `Source`.
+
+---
+
 ## 9. Credential and key management
 
 Status: **not started** — deliberately deferred, see below.

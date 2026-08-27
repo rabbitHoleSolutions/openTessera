@@ -46,6 +46,10 @@ Phase 1 skeleton — playback foundation:
     queue interleaves them) and a per-row "+" (appended at the end, leaving
     the existing order alone). Per-row "▶" plays an item immediately on the
     first wall window's first tile; rows already in the queue are marked.
+- Queue retention (settings): on, the queue comes back exactly as you left
+  it, cursor included; off, every launch starts empty — or with just the file
+  you opened. Either way a bare launch no longer walks every configured
+  server at startup; the library browser lists on demand instead.
 - One cursor-based wrapping playback queue shared by every window — a tile is
   a slot fed from it (name/date/size/shuffle ordering, pending-tail re-sorting
   that preserves the current item). A per-window/global choice is planned
@@ -86,7 +90,9 @@ Phase 1 skeleton — playback foundation:
   queue item. Click twice to confirm (the button arms red for 4 seconds).
 - Overlay auto-hide: the UI (status bar, chips, hover queues) shows on any
   user input and hides after 5 seconds of inactivity; Tab pins/unpins it
-  (`--overlay` starts pinned).
+  (`--overlay` starts pinned). Only the tile under the cursor shows its
+  controls — one set at a time, not a wall of them — and the scrub bar
+  takes whatever width the tile allows.
 - Click a tile to pause/resume it, Space to pause/resume a screen, Esc to quit
 
 Phase 0 benchmarking (see git history / docs when added) measured, on a

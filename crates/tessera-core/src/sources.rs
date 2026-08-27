@@ -145,21 +145,28 @@ impl Source {
     /// Lists the source's items. Servers produce direct-play URIs mpv
     /// consumes like local files; folders go through the media scanner.
     pub fn list(&self) -> Result<Vec<MediaItem>, SourceError> {
-        match self {
+        let mut items = match self {
             Source::Folder { path } => {
-                Ok(crate::media::collect_items(&[PathBuf::from(path)]))
+                crate::media::collect_items(&[PathBuf::from(path)])
             }
             Source::Plex { url, token, library } => PlexSource {
                 base: url.clone(),
                 token: token.clone(),
             }
-            .list(library.as_deref()),
+            .list(library.as_deref())?,
             Source::Jellyfin { url, api_key, library } => JellyfinSource {
                 base: url.clone(),
                 api_key: api_key.clone(),
             }
-            .list(library.as_deref()),
+            .list(library.as_deref())?,
+        };
+        // Stamped here, in the one place every listing goes through, so no
+        // path can forget and leave an item that delete can't route.
+        let label = self.label();
+        for item in items.iter_mut() {
+            item.source = Some(label.clone());
         }
+        Ok(items)
     }
 }
 
@@ -283,6 +290,7 @@ fn plex_items_from_section(json: &Value, base: &str, token: &str, lib: &str) -> 
             size: part.get("size").and_then(Value::as_i64).map(|v| v.max(0) as u64),
             modified: part.get("updatedAt").and_then(Value::as_i64).map(|v| v.max(0) as u64),
             thumb_url,
+            source: None,
         });
         let _ = lib;
     }
@@ -404,6 +412,7 @@ fn jellyfin_items_from_query(json: &Value, base: &str, api_key: &str) -> Vec<Med
             size,
             modified: None,
             thumb_url: Some(thumb_url),
+            source: None,
         });
     }
     items.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
@@ -413,21 +422,50 @@ fn jellyfin_items_from_query(json: &Value, base: &str, api_key: &str) -> Vec<Med
 /// Deletes a media item at its source: removes the local file, or issues
 /// the server's delete API (Jellyfin `DELETE /Items/{id}`, Plex
 /// `DELETE /library/metadata/{ratingKey}/delete`).
-pub fn delete_item(item: &MediaItem) -> Result<(), String> {
+pub fn delete_item(item: &MediaItem, configured: &[Source]) -> Result<(), String> {
+    // This erases the file, on the server's disk for Plex and Jellyfin —
+    // not just the library entry — so it has to reach the server the item
+    // actually came from. `item.source` is stamped by [`Source::list`];
+    // sources.conf is only a fallback for items listed through the
+    // --plex/--jellyfin flags, which never had a configured Source.
+    let owner = item
+        .source
+        .as_deref()
+        .and_then(|label| configured.iter().find(|s| s.label() == label));
+
     match item.kind {
         SourceKind::Local => std::fs::remove_file(&item.uri).map_err(|e| e.to_string()),
         SourceKind::Jellyfin => {
-            let cfg = SourceConfig::load();
-            let srv = cfg.jellyfin.ok_or("jellyfin server not configured")?;
+            let (base, key) = match owner {
+                Some(Source::Jellyfin { url, api_key, .. }) => (url.clone(), api_key.clone()),
+                _ => {
+                    let srv = SourceConfig::load()
+                        .jellyfin
+                        .ok_or("can't tell which Jellyfin server owns this item")?;
+                    (srv.url, srv.token)
+                }
+            };
             let id = item.id.strip_prefix("jellyfin|").ok_or("bad jellyfin item id")?;
-            let url = format!("{}/Items/{id}?api_key={}", srv.url, srv.token);
+            let url = format!("{}/Items/{id}?api_key={key}", base.trim_end_matches('/'));
             ureq::delete(&url).call().map(|_| ()).map_err(|e| e.to_string())
         }
         SourceKind::Plex => {
-            let cfg = SourceConfig::load();
-            let srv = cfg.plex.ok_or("plex server not configured")?;
+            let (base, token) = match owner {
+                Some(Source::Plex { url, token, .. }) => (url.clone(), token.clone()),
+                _ => {
+                    let srv = SourceConfig::load()
+                        .plex
+                        .ok_or("can't tell which Plex server owns this item")?;
+                    (srv.url, srv.token)
+                }
+            };
             let key = item.id.strip_prefix("plex|").ok_or("bad plex item id")?;
-            let url = format!("{}/library/metadata/{key}/delete?X-Plex-Token={}", srv.url, srv.token);
+            // Endpoint form kept as-is from the Quest app; untested here,
+            // and not worth changing blind.
+            let url = format!(
+                "{}/library/metadata/{key}/delete?X-Plex-Token={token}",
+                base.trim_end_matches('/')
+            );
             ureq::delete(&url).call().map(|_| ()).map_err(|e| e.to_string())
         }
         SourceKind::Smb => Err("smb delete not supported (mount it locally instead)".into()),
@@ -513,9 +551,44 @@ mod tests {
         std::fs::write(&path, b"not really a video").unwrap();
         let item = crate::MediaItem::from_path(&path);
         assert!(path.exists());
-        delete_item(&item).unwrap();
+        delete_item(&item, &[]).unwrap();
         assert!(!path.exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn delete_routes_to_the_server_the_item_came_from() {
+        let a = Source::Jellyfin {
+            url: "http://a:8096".into(),
+            api_key: "key-a".into(),
+            library: Some("Movies".into()),
+        };
+        let b = Source::Jellyfin {
+            url: "http://b:8096".into(),
+            api_key: "key-b".into(),
+            library: Some("Shows".into()),
+        };
+        // An item stamped by `list` carries the label of its own source...
+        let mut item = MediaItem::from_path(std::path::Path::new("/x.mkv"));
+        item.kind = SourceKind::Jellyfin;
+        item.id = "jellyfin|zzz".into();
+        item.source = Some(b.label());
+
+        let owner = item
+            .source
+            .as_deref()
+            .and_then(|l| [a.clone(), b.clone()].into_iter().find(|s| s.label() == l));
+        // ...and resolves to B, not to whichever server happens to be first.
+        assert!(matches!(owner, Some(Source::Jellyfin { ref url, .. }) if url == "http://b:8096"));
+
+        // An unstamped item (listed via --jellyfin, no configured Source)
+        // matches nothing and falls back to sources.conf.
+        item.source = None;
+        let owner = item
+            .source
+            .as_deref()
+            .and_then(|l| [a, b].into_iter().find(|s| s.label() == l));
+        assert!(owner.is_none());
     }
 
     #[test]

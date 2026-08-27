@@ -107,6 +107,10 @@ pub struct UiSettings {
     pub max_streams: u32,
     /// Audio pipeline enabled (tiles still start muted).
     pub audio: bool,
+    /// Remember the queue between runs. Off means every launch starts with
+    /// an empty queue — or just the file you opened — and you fill it from
+    /// the library browser.
+    pub retain_queue: bool,
     /// Media sources (folders / Plex / Jellyfin), applied at startup.
     /// Persisted as one JSON line in settings.conf.
     pub sources: Vec<tessera_core::sources::Source>,
@@ -140,6 +144,7 @@ impl PartialEq for UiSettings {
             && self.cache_mb == other.cache_mb
             && self.max_streams == other.max_streams
             && self.audio == other.audio
+            && self.retain_queue == other.retain_queue
             && self.sources == other.sources
     }
 }
@@ -151,6 +156,7 @@ impl Default for UiSettings {
             cache_mb: 512,
             max_streams: tessera_core::budget::DEFAULT_MAX_STREAMS as u32,
             audio: false,
+            retain_queue: true,
             sources: Vec::new(),
             scale_drag: None,
             src_kind: SourceKind::default(),
@@ -463,7 +469,7 @@ pub fn draw(
                             // Status text, in the space the controls left.
                             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                                 ui.set_clip_rect(ui.available_rect_before_wrap());
-                                ui.strong(format!("openTessera — screen {monitor_index}"));
+                                ui.strong(format!("Tessera — screen {monitor_index}"));
                                 if pinned {
                                     ui.weak("· pinned");
                                 }
@@ -513,10 +519,23 @@ pub fn draw(
             });
     }
 
-    // Per-tile info chips, anchored at each tile's top-left corner.
+    // Chips are drawn for the tile under the cursor ONLY. Drawing one per
+    // tile meant any mouse movement lit up the whole wall, which is
+    // unreadable at a dozen tiles — and there is no such thing as acting on
+    // "all of them" anyway: every control here targets one tile.
+    // A tile being dragged keeps its chip even as the cursor leaves it, so
+    // the thing you are moving stays identified. Zoom and pin need no case
+    // of their own: their cells are what the cursor is over anyway.
+    let chip_for = |id: usize| -> bool {
+        hover.map(|(h, _)| h == id) == Some(true)
+            || tile_drag.map(|d| d.from_tile) == Some(id)
+    };
     for (tile, cell) in tiles.iter().zip(cells.iter()) {
         if cell.w <= 0.0 || cell.h <= 0.0 {
             continue; // hidden while another tile is zoomed
+        }
+        if !chip_for(tile.id) {
+            continue;
         }
         egui::Area::new(egui::Id::new(format!("tile-chip-{}", tile.id)))
             .order(WALL_ORDER)
@@ -532,7 +551,13 @@ pub fn draw(
                     .inner_margin(egui::Margin::symmetric(8.0, 5.0))
                     .stroke(egui::Stroke::new(1.0, egui::Color32::from_black_alpha(120)))
                     .show(ui, |ui| {
-                        ui.set_max_width(460.0);
+                        // As wide as the tile allows (minus the 8px inset on
+                        // each side), so the scrub bar is a real scrub bar
+                        // rather than the stub a fixed 460px gave on a big
+                        // tile. Still bounded, so a tiny tile stays sane.
+                        let avail = (cell.w / ppp - 16.0).clamp(320.0, 900.0);
+                        ui.set_max_width(avail);
+                        ui.set_min_width(avail.min(460.0));
                         ui.horizontal(|ui| {
                             // Track pickers (A/S) sit at the row start so their
                             // position is stable. A only when the file has >1
@@ -688,10 +713,21 @@ pub fn draw(
                             if b(ui, "⏭", 22.0).clicked() {
                                 actions.push(OverlayAction::Next { tile_id: tile.id });
                             }
+                            // The scrub bar takes whatever the rest of the row
+                            // leaves. TRAILING is the fixed chrome after it
+                            // (time, pin, fullscreen, -, +, trash) plus the
+                            // four seek buttons before it; a fixed 110px stub
+                            // made seeking a two-hour film hopeless.
+                            const TRAILING: f32 = 330.0;
+                            let scrub_w = (avail - TRAILING).max(110.0);
                             if tile.duration > 0.0 {
                                 let mut pos = tile.time_pos.clamp(0.0, tile.duration);
-                                let sresp = ui.add_sized(
-                                    [110.0, 14.0],
+                                // egui draws a Slider's rail at
+                                // spacing.slider_width (100 by default) and
+                                // ignores whatever room add_sized gives it —
+                                // so widening the row alone does nothing.
+                                ui.spacing_mut().slider_width = scrub_w;
+                                let sresp = ui.add(
                                     egui::Slider::new(&mut pos, 0.0..=tile.duration)
                                         .show_value(false),
                                 );
@@ -701,7 +737,7 @@ pub fn draw(
                                     actions.push(OverlayAction::SeekTo { tile_id: tile.id, to: pos });
                                 }
                             } else {
-                                ui.add_space(110.0);
+                                ui.add_space(scrub_w);
                             }
                             ui.label(
                                 egui::RichText::new(format!(
@@ -1069,6 +1105,10 @@ pub fn draw_settings(
                     });
                     ui.add_space(4.0);
                     ui.checkbox(&mut settings.audio, "audio enabled (tiles still start muted)");
+                    ui.checkbox(&mut settings.retain_queue, "remember the queue between runs")
+                        .on_hover_text(
+                            "off: every launch starts with an empty queue (or just the file you opened)",
+                        );
                     ui.add_space(10.0);
                     ui.separator();
                     ui.add_space(6.0);
@@ -1392,7 +1432,7 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                                 ("Space", "pause/resume all tiles on this screen"),
                                 ("F", "fullscreen the tile under the cursor"),
                                 ("W", "toggle THIS window: fullscreen wall <-> window (on whichever monitor it is currently on — drag it, then W)"),
-                                ("Left / Right", "seek -/+10s on all tiles of this screen"),
+                                ("Left / Right", "seek -/+10s on the tile under the cursor"),
                                 ("Up / Down", "volume -/+5 on unmuted tiles of this screen"),
                                 ("N / Shift+P", "next / previous queue item on each tile"),
                                 ("P", "pin the tile under the cursor: it takes most of the screen, the rest share a bottom strip"),

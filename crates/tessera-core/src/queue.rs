@@ -174,6 +174,18 @@ impl PlaybackQueue {
         }
     }
 
+    /// A snapshot for persistence: the items and where the cursor sits.
+    pub fn snapshot(&self) -> (Vec<MediaItem>, usize) {
+        (self.items.clone(), self.current_index())
+    }
+
+    /// Restores a snapshot verbatim — no re-sorting, or a saved shuffle
+    /// would come back in a different order than it was left.
+    pub fn restore(&mut self, items: Vec<MediaItem>, cursor: usize) {
+        self.cursor = (!items.is_empty()).then(|| cursor.min(items.len() - 1));
+        self.items = items;
+    }
+
     pub fn items(&self) -> &[MediaItem] {
         &self.items
     }
@@ -254,6 +266,33 @@ mod tests {
         assert_eq!(q.current().unwrap().title, playing);
         q.append_items(vec![item("e")]);
         assert_eq!(q.current().unwrap().title, playing);
+    }
+
+    #[test]
+    fn snapshot_round_trips_including_the_cursor() {
+        let mut q = PlaybackQueue::new(QueueOrder::Shuffle);
+        q.add_items(vec![item("a"), item("b"), item("c"), item("d")]);
+        q.advance();
+        q.advance();
+        let want = q.current().unwrap().title.clone();
+        let (items, cursor) = q.snapshot();
+
+        let mut back = PlaybackQueue::new(QueueOrder::Name);
+        back.restore(items, cursor);
+        // Restored verbatim: a saved shuffle must not be re-sorted by the
+        // order the new queue happens to have been built with.
+        assert_eq!(back.current().unwrap().title, want);
+        assert_eq!(back.len(), 4);
+    }
+
+    #[test]
+    fn restoring_a_bad_cursor_or_an_empty_list_is_safe() {
+        let mut q = PlaybackQueue::new(QueueOrder::Name);
+        q.restore(vec![item("a")], 99);
+        assert_eq!(q.current().unwrap().title, "a");
+        q.restore(Vec::new(), 5);
+        assert!(q.is_empty());
+        assert!(q.current().is_none());
     }
 
     #[test]

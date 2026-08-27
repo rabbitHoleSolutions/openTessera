@@ -81,6 +81,10 @@ browser) can swallow the key release, after which X repeats forever. That
 server-side stuck-key state survives app restarts — if hotkeys start firing
 on their own during testing, `xdotool keyup <key>` clears it.
 
+**egui Sliders ignore the width you give them.** The rail is drawn at
+`ui.spacing().slider_width` (100 by default); `add_sized` allocates the room
+but the slider does not fill it. Set `spacing_mut().slider_width` instead.
+
 **Blocking work never runs on the render thread.** `Source::list()` is an
 HTTP round trip or an FS walk; `catalog.rs` puts it on a worker and polls
 the results each frame, the same pattern `thumbs.rs` uses for posters. If

@@ -1,6 +1,7 @@
 use std::path::Path;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SourceKind {
     Local,
     Smb,
@@ -19,7 +20,7 @@ impl SourceKind {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MediaItem {
     pub id: String,
     pub title: String,
@@ -33,6 +34,12 @@ pub struct MediaItem {
     pub modified: Option<u64>,
     /// Remote thumbnail URL (Plex/Jellyfin image endpoint), if any.
     pub thumb_url: Option<String>,
+    /// Which configured source produced this item ([`crate::sources::Source::label`]).
+    /// Deleting routes through it: an item knows nothing about credentials,
+    /// and without this the app has to guess which server owns the file —
+    /// which is wrong the moment two servers are configured.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 impl MediaItem {
@@ -57,6 +64,7 @@ impl MediaItem {
             size,
             modified,
             thumb_url: None,
+            source: None,
         }
     }
 

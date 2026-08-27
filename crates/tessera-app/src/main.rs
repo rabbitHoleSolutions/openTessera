@@ -228,7 +228,7 @@ CONTROLS:
   Right click        Mute/unmute the clicked tile (needs --audio)
   Up/Down arrows     Volume +/-5 on unmuted tiles of the focused screen
   Wheel              Volume +/-5 on the tile under the cursor
-  Left/Right arrows  Seek -/+10s on all tiles of the focused screen
+  Left/Right arrows  Seek -/+10s on the tile under the cursor
   N / Shift+P        Next / previous queue item on each tile of the focused screen
   P                  Pin the tile under the cursor: it takes most of the screen,
                      the others share a bottom strip (P again unpins)
@@ -365,23 +365,30 @@ fn main() {
             }
         }
     }
+    // Enumerated only when the command line named paths ("play this").
+    // A bare launch takes its queue from the saved file, or starts empty —
+    // so it no longer waits on an HTTP walk of every configured server, and
+    // the library browser lists on demand when you actually open it.
     let mut items = Vec::new();
-    for src in &sources {
-        match src.list() {
-            Ok(list) => {
-                println!("source {}: {} item(s)", src.label(), list.len());
-                items.extend(list);
+    if !args.files.is_empty() {
+        for src in &sources {
+            match src.list() {
+                Ok(list) => {
+                    println!("source {}: {} item(s)", src.label(), list.len());
+                    items.extend(list);
+                }
+                Err(e) => eprintln!("warning: source {} failed: {e}", src.label()),
             }
-            Err(e) => eprintln!("warning: source {} failed: {e}", src.label()),
         }
     }
-    if items.is_empty() {
-        eprintln!("error: no video items found (no sources configured — add them in the settings panel, or pass local paths / --plex / --jellyfin)");
-        print_usage();
+    // Only an error when the user actually asked for something and it
+    // yielded nothing; an empty queue is a normal state now.
+    if items.is_empty() && !args.files.is_empty() {
+        eprintln!("error: no video files found in the path(s) given");
         std::process::exit(2);
     }
     println!(
-        "openTessera: {} item(s) from {} source(s), tiles<={}, hwdec={}, audio={}, advance={}",
+        "tessera: {} item(s) from {} source(s), tiles<={}, hwdec={}, audio={}, advance={}",
         items.len(),
         sources.len(),
         args.tiles,
@@ -488,7 +495,23 @@ fn main() {
     // (same model as the Quest app's DockGridManager). Windows created at
     // runtime just pull from it — there is no per-screen slice to assign.
     let mut queue = PlaybackQueue::new(QueueOrder::Name);
-    queue.add_items(items);
+    if !args.files.is_empty() {
+        queue.add_items(items);
+    } else if settings.retain_queue {
+        match load_queue() {
+            Some((saved, cursor)) => {
+                println!("queue: restored {} item(s) from last run", saved.len());
+                queue.restore(saved, cursor);
+            }
+            None => println!("queue: nothing saved yet — fill it from the library browser (L)"),
+        }
+    } else {
+        println!("queue: retention is off — starting empty (library browser: L)");
+    }
+    // Flushed on a timer and at shutdown rather than on every mutation: the
+    // cursor moves on every auto-advance, and rewriting a few hundred items
+    // that often is pointless.
+    let mut queue_saved_at = Instant::now();
     // Listings for the library browser, fetched on demand off-thread. The
     // startup enumeration above is separate — the wall starts playing
     // without waiting on any of this.
@@ -676,6 +699,7 @@ fn main() {
                                 screens: &mut screens,
                                 budget: &mut budget,
                                 queue: &mut queue,
+                                sources: &sources,
                                 overlay: &mut overlay,
                                 mpv_lib: &mpv_lib,
                                 tile_opts: &tile_opts,
@@ -734,6 +758,7 @@ fn main() {
                                 screens: &mut screens,
                                 budget: &mut budget,
                                 queue: &mut queue,
+                                sources: &sources,
                                 overlay: &mut overlay,
                                 mpv_lib: &mpv_lib,
                                 tile_opts: &tile_opts,
@@ -744,6 +769,15 @@ fn main() {
                             add_tile_action(&mut wall, idx);
                         }
                     }
+                    // Persist the queue on a slow timer. Retention off means
+                    // never writing it, so turning the setting off and quitting
+                    // does not silently leave last week's queue on disk.
+                    if settings.retain_queue
+                        && queue_saved_at.elapsed() >= Duration::from_secs(20)
+                    {
+                        save_queue(&queue);
+                        queue_saved_at = Instant::now();
+                    }
                     // Apply settings edited in the gear panel (and persist).
                     // ui_scale only moves when the scale slider is released,
                     // so a drag produces exactly one apply/save, not one per
@@ -751,6 +785,18 @@ fn main() {
                     if settings != settings_before {
                         if settings.ui_scale != settings_before.ui_scale {
                             println!("settings: UI scale {}x", settings.ui_scale);
+                        }
+                        if settings.retain_queue != settings_before.retain_queue {
+                            if settings.retain_queue {
+                                save_queue(&queue);
+                                println!("settings: queue retention on");
+                            } else {
+                                // Off means off: leaving the file behind
+                                // would resurrect this queue if it were
+                                // switched back on months later.
+                                let _ = std::fs::remove_file(queue_path());
+                                println!("settings: queue retention off (saved queue discarded)");
+                            }
                         }
                         if settings.audio != settings_before.audio {
                             for screen in screens.iter_mut() {
@@ -888,6 +934,9 @@ fn main() {
                             // Closing the last window quits; closing one of
                             // several just takes that window down.
                             if screens.len() <= 1 {
+                                if settings.retain_queue {
+                                    save_queue(&queue);
+                                }
                                 shutdown(&mut screens);
                                 target.exit();
                             } else {
@@ -1096,6 +1145,9 @@ fn main() {
                                             // when nothing is zoomed.
                                             toggle_fullscreen(&mut screens, idx, None);
                                         } else {
+                                            if settings.retain_queue {
+                                                save_queue(&queue);
+                                            }
                                             shutdown(&mut screens);
                                             target.exit();
                                         }
@@ -1120,10 +1172,10 @@ fn main() {
                                         screens[idx].adjust_volume(-5);
                                     }
                                     Key::Named(NamedKey::ArrowLeft) => {
-                                        seek_screen(&mut screens[idx], -10.0);
+                                        seek_hovered(&mut screens[idx], -10.0);
                                     }
                                     Key::Named(NamedKey::ArrowRight) => {
-                                        seek_screen(&mut screens[idx], 10.0);
+                                        seek_hovered(&mut screens[idx], 10.0);
                                     }
                                     Key::Character(ref c) if c.eq_ignore_ascii_case("w") => {
                                         // The window under the cursor, else the focused one.
@@ -1200,6 +1252,7 @@ fn main() {
                                 screens: &mut screens,
                                 budget: &mut budget,
                                 queue: &mut queue,
+                                sources: &sources,
                                 overlay: &mut overlay,
                                 mpv_lib: &mpv_lib,
                                 tile_opts: &tile_opts,
@@ -1248,6 +1301,44 @@ fn main() {
 }
 
 
+/// The persisted queue. Kept out of settings.conf: it is a few hundred
+/// items of churn, and settings.conf is hand-editable.
+fn queue_path() -> std::path::PathBuf {
+    config_dir().join("queue.json")
+}
+
+/// Restores the saved queue, or None if there isn't one (or it is
+/// unreadable — a corrupt queue file is not worth refusing to start over).
+fn load_queue() -> Option<(Vec<tessera_core::MediaItem>, usize)> {
+    let text = std::fs::read_to_string(queue_path()).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| eprintln!("warning: queue.json unreadable ({e}) — starting empty"))
+        .ok()?;
+    let items: Vec<tessera_core::MediaItem> =
+        serde_json::from_value(v.get("items")?.clone()).ok()?;
+    let cursor = v.get("cursor").and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
+    (!items.is_empty()).then_some((items, cursor))
+}
+
+/// Writes the queue out. Silent on success; a failure here must never take
+/// the wall down, so it only warns.
+fn save_queue(queue: &PlaybackQueue) {
+    let dir = config_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let (items, cursor) = queue.snapshot();
+    let body = serde_json::json!({ "cursor": cursor, "items": items });
+    match serde_json::to_string(&body) {
+        Ok(text) => {
+            if let Err(e) = std::fs::write(queue_path(), text) {
+                eprintln!("warning: could not save the queue: {e}");
+            }
+        }
+        Err(e) => eprintln!("warning: could not serialise the queue: {e}"),
+    }
+}
+
 /// `~/.config/opentessera`, where settings, source credentials and the
 /// plex.tv device id live.
 fn config_dir() -> std::path::PathBuf {
@@ -1286,6 +1377,7 @@ fn load_settings() -> overlay::UiSettings {
                         }
                     }
                     "audio" => s.audio = v == "true" || v == "yes" || v == "on",
+                    "retain_queue" => s.retain_queue = v == "true" || v == "yes" || v == "on",
                     "sources" => match serde_json::from_str::<Vec<tessera_core::sources::Source>>(v) {
                         Ok(list) => s.sources = list,
                         Err(e) => eprintln!("warning: bad sources line in settings.conf: {e}"),
@@ -1307,8 +1399,8 @@ fn save_settings(s: &overlay::UiSettings) {
     }
     let sources_json = serde_json::to_string(&s.sources).unwrap_or_else(|_| "[]".into());
     let text = format!(
-        "# openTessera settings (also editable at runtime via the gear panel)\nui_scale = {}\ncache_mb = {}\nmax_streams = {}\naudio = {}\nsources = {}\n",
-        s.ui_scale, s.cache_mb, s.max_streams, s.audio, sources_json
+        "# openTessera settings (also editable at runtime via the gear panel)\nui_scale = {}\ncache_mb = {}\nmax_streams = {}\naudio = {}\nretain_queue = {}\nsources = {}\n",
+        s.ui_scale, s.cache_mb, s.max_streams, s.audio, s.retain_queue, sources_json
     );
     let _ = std::fs::write(dir.join("settings.conf"), text);
     println!("settings: saved to {}", dir.join("settings.conf").display());
@@ -1598,6 +1690,9 @@ struct Wall<'a> {
     budget: &'a mut DecodeBudget,
     /// The one queue every window's tiles are fed from.
     queue: &'a mut PlaybackQueue,
+    /// The configured sources, so a delete can be routed to the server the
+    /// item actually came from.
+    sources: &'a [tessera_core::sources::Source],
     overlay: &'a mut OverlayState,
     mpv_lib: &'a std::sync::Arc<tessera_mpv::MpvLib>,
     tile_opts: &'a TileOptions,
@@ -1975,7 +2070,7 @@ fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx: usi
             }
         }
         OverlayAction::DeleteCurrent { tile_id } => {
-            delete_current(wall.screens, wall.queue, screen_idx, tile_id, wall.overlay);
+            delete_current(wall.screens, wall.queue, wall.sources, screen_idx, tile_id, wall.overlay);
         }
         OverlayAction::QueueRemove { index } => {
             let monitor_index = wall.screens[screen_idx].monitor_index;
@@ -2274,13 +2369,20 @@ fn toggle_fullscreen(screens: &mut [Screen], idx: usize, tile_id: Option<usize>)
 /// Deletes the tile's current video at its source (local file, or the
 /// server's delete API), drops it from the queue, and advances the tile to
 /// the next item.
-fn delete_current(screens: &mut [Screen], queue: &mut PlaybackQueue, screen_idx: usize, tile_id: usize, overlay: &mut OverlayState) {
+fn delete_current(
+    screens: &mut [Screen],
+    queue: &mut PlaybackQueue,
+    sources: &[tessera_core::sources::Source],
+    screen_idx: usize,
+    tile_id: usize,
+    overlay: &mut OverlayState,
+) {
     let Some(tile) = screens[screen_idx].tiles.iter().find(|t| t.id == tile_id) else {
         return;
     };
     let item = tile.item.clone();
     let monitor_index = screens[screen_idx].monitor_index;
-    match tessera_core::sources::delete_item(&item) {
+    match tessera_core::sources::delete_item(&item, sources) {
         Ok(()) => println!(
             "screen {monitor_index} tile {tile_id}: deleted \"{}\" ({})",
             item.title,
@@ -2328,12 +2430,26 @@ fn tile_next(screens: &mut [Screen], queue: &mut PlaybackQueue, tile_id: usize, 
 }
 
 /// Seeks every tile of a screen by a relative offset.
-fn seek_screen(screen: &mut Screen, secs: f64) {
+/// Seeks the tile under the cursor. The arrows used to move every tile on
+/// the screen at once, which is almost never what you mean on a wall — the
+/// controls act on the tile you are pointing at, and so should the keys.
+/// With the cursor over no tile, nothing moves.
+fn seek_hovered(screen: &mut Screen, secs: f64) {
     let monitor_index = screen.monitor_index;
-    for tile in screen.tiles.iter_mut() {
+    let Some((x, y)) = screen.cursor else { return };
+    let Some(id) = screen.tile_at(x, y) else {
+        println!("screen {monitor_index}: seek ignored — cursor is not over a tile");
+        return;
+    };
+    if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == id) {
+        let from = tile.time_pos();
         tile.seek(secs, false);
+        println!(
+            "screen {monitor_index} tile {id}: seek {}{secs:.0}s from {}",
+            if secs >= 0.0 { "+" } else { "" },
+            fmt_time(from)
+        );
     }
-    println!("screen {monitor_index}: seek {}{secs:.0}s on {} tile(s)", if secs >= 0.0 { "+" } else { "" }, screen.tiles.len());
 }
 
 fn fmt_time(t: f64) -> String {
