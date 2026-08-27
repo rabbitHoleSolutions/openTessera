@@ -13,7 +13,7 @@ use glutin::display::GetGlDisplay;
 use glutin::prelude::*;
 use glutin_winit::DisplayBuilder;
 use raw_window_handle::HasRawWindowHandle;
-use tessera_core::{Admission, DecodeBudget, MediaItem, PlaybackQueue, QueueOrder};
+use tessera_core::{Admission, DecodeBudget, PlaybackQueue, QueueOrder};
 use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
@@ -25,10 +25,30 @@ use screen::Screen;
 use tile::{Tile, TileOptions};
 
 enum ScreenSel {
+    /// Every monitor, borderless fullscreen (`--max`).
     All,
+    /// These monitors, borderless fullscreen (`--screens 0,2`).
     Indices(Vec<usize>),
+    /// One ordinary window at this size. The default — extra windows are
+    /// opened at runtime from the status bar's "+" button, and each one
+    /// toggles its own fullscreen with W.
     Windowed(u32, u32),
 }
+
+/// Size of the initial window, and of windows opened at runtime, when no
+/// `--windowed WxH` is given. Clamped to the target monitor.
+const DEFAULT_WINDOW: (u32, u32) = (1600, 900);
+
+/// Tiles a plain (non---max) window opens with. `--max` fills to --tiles
+/// instead; `--populate` overrides both. Matches the Quest app's dock
+/// default (DockGridManager.INITIAL_TILES).
+const DEFAULT_WINDOW_TILES: usize = 4;
+
+/// Tiles a window opened at runtime starts with. Deliberately not
+/// DEFAULT_WINDOW_TILES: at startup nothing is playing yet so filling is
+/// free, but adding a window to a live wall would evict other screens'
+/// streams (OLDEST_STARTED) to admit them. Grow it with + instead.
+const NEW_WINDOW_TILES: usize = 1;
 
 /// Pointer travel (px) before a held left press becomes a tile drag —
 /// small enough to feel immediate, big enough that plain clicks stay clicks.
@@ -65,7 +85,7 @@ fn parse_args() -> Result<Args, String> {
         files: Vec::new(),
         tiles: 12,
         populate: None,
-        screens: ScreenSel::All,
+        screens: ScreenSel::Windowed(DEFAULT_WINDOW.0, DEFAULT_WINDOW.1),
         hwdec: "nvdec-copy".into(),
         audio: false,
         audio_device: None,
@@ -87,6 +107,7 @@ fn parse_args() -> Result<Args, String> {
         match arg.as_str() {
             "--tiles" => args.tiles = value()?.parse().map_err(|_| "bad --tiles")?,
             "--populate" => args.populate = Some(value()?.parse().map_err(|_| "bad --populate")?),
+            "--max" => args.screens = ScreenSel::All,
             "--screens" => match value()?.as_str() {
                 "all" => args.screens = ScreenSel::All,
                 n => args.screens = ScreenSel::Indices(
@@ -146,9 +167,13 @@ OPTIONS:
   --tiles N          Max tiles per screen (default 12)
   --populate N       Tiles to open per screen at startup (default: same as
                      --tiles; e.g. --tiles 10 --populate 8 loads 8, max 10)
+  --max              Every monitor, borderless fullscreen, filled to --tiles
+                     (the video-wall mode; without it you get one window)
   --screens SPEC     Monitors to use fullscreen: 'all' or comma-separated
-                     indices, e.g. '1' or '0,2' (default all)
-  --windowed WxH     Single windowed window instead of fullscreen
+                     indices, e.g. '1' or '0,2'
+  --windowed WxH     Size of the initial window (default 1600x900). Extra
+                     windows: the '+' button in the status bar; W toggles
+                     any one window between windowed and fullscreen
   --advance          Advance to the next queue item on end (default: loop)
   --audio            Enable audio (default muted)
   --audio-device DEV mpv audio device, e.g. pulse/alsa_output.pci-...hdmi-stereo
@@ -425,72 +450,21 @@ fn main() {
         log_verbose: std::env::var("TESSERA_MPV_LOG").map(|v| v == "v").unwrap_or(false),
     };
 
-    let n_screens = windows.len();
+    // One queue, shared by every window: a tile is a slot fed from it
+    // (same model as the Quest app's DockGridManager). Windows created at
+    // runtime just pull from it — there is no per-screen slice to assign.
+    let mut queue = PlaybackQueue::new(QueueOrder::Name);
+    queue.add_items(items);
+
     let mut screens: Vec<Screen> = Vec::new();
     let mut budget = DecodeBudget::new(args.ceiling, settings.max_streams as usize);
     let mut next_tile_id = 0usize;
 
     for (window, monitor_index) in windows {
-        let raw = window.raw_window_handle();
-        let context_attrs = glutin::context::ContextAttributesBuilder::new().build(Some(raw));
-        let context = match unsafe { display.create_context(&gl_config, &context_attrs) } {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("warning: GL context for monitor {monitor_index} failed: {e}");
-                continue;
-            }
+        let Some(mut screen) = create_screen(&event_loop, &display, &gl_config, window, monitor_index)
+        else {
+            continue;
         };
-        let size = window.inner_size();
-        let (nw, nh) = (
-            std::num::NonZeroU32::new(size.width).unwrap_or(std::num::NonZeroU32::new(1).unwrap()),
-            std::num::NonZeroU32::new(size.height).unwrap_or(std::num::NonZeroU32::new(1).unwrap()),
-        );
-        let surface_attrs = glutin::surface::SurfaceAttributesBuilder::<glutin::surface::WindowSurface>::new()
-            .build(window.raw_window_handle(), nw, nh);
-        let surface = match unsafe { display.create_window_surface(&gl_config, &surface_attrs) } {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("warning: GL surface for monitor {monitor_index} failed: {e}");
-                continue;
-            }
-        };
-        let context = match context.make_current(&surface) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("warning: make_current for monitor {monitor_index} failed: {e}");
-                continue;
-            }
-        };
-        let vsync = std::env::var("TESSERA_VSYNC").map(|v| v != "0").unwrap_or(false);
-        surface
-            .set_swap_interval(
-                &context,
-                if vsync {
-                    glutin::surface::SwapInterval::Wait(std::num::NonZeroU32::new(1).unwrap())
-                } else {
-                    glutin::surface::SwapInterval::DontWait
-                },
-            )
-            .ok();
-
-        let screen_idx = screens.len();
-        let mut queue = PlaybackQueue::new(QueueOrder::Name);
-        let assigned: Vec<MediaItem> = items.iter().enumerate().filter(|(i, _)| i % n_screens == screen_idx).map(|(_, m)| m.clone()).collect();
-        if assigned.is_empty() {
-            eprintln!("warning: no items for monitor {monitor_index}");
-        }
-        queue.add_items(assigned);
-
-        let gl = Arc::new(unsafe {
-            glow::Context::from_loader_function(|s| {
-                let c = std::ffi::CString::new(s).unwrap();
-                display.get_proc_address(&c) as *const std::os::raw::c_void
-            })
-        });
-        // EguiGlow compiles its shaders now, so the GL context must be current.
-        let egui = egui_glow::EguiGlow::new(&event_loop, gl.clone(), None, None);
-        let screen = Screen::new(window.clone(), surface, context, gl, egui, monitor_index, queue);
-        let mut screen = screen;
         screen.intended_monitor = Some(monitors[monitor_index].clone());
         screen.should_fullscreen = !matches!(args.screens, ScreenSel::Windowed(_, _));
         screens.push(screen);
@@ -501,10 +475,11 @@ fn main() {
         std::process::exit(1);
     }
 
-    let mut cursor_pos: Vec<Option<(f32, f32)>> = vec![None; screens.len()];
     let mut mods = winit::keyboard::ModifiersState::empty();
-    // Which screen the mouse cursor is currently over (W applies there).
-    let mut cursor_over: Option<usize> = None;
+    // Which window the mouse cursor is currently over (W applies there).
+    // Held as a WindowId, not an index: screen indices shift when a window
+    // is closed.
+    let mut cursor_over: Option<winit::window::WindowId> = None;
     // Left mouse button currently held (drag-threshold tracking).
     let mut left_held = false;
     // When the last button-wheel step was applied (see WHEEL_NOTCH_INTERVAL).
@@ -521,14 +496,20 @@ fn main() {
     let mut last_input = Instant::now();
 
     for screen_idx in 0..screens.len() {
-        // Startup population: --populate caps how many tiles open
-        // initially (default: fill to the --tiles max).
-        let populate_limit = args.populate.map_or(args.tiles, |p| p.min(args.tiles));
-        let target_tiles = screens[screen_idx].queue.len().clamp(1, populate_limit);
+        // Startup population. --max is the video-wall mode: fill every
+        // screen to the --tiles cap. A plain window starts at
+        // DEFAULT_WINDOW_TILES instead — a wall of 12 streams is not what
+        // you want from a bare `opentessera`. --populate overrides either.
+        let default_populate = match args.screens {
+            ScreenSel::Windowed(_, _) => DEFAULT_WINDOW_TILES.min(args.tiles),
+            _ => args.tiles,
+        };
+        let populate_limit = args.populate.map_or(default_populate, |p| p.min(args.tiles));
+        let target_tiles = queue.len().clamp(1, populate_limit);
         let monitor_index = screens[screen_idx].monitor_index;
         let mut created = 0;
         while created < target_tiles {
-            let item = match screens[screen_idx].queue.current() {
+            let item = match queue.current() {
                 Some(m) => m.clone(),
                 None => break,
             };
@@ -552,7 +533,7 @@ fn main() {
                     screens[screen_idx].add_tile(tile);
                     next_tile_id += 1;
                     created += 1;
-                    screens[screen_idx].queue.advance();
+                    queue.advance();
                 }
                 Err(e) => {
                     budget.release(next_tile_id);
@@ -561,7 +542,7 @@ fn main() {
                 }
             }
         }
-        if created == 0 && !screens[screen_idx].queue.is_empty() {
+        if created == 0 && !queue.is_empty() {
             eprintln!("warning: screen {monitor_index} has items but no tiles");
         }
     }
@@ -600,30 +581,87 @@ fn main() {
                         }
                     }
                     let settings_before = settings.clone();
+                    // Deferred: a new window has to be created after the
+                    // per-screen loop, which is iterating `screens` by index.
+                    let mut new_windows = 0usize;
                     for screen_idx in 0..screens.len() {
-                        screens[screen_idx].tick(&mut budget, args.advance, &mut overlay, cursor_pos[screen_idx], &mut settings);
+                        screens[screen_idx].tick(&mut budget, &mut queue, args.advance, &mut overlay, &mut settings);
                         // UI actions from this screen's overlay: execute after
                         // the tick (pause/resume needs cross-screen budget
                         // access, which the drawing code can't have).
                         for action in std::mem::take(&mut overlay.actions) {
-                            handle_overlay_action(
-                                &mut screens,
-                                &mut budget,
-                                action,
-                                screen_idx,
-                                &mpv_lib,
-                                &tile_opts,
-                                &mut next_tile_id,
-                                args.tiles,
-                                &mut overlay,
-                                &mut wm_settle_at,
-                            );
+                            if matches!(action, OverlayAction::NewWindow) {
+                                new_windows += 1;
+                                continue;
+                            }
+                            let mut wall = Wall {
+                                screens: &mut screens,
+                                budget: &mut budget,
+                                queue: &mut queue,
+                                overlay: &mut overlay,
+                                mpv_lib: &mpv_lib,
+                                tile_opts: &tile_opts,
+                                next_tile_id: &mut next_tile_id,
+                                max_tiles: args.tiles,
+                                wm_settle_at: &mut wm_settle_at,
+                            };
+                            handle_overlay_action(&mut wall, action, screen_idx);
+                        }
+                    }
+                    for _ in 0..new_windows {
+                        // Place it on the monitor the cursor is on, else the
+                        // one the last window is on.
+                        let near = cursor_over
+                            .and_then(|w| screens.iter().find(|s| s.window.id() == w))
+                            .or_else(|| screens.last())
+                            .and_then(|s| monitor_under_window(&s.window))
+                            .map(|(_, m)| m);
+                        let size = match args.screens {
+                            ScreenSel::Windowed(w, h) => (w, h),
+                            _ => DEFAULT_WINDOW,
+                        };
+                        let Some(window) = open_window(target, &gl_config, size, near.as_ref())
+                        else {
+                            notify(&mut overlay, "could not open a new window".into());
+                            break;
+                        };
+                        let monitor_index =
+                            monitor_under_window(&window).map(|(i, _)| i).unwrap_or(0);
+                        let Some(mut screen) =
+                            create_screen(target, &display, &gl_config, window, monitor_index)
+                        else {
+                            notify(&mut overlay, "could not open a new window (GL init)".into());
+                            break;
+                        };
+                        screen.intended_monitor = monitor_under_window(&screen.window).map(|(_, m)| m);
+                        // A new window starts as a window; W makes it a wall.
+                        screen.should_fullscreen = false;
+                        screens.push(screen);
+                        let idx = screens.len() - 1;
+                        println!("opened window {} (monitor {monitor_index}), {} total", idx, screens.len());
+                        for _ in 0..NEW_WINDOW_TILES {
+                            let mut wall = Wall {
+                                screens: &mut screens,
+                                budget: &mut budget,
+                                queue: &mut queue,
+                                overlay: &mut overlay,
+                                mpv_lib: &mpv_lib,
+                                tile_opts: &tile_opts,
+                                next_tile_id: &mut next_tile_id,
+                                max_tiles: args.tiles,
+                                wm_settle_at: &mut wm_settle_at,
+                            };
+                            add_tile_action(&mut wall, idx);
                         }
                     }
                     // Apply settings edited in the gear panel (and persist).
-                    // (Mid-drag scale churn is skipped; the final value
-                    // applies on release.)
-                    if settings != settings_before && !settings.scale_dragging {
+                    // ui_scale only moves when the scale slider is released,
+                    // so a drag produces exactly one apply/save, not one per
+                    // frame.
+                    if settings != settings_before {
+                        if settings.ui_scale != settings_before.ui_scale {
+                            println!("settings: UI scale {}x", settings.ui_scale);
+                        }
                         if settings.audio != settings_before.audio {
                             for screen in screens.iter_mut() {
                                 for tile in screen.tiles.iter_mut() {
@@ -754,8 +792,20 @@ fn main() {
                     let _ = screens[idx].egui.on_window_event(&window, &event);
                     match event {
                         WindowEvent::CloseRequested => {
-                            shutdown(&mut screens);
-                            target.exit();
+                            // Closing the last window quits; closing one of
+                            // several just takes that window down.
+                            if screens.len() <= 1 {
+                                shutdown(&mut screens);
+                                target.exit();
+                            } else {
+                                if cursor_over == Some(window_id) {
+                                    cursor_over = None;
+                                }
+                                close_screen(&mut screens, &mut budget, &mut overlay, idx);
+                            }
+                            // NB: `idx` is stale past this point — the
+                            // screens Vec shifted. Nothing below the match
+                            // uses it, so there is nothing to guard.
                         }
                         WindowEvent::Resized(size) => {
                             screens[idx].resize(size.width, size.height);
@@ -765,8 +815,8 @@ fn main() {
                         }
                         WindowEvent::CursorMoved { position, .. } => {
                             let (x, y) = (position.x as f32, position.y as f32);
-                            cursor_pos[idx] = Some((x, y));
-                            cursor_over = Some(idx);
+                            screens[idx].cursor = Some((x, y));
+                            cursor_over = Some(window_id);
                             last_input = Instant::now();
                             if let Some(drag) = overlay.tile_drag {
                                 // Track the pointer across screens: pos follows
@@ -811,7 +861,7 @@ fn main() {
                             }
                         }
                         WindowEvent::CursorLeft { .. } => {
-                            if cursor_over == Some(idx) {
+                            if cursor_over == Some(window_id) {
                                 cursor_over = None;
                             }
                         }
@@ -819,7 +869,7 @@ fn main() {
                             (ElementState::Pressed, MouseButton::Left) => {
                                 left_held = true;
                                 last_input = Instant::now();
-                                if let Some((x, y)) = cursor_pos[idx] {
+                                if let Some((x, y)) = screens[idx].cursor {
                                     overlay.pending_click = Some(overlay::PendingClick {
                                         window_id,
                                         x,
@@ -830,7 +880,7 @@ fn main() {
                             }
                             (ElementState::Pressed, MouseButton::Right) => {
                                 last_input = Instant::now();
-                                if let Some((x, y)) = cursor_pos[idx] {
+                                if let Some((x, y)) = screens[idx].cursor {
                                     overlay.pending_click = Some(overlay::PendingClick {
                                         window_id,
                                         x,
@@ -877,7 +927,7 @@ fn main() {
                             // Scroll over a tile = that tile's volume ±5.
                             // If the pointer is over an overlay widget (e.g.
                             // the queue strip), egui owns the wheel instead.
-                            if let Some((x, y)) = cursor_pos[idx] {
+                            if let Some((x, y)) = screens[idx].cursor {
                                 if !pos_on_ui(&screens[idx], x, y) {
                                     let step = match delta {
                                         MouseScrollDelta::LineDelta(_, l) if l > 0.0 => 5,
@@ -970,7 +1020,9 @@ fn main() {
                                     }
                                     Key::Character(ref c) if c.eq_ignore_ascii_case("w") => {
                                         // The window under the cursor, else the focused one.
-                                        let target = cursor_over.unwrap_or(idx);
+                                        let target = cursor_over
+                                            .and_then(|w| screens.iter().position(|s| s.window.id() == w))
+                                            .unwrap_or(idx);
                                         if toggle_window_mode(&mut screens, target) {
                                             wm_settle_at = Some((Instant::now() + Duration::from_millis(600), 4));
                                         }
@@ -978,7 +1030,7 @@ fn main() {
                                     Key::Character(ref c) if !mods.shift_key() && c.eq_ignore_ascii_case("f") => {
                                         if screens[idx].zoomed.is_some() {
                                             toggle_fullscreen(&mut screens, idx, None);
-                                        } else if let Some((x, y)) = cursor_pos[idx] {
+                                        } else if let Some((x, y)) = screens[idx].cursor {
                                             if let Some(t) = screens[idx].tile_at(x, y) {
                                                 toggle_fullscreen(&mut screens, idx, Some(t));
                                             } else {
@@ -987,12 +1039,15 @@ fn main() {
                                         }
                                     }
                                     Key::Character(ref c) if c == "?" || c == "/" => {
-                                        overlay.help_open = !overlay.help_open;
+                                        // On the focused screen only.
+                                        let win = screens[idx].window.id();
+                                        overlay.help_open =
+                                            if overlay.help_open == Some(win) { None } else { Some(win) };
                                     }
                                     Key::Character(ref c) if c == "-" || c == "_" => {
                                         // Remove the tile under the cursor on
                                         // the focused screen.
-                                        if let Some((x, y)) = cursor_pos[idx] {
+                                        if let Some((x, y)) = screens[idx].cursor {
                                             if let Some(tile_id) = screens[idx].tile_at(x, y) {
                                                 remove_tile_action(&mut screens, &mut budget, &mut overlay, tile_id);
                                             }
@@ -1000,21 +1055,23 @@ fn main() {
                                     }
                                     Key::Character(ref c) if c == "+" || c == "=" => {
                                         // Add a tile to the focused screen.
-                                        add_tile_action(
-                                            &mut screens,
-                                            &mut budget,
-                                            &mut overlay,
-                                            &mpv_lib,
-                                            &tile_opts,
-                                            &mut next_tile_id,
-                                            args.tiles,
-                                            idx,
-                                        );
+                                        let mut wall = Wall {
+                                screens: &mut screens,
+                                budget: &mut budget,
+                                queue: &mut queue,
+                                overlay: &mut overlay,
+                                mpv_lib: &mpv_lib,
+                                tile_opts: &tile_opts,
+                                next_tile_id: &mut next_tile_id,
+                                max_tiles: args.tiles,
+                                wm_settle_at: &mut wm_settle_at,
+                            };
+                                        add_tile_action(&mut wall, idx);
                                     }
                                     Key::Character(ref c) if c.eq_ignore_ascii_case("n") => {
                                         let ids: Vec<usize> = screens[idx].tiles.iter().map(|t| t.id).collect();
                                         for id in ids {
-                                            tile_next(&mut screens, id, true);
+                                            tile_next(&mut screens, &mut queue, id, true);
                                         }
                                     }
                                     Key::Character(ref c) if c == "p" => {
@@ -1022,7 +1079,7 @@ fn main() {
                                         // on the focused screen: it takes most
                                         // of the screen, the rest share a
                                         // bottom strip.
-                                        if let Some((x, y)) = cursor_pos[idx] {
+                                        if let Some((x, y)) = screens[idx].cursor {
                                             if let Some(tile_id) = screens[idx].tile_at(x, y) {
                                                 toggle_pin(&mut screens, idx, tile_id);
                                             }
@@ -1031,7 +1088,7 @@ fn main() {
                                     Key::Character(ref c) if c == "P" => {
                                         let ids: Vec<usize> = screens[idx].tiles.iter().map(|t| t.id).collect();
                                         for id in ids {
-                                            tile_next(&mut screens, id, false);
+                                            tile_next(&mut screens, &mut queue, id, false);
                                         }
                                     }
                                     _ => {}
@@ -1377,63 +1434,75 @@ fn resume_tile(screens: &mut [Screen], budget: &mut DecodeBudget, id: usize) {
     }
 }
 
-/// Executes one queued overlay interaction. `screen_idx` is the screen whose
-/// overlay produced the action.
-#[allow(clippy::too_many_arguments)]
+/// Everything a wall action mutates, in one place.
+///
+/// Nearly every action needs most of it: pause/resume goes through the
+/// global [`DecodeBudget`], adding a tile pulls from the shared
+/// [`PlaybackQueue`] and needs the mpv library plus the tile options, and
+/// anything that fails reports through the [`OverlayState`]. Passing them
+/// individually had `handle_overlay_action` at eleven parameters.
+///
+/// Borrowed, not owned — build one for as long as the actions run, then let
+/// it go so the frame's other code can use the same state.
+struct Wall<'a> {
+    screens: &'a mut Vec<Screen>,
+    budget: &'a mut DecodeBudget,
+    /// The one queue every window's tiles are fed from.
+    queue: &'a mut PlaybackQueue,
+    overlay: &'a mut OverlayState,
+    mpv_lib: &'a std::sync::Arc<tessera_mpv::MpvLib>,
+    tile_opts: &'a TileOptions,
+    next_tile_id: &'a mut usize,
+    /// The --tiles cap, per window.
+    max_tiles: usize,
+    /// Deferred WM re-anchor check; armed by anything that moves a window.
+    wm_settle_at: &'a mut Option<(Instant, u32)>,
+}
+
 /// Adds a tile to a screen from its queue — the transport "+" button and
 /// the "+" hotkey. Enforces the zoomed and --tiles limits.
-#[allow(clippy::too_many_arguments)]
-fn add_tile_action(
-    screens: &mut [Screen],
-    budget: &mut DecodeBudget,
-    overlay: &mut overlay::OverlayState,
-    mpv_lib: &std::sync::Arc<tessera_mpv::MpvLib>,
-    tile_opts: &TileOptions,
-    next_tile_id: &mut usize,
-    max_tiles: usize,
-    screen_idx: usize,
-) {
-    let monitor_index = screens[screen_idx].monitor_index;
-    if screens[screen_idx].zoomed.is_some() {
-        notify(overlay, "exit fullscreen (F) before adding tiles".into());
+fn add_tile_action(wall: &mut Wall, screen_idx: usize) {
+    let monitor_index = wall.screens[screen_idx].monitor_index;
+    if wall.screens[screen_idx].zoomed.is_some() {
+        notify(wall.overlay, "exit fullscreen (F) before adding tiles".into());
         return;
     }
-    if screens[screen_idx].tiles.len() >= max_tiles {
-        notify(overlay, format!("not adding: already at the {max_tiles}-tile limit"));
+    if wall.screens[screen_idx].tiles.len() >= wall.max_tiles {
+        notify(wall.overlay, format!("not adding: already at the {}-tile limit", wall.max_tiles));
         return;
     }
-    let item = match screens[screen_idx].queue.advance().cloned() {
+    let item = match wall.queue.advance().cloned() {
         Some(m) => m,
         None => {
-            notify(overlay, "not adding: queue is empty".into());
+            notify(wall.overlay, "not adding: queue is empty".into());
             return;
         }
     };
-    let id = *next_tile_id;
-    match request_admission(screens, budget, id, &tessera_core::StreamSpec::placeholder()) {
+    let id = *wall.next_tile_id;
+    match request_admission(wall.screens, wall.budget, id, &tessera_core::StreamSpec::placeholder()) {
         Admission::Admitted | Admission::AdmittedEvicting { .. } => {
-            screens[screen_idx].context.make_current(&screens[screen_idx].surface).ok();
-            match Tile::new(mpv_lib, id, &item, tile_opts, None) {
+            wall.screens[screen_idx].context.make_current(&wall.screens[screen_idx].surface).ok();
+            match Tile::new(wall.mpv_lib, id, &item, wall.tile_opts, None) {
                 Ok(tile) => {
-                    screens[screen_idx].add_tile(tile);
-                    *next_tile_id += 1;
+                    wall.screens[screen_idx].add_tile(tile);
+                    *wall.next_tile_id += 1;
                     println!(
                         "screen {monitor_index}: added tile {id} \"{}\" ({} tiles)",
                         item.title,
-                        screens[screen_idx].tiles.len()
+                        wall.screens[screen_idx].tiles.len()
                     );
                 }
                 Err(e) => {
-                    budget.release(id);
-                    notify(overlay, format!("not adding: tile creation failed: {e}"));
+                    wall.budget.release(id);
+                    notify(wall.overlay, format!("not adding: tile creation failed: {e}"));
                 }
             }
         }
         Admission::RejectedBudget { would_use, ceiling } => {
-            notify(overlay, format!("not adding: decode budget full ({would_use:.0}/{ceiling} mbps)"));
+            notify(wall.overlay, format!("not adding: decode budget full ({would_use:.0}/{ceiling} mbps)"));
         }
         Admission::RejectedMaxStreams { max } => {
-            notify(overlay, format!("not adding: max concurrent streams ({max})"));
+            notify(wall.overlay, format!("not adding: max concurrent streams ({max})"));
         }
     }
 }
@@ -1474,32 +1543,23 @@ fn remove_tile_action(
     }
 }
 
-fn handle_overlay_action(
-    screens: &mut [Screen],
-    budget: &mut DecodeBudget,
-    action: OverlayAction,
-    screen_idx: usize,
-    mpv_lib: &std::sync::Arc<tessera_mpv::MpvLib>,
-    tile_opts: &TileOptions,
-    next_tile_id: &mut usize,
-    max_tiles: usize,
-    overlay: &mut OverlayState,
-    wm_settle_at: &mut Option<(Instant, u32)>,
-) {
+/// Executes one queued overlay interaction. `screen_idx` is the screen whose
+/// overlay produced the action.
+fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx: usize) {
     match action {
         OverlayAction::TogglePause { tile_id } => {
-            let playing = screens
+            let playing = wall.screens
                 .iter()
                 .any(|s| s.tiles.iter().any(|t| t.id == tile_id && !t.is_paused()));
             if playing {
-                pause_and_release(screens, budget, tile_id, "user pause");
+                pause_and_release(wall.screens, wall.budget, tile_id, "user pause");
             } else {
-                resume_tile(screens, budget, tile_id);
+                resume_tile(wall.screens, wall.budget, tile_id);
             }
         }
         OverlayAction::MuteButton { tile_id } => {
-            overlay.solo_id = None;
-            for screen in screens.iter_mut() {
+            wall.overlay.solo_id = None;
+            for screen in wall.screens.iter_mut() {
                 if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
                     if tile.audio_enabled() {
                         let muted = tile.toggle_mute();
@@ -1509,7 +1569,7 @@ fn handle_overlay_action(
                             if muted { "muted".to_string() } else { format!("audio on (vol {}%)", tile.volume()) }
                         );
                     } else {
-                        notify(overlay, "audio is off — restart with --audio to enable sound".into());
+                        notify(wall.overlay, "audio is off — restart with --audio to enable sound".into());
                     }
                     return;
                 }
@@ -1520,7 +1580,7 @@ fn handle_overlay_action(
             // every screen.
             let mut target_ok = false;
             let mut muted_others = 0usize;
-            for screen in screens.iter_mut() {
+            for screen in wall.screens.iter_mut() {
                 for tile in screen.tiles.iter_mut() {
                     if !tile.audio_enabled() {
                         continue;
@@ -1540,21 +1600,21 @@ fn handle_overlay_action(
                 }
             }
             if !target_ok {
-                notify(overlay, "audio is off — restart with --audio to enable sound".into());
+                notify(wall.overlay, "audio is off — restart with --audio to enable sound".into());
             } else {
                 if muted_others > 0 {
                     println!("solo: muted {muted_others} other stream(s)");
                 }
-                overlay.solo_id = Some(tile_id);
+                wall.overlay.solo_id = Some(tile_id);
             }
         }
         OverlayAction::TogglePin { tile_id } => {
-            if let Some(si) = screens.iter().position(|s| s.tiles.iter().any(|t| t.id == tile_id)) {
-                toggle_pin(screens, si, tile_id);
+            if let Some(si) = wall.screens.iter().position(|s| s.tiles.iter().any(|t| t.id == tile_id)) {
+                toggle_pin(wall.screens, si, tile_id);
             }
         }
         OverlayAction::SetVolume { tile_id, volume } => {
-            for screen in screens.iter_mut() {
+            for screen in wall.screens.iter_mut() {
                 if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
                     tile.set_volume(volume);
                     println!("screen {} tile {tile_id}: vol {}%", screen.monitor_index, tile.volume());
@@ -1563,14 +1623,14 @@ fn handle_overlay_action(
             }
         }
         OverlayAction::ToggleTrackPanel { tile_id, kind } => {
-            overlay.track_panel = if overlay.track_panel == Some((tile_id, kind)) {
+            wall.overlay.track_panel = if wall.overlay.track_panel == Some((tile_id, kind)) {
                 None
             } else {
                 Some((tile_id, kind))
             };
             // Re-read the track cache so the row reflects the current
             // selection (covers files loaded since the last refresh).
-            for screen in screens.iter_mut() {
+            for screen in wall.screens.iter_mut() {
                 if screen.tiles.iter().any(|t| t.id == tile_id) {
                     let monitor_index = screen.monitor_index;
                     if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
@@ -1586,7 +1646,7 @@ fn handle_overlay_action(
             }
         }
         OverlayAction::SetAudioTrack { tile_id, track } => {
-            for screen in screens.iter_mut() {
+            for screen in wall.screens.iter_mut() {
                 if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
                     tile.set_audio_track(track);
                     let label = track
@@ -1604,7 +1664,7 @@ fn handle_overlay_action(
             }
         }
         OverlayAction::SetSubtitleTrack { tile_id, track } => {
-            for screen in screens.iter_mut() {
+            for screen in wall.screens.iter_mut() {
                 if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
                     tile.set_subtitle_track(track);
                     let label = track
@@ -1622,7 +1682,7 @@ fn handle_overlay_action(
             }
         }
         OverlayAction::SeekTo { tile_id, to } => {
-            for screen in screens.iter_mut() {
+            for screen in wall.screens.iter_mut() {
                 if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
                     tile.seek(to, true);
                     println!(
@@ -1636,7 +1696,7 @@ fn handle_overlay_action(
             }
         }
         OverlayAction::Skip { tile_id, secs } => {
-            for screen in screens.iter_mut() {
+            for screen in wall.screens.iter_mut() {
                 if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
                     // NB: time-pos is read before the seek — mpv applies the
                     // command asynchronously, so a post-command read can be
@@ -1655,21 +1715,21 @@ fn handle_overlay_action(
             }
         }
         OverlayAction::Next { tile_id } => {
-            tile_next(screens, tile_id, true);
+            tile_next(wall.screens, wall.queue, tile_id, true);
         }
         OverlayAction::Prev { tile_id } => {
-            tile_next(screens, tile_id, false);
+            tile_next(wall.screens, wall.queue, tile_id, false);
         }
         OverlayAction::PlayOnTile { tile_id, index } => {
-            for si in 0..screens.len() {
-                if !screens[si].tiles.iter().any(|t| t.id == tile_id) {
+            for si in 0..wall.screens.len() {
+                if !wall.screens[si].tiles.iter().any(|t| t.id == tile_id) {
                     continue;
                 }
-                let monitor_index = screens[si].monitor_index;
-                let item = screens[si].queue.items().get(index).cloned();
+                let monitor_index = wall.screens[si].monitor_index;
+                let item = wall.queue.items().get(index).cloned();
                 if let Some(item) = item {
-                    screens[si].queue.remove_pending(index);
-                    if let Some(tile) = screens[si].tiles.iter_mut().find(|t| t.id == tile_id) {
+                    wall.queue.remove_pending(index);
+                    if let Some(tile) = wall.screens[si].tiles.iter_mut().find(|t| t.id == tile_id) {
                         tile.item = item.clone();
                         if let Err(e) = tile.load(&item) {
                             eprintln!("screen {monitor_index} tile {tile_id}: load failed: {e}");
@@ -1682,72 +1742,146 @@ fn handle_overlay_action(
             }
         }
         OverlayAction::ToggleHelp => {
-            overlay.help_open = !overlay.help_open;
+            // The panel opens on the screen whose button was clicked; a
+            // click on another screen's button moves it there.
+            let win = wall.screens[screen_idx].window.id();
+            wall.overlay.help_open = if wall.overlay.help_open == Some(win) { None } else { Some(win) };
         }
+        // Intercepted by the event loop before it gets here: opening a
+        // window needs the EventLoopWindowTarget and the shared GL config,
+        // and must happen outside the loop iterating `screens` by index.
+        OverlayAction::NewWindow => {}
         OverlayAction::ToggleSettings => {
-            overlay.settings_open = !overlay.settings_open;
+            let win = wall.screens[screen_idx].window.id();
+            wall.overlay.settings_open = if wall.overlay.settings_open == Some(win) { None } else { Some(win) };
             println!(
-                "settings panel {}",
-                if overlay.settings_open { "open" } else { "closed" }
+                "settings panel {} (screen {})",
+                if wall.overlay.settings_open.is_some() { "open" } else { "closed" },
+                wall.screens[screen_idx].monitor_index
             );
         }
         OverlayAction::ToggleWindowMode => {
-            if toggle_window_mode(screens, screen_idx) {
-                *wm_settle_at = Some((Instant::now() + Duration::from_millis(600), 4));
+            if toggle_window_mode(wall.screens, screen_idx) {
+                *wall.wm_settle_at = Some((Instant::now() + Duration::from_millis(600), 4));
             }
         }
         OverlayAction::AddPanel => {
-            add_tile_action(screens, budget, overlay, mpv_lib, tile_opts, next_tile_id, max_tiles, screen_idx);
+            add_tile_action(wall, screen_idx);
         }
         OverlayAction::RemovePanel { tile_id } => {
-            remove_tile_action(screens, budget, overlay, tile_id);
+            remove_tile_action(wall.screens, wall.budget, wall.overlay, tile_id);
         }
         OverlayAction::FullscreenToggle { tile_id } => {
-            if screens[screen_idx].zoomed.is_some() {
-                toggle_fullscreen(screens, screen_idx, None);
+            if wall.screens[screen_idx].zoomed.is_some() {
+                toggle_fullscreen(wall.screens, screen_idx, None);
             } else {
-                toggle_fullscreen(screens, screen_idx, Some(tile_id));
+                toggle_fullscreen(wall.screens, screen_idx, Some(tile_id));
             }
         }
         OverlayAction::DeleteCurrent { tile_id } => {
-            delete_current(screens, screen_idx, tile_id, overlay);
+            delete_current(wall.screens, wall.queue, screen_idx, tile_id, wall.overlay);
         }
         OverlayAction::QueueRemove { index } => {
-            let monitor_index = screens[screen_idx].monitor_index;
-            let q = &mut screens[screen_idx].queue;
+            let monitor_index = wall.screens[screen_idx].monitor_index;
+            let q = &mut *wall.queue;
             if let Some(m) = q.items().get(index).cloned() {
                 q.remove_pending(index);
                 println!("screen {monitor_index}: queue: removed \"{}\" ({} left)", m.title, q.len());
             }
         }
         OverlayAction::QueueReorder { from, to } => {
-            let monitor_index = screens[screen_idx].monitor_index;
-            screens[screen_idx].queue.move_pending(from, to);
+            let monitor_index = wall.screens[screen_idx].monitor_index;
+            wall.queue.move_pending(from, to);
             println!("screen {monitor_index}: queue: reordered");
         }
         OverlayAction::QueueShuffle => {
-            let monitor_index = screens[screen_idx].monitor_index;
-            screens[screen_idx].queue.set_order(QueueOrder::Shuffle);
+            let monitor_index = wall.screens[screen_idx].monitor_index;
+            wall.queue.set_order(QueueOrder::Shuffle);
             println!("screen {monitor_index}: queue: shuffled");
         }
         OverlayAction::QueueSortName => {
-            let monitor_index = screens[screen_idx].monitor_index;
-            screens[screen_idx].queue.set_order(QueueOrder::Name);
+            let monitor_index = wall.screens[screen_idx].monitor_index;
+            wall.queue.set_order(QueueOrder::Name);
             println!("screen {monitor_index}: queue: sorted by name");
         }
         OverlayAction::PauseAll => {
-            let ids: Vec<usize> = screens[screen_idx].tiles.iter().map(|t| t.id).collect();
+            let ids: Vec<usize> = wall.screens[screen_idx].tiles.iter().map(|t| t.id).collect();
             for id in ids {
-                pause_and_release(screens, budget, id, "user pause");
+                pause_and_release(wall.screens, wall.budget, id, "user pause");
             }
         }
         OverlayAction::ResumeAll => {
-            let ids: Vec<usize> = screens[screen_idx].tiles.iter().map(|t| t.id).collect();
+            let ids: Vec<usize> = wall.screens[screen_idx].tiles.iter().map(|t| t.id).collect();
             for id in ids {
-                resume_tile(screens, budget, id);
+                resume_tile(wall.screens, wall.budget, id);
             }
         }
     }
+}
+
+/// Closes one window: frees its tiles' budget slots and GL resources, drops
+/// the [`Screen`] (and with it the GL context, surface and egui context),
+/// and terminates its mpv instances in parallel — serial teardown is what
+/// made quitting slow. Overlay state pointing at the closed window or its
+/// tiles is cleared, since none of it can be resolved any more.
+fn close_screen(
+    screens: &mut Vec<Screen>,
+    budget: &mut DecodeBudget,
+    overlay: &mut OverlayState,
+    idx: usize,
+) {
+    let mut screen = screens.remove(idx);
+    let window_id = screen.window.id();
+    let monitor_index = screen.monitor_index;
+    let tiles = screen.destroy();
+    for tile in &tiles {
+        budget.release(tile.id);
+    }
+    let gone: Vec<usize> = tiles.iter().map(|t| t.id).collect();
+    if overlay.pending_click.map(|p| p.window_id) == Some(window_id) {
+        overlay.pending_click = None;
+    }
+    if overlay.tile_drag.map(|d| d.window_id) == Some(window_id) {
+        overlay.tile_drag = None;
+    }
+    if overlay.help_open == Some(window_id) {
+        overlay.help_open = None;
+    }
+    if overlay.settings_open == Some(window_id) {
+        overlay.settings_open = None;
+    }
+    if overlay.solo_id.is_some_and(|id| gone.contains(&id)) {
+        overlay.solo_id = None;
+    }
+    if overlay.confirm_delete.is_some_and(|(id, _)| gone.contains(&id)) {
+        overlay.confirm_delete = None;
+    }
+    if overlay.track_panel.is_some_and(|(id, _)| gone.contains(&id)) {
+        overlay.track_panel = None;
+    }
+    println!(
+        "closed window (monitor {monitor_index}, {} tile(s)); {} window(s) left",
+        gone.len(),
+        screens.len()
+    );
+    // Render contexts go first, here, while `screen.destroy()`'s
+    // make_current is still in effect (see Tile::split_for_teardown); only
+    // then may the GL context itself be dropped.
+    let cores: Vec<tessera_mpv::Mpv> =
+        tiles.into_iter().map(|t| t.split_for_teardown()).collect();
+    drop(screen);
+    terminate_parallel(cores);
+}
+
+/// Terminates mpv cores in parallel — serial teardown is what made quitting
+/// slow. Safe on any thread: the GL-bound render contexts are already gone
+/// by this point (see [`Tile::split_for_teardown`]).
+fn terminate_parallel(cores: Vec<tessera_mpv::Mpv>) {
+    std::thread::scope(|scope| {
+        for core in cores {
+            scope.spawn(move || drop(core));
+        }
+    });
 }
 
 /// Tears the wall down: GL resources are freed per-screen on their own GL
@@ -1755,15 +1889,15 @@ fn handle_overlay_action(
 /// parallel — serial teardown was what made quitting slow.
 fn shutdown(screens: &mut [Screen]) {
     let start = Instant::now();
-    let mut tiles = Vec::new();
+    let mut cores = Vec::new();
     for screen in screens.iter_mut() {
-        tiles.extend(screen.destroy());
+        // Per screen, and without interleaving: destroy() makes THIS
+        // screen's GL context current, and the render contexts it just
+        // returned can only be freed while that is true.
+        let tiles = screen.destroy();
+        cores.extend(tiles.into_iter().map(|t| t.split_for_teardown()));
     }
-    std::thread::scope(|scope| {
-        for tile in tiles {
-            scope.spawn(move || drop(tile));
-        }
-    });
+    terminate_parallel(cores);
     println!("shutdown in {:.2}s", start.elapsed().as_secs_f64());
 }
 
@@ -1822,14 +1956,58 @@ fn toggle_window_mode(screens: &mut [Screen], idx: usize) -> bool {
                 screen.windowed_restore = Some((pos, size));
             }
         }
-        let monitor = screen
-            .intended_monitor
-            .clone()
+        // Aim at the monitor the window is on NOW, not the one it was
+        // created on: dragging a window to another screen and hitting W is
+        // the whole point of per-window fullscreen.
+        let here = monitor_under_window(&window);
+        if let Some((i, m)) = &here {
+            screen.monitor_index = *i;
+            screen.intended_monitor = Some(m.clone());
+        }
+        let monitor = here
+            .map(|(_, m)| m)
+            .or_else(|| screen.intended_monitor.clone())
             .or_else(|| window.current_monitor());
         window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(monitor)));
-        println!("screen {monitor_index}: fullscreen wall");
+        println!("screen {}: fullscreen wall", screen.monitor_index);
     }
     schedule_fix
+}
+
+/// The monitor a window is actually on, found by containment of the
+/// window's centre in each monitor's rect, with the index into
+/// `available_monitors()` (the same order `monitors` is built from in
+/// main). winit's `current_monitor()` is unreliable here — see
+/// [`fix_displaced_walls`].
+fn monitor_under_window(
+    window: &winit::window::Window,
+) -> Option<(usize, winit::monitor::MonitorHandle)> {
+    let c = window_centre(window)?;
+    window
+        .available_monitors()
+        .enumerate()
+        .find(|(_, m)| monitor_contains(m, c))
+}
+
+/// Centre of a window in desktop coordinates, or None if the WM won't
+/// report its position yet (freshly mapped windows).
+fn window_centre(window: &winit::window::Window) -> Option<(i32, i32)> {
+    let pos = window.outer_position().ok()?;
+    let size = window.inner_size();
+    Some((pos.x + size.width as i32 / 2, pos.y + size.height as i32 / 2))
+}
+
+/// Whether a point lies in a monitor's rect. Half-open on the far edges so
+/// adjacent monitors can't both claim a point on their shared border.
+fn monitor_contains(monitor: &winit::monitor::MonitorHandle, p: (i32, i32)) -> bool {
+    let (mp, ms) = (monitor.position(), monitor.size());
+    rect_contains((mp.x, mp.y, ms.width, ms.height), p)
+}
+
+/// The containment test itself, free of winit types so it can be tested.
+fn rect_contains(rect: (i32, i32, u32, u32), p: (i32, i32)) -> bool {
+    let (x, y, w, h) = rect;
+    p.0 >= x && p.0 < x + w as i32 && p.1 >= y && p.1 < y + h as i32
 }
 
 /// Snaps the walls back onto their intended monitors. Two displacements
@@ -1851,14 +2029,8 @@ fn fix_displaced_walls(screens: &mut [Screen]) -> bool {
             continue;
         }
         let Some(m) = screen.intended_monitor.clone() else { continue };
-        let (mp, ms) = (m.position(), m.size());
-        let Ok(wp) = screen.window.outer_position() else { continue };
-        let ws = screen.window.inner_size();
-        let center = (wp.x + ws.width as i32 / 2, wp.y + ws.height as i32 / 2);
-        let inside = center.0 >= mp.x
-            && center.0 < mp.x + ms.width as i32
-            && center.1 >= mp.y
-            && center.1 < mp.y + ms.height as i32;
+        let Some(centre) = window_centre(&screen.window) else { continue };
+        let inside = monitor_contains(&m, centre);
         // Non-fullscreen (tiled by the WM) or fullscreen on the wrong
         // monitor: re-assert fullscreen aimed at the intended monitor.
         if screen.window.fullscreen().is_some() && inside {
@@ -1906,7 +2078,7 @@ fn toggle_fullscreen(screens: &mut [Screen], idx: usize, tile_id: Option<usize>)
 /// Deletes the tile's current video at its source (local file, or the
 /// server's delete API), drops it from the queue, and advances the tile to
 /// the next item.
-fn delete_current(screens: &mut [Screen], screen_idx: usize, tile_id: usize, overlay: &mut OverlayState) {
+fn delete_current(screens: &mut [Screen], queue: &mut PlaybackQueue, screen_idx: usize, tile_id: usize, overlay: &mut OverlayState) {
     let Some(tile) = screens[screen_idx].tiles.iter().find(|t| t.id == tile_id) else {
         return;
     };
@@ -1924,19 +2096,19 @@ fn delete_current(screens: &mut [Screen], screen_idx: usize, tile_id: usize, ove
             return;
         }
     }
-    screens[screen_idx].queue.remove_item(&item.id);
-    tile_next(screens, tile_id, true);
+    queue.remove_item(&item.id);
+    tile_next(screens, queue, tile_id, true);
 }
 
 /// Loads the next (or previous) queue item onto the tile, advancing the
 /// screen's shared queue. Returns false if the tile was not found.
-fn tile_next(screens: &mut [Screen], tile_id: usize, forward: bool) -> bool {
+fn tile_next(screens: &mut [Screen], queue: &mut PlaybackQueue, tile_id: usize, forward: bool) -> bool {
     for screen_idx in 0..screens.len() {
         if !screens[screen_idx].tiles.iter().any(|t| t.id == tile_id) {
             continue;
         }
         let item = {
-            let queue = &mut screens[screen_idx].queue;
+            let queue = &mut *queue;
             if forward { queue.advance() } else { queue.go_back() }.cloned()
         };
         if let Some(item) = item {
@@ -1985,6 +2157,41 @@ fn fmt_time(t: f64) -> String {
 mod tests {
     use winit::keyboard::Key;
 
+    /// The user's actual layout: DP-2 5120x2160 at +2160+1027, DP-0
+    /// 3440x1440 at +7280+1435, DP-4 2160x3840 at +0+0.
+    const MONITORS: [(i32, i32, u32, u32); 3] =
+        [(2160, 1027, 5120, 2160), (7280, 1435, 3440, 1440), (0, 0, 2160, 3840)];
+
+    fn monitor_at(p: (i32, i32)) -> Option<usize> {
+        MONITORS.iter().position(|r| super::rect_contains(*r, p))
+    }
+
+    #[test]
+    fn window_centre_picks_the_monitor_it_sits_on() {
+        // A window dragged onto DP-0 must resolve to monitor 1, not the
+        // one it was created on — this is what W-to-fullscreen relies on.
+        assert_eq!(monitor_at((8261, 2369)), Some(1));
+        assert_eq!(monitor_at((4000, 2000)), Some(0));
+        assert_eq!(monitor_at((1000, 1000)), Some(2));
+    }
+
+    #[test]
+    fn monitor_rects_are_half_open_so_borders_are_unambiguous() {
+        // DP-4 spans x 0..2160; DP-2 starts at x 2160. The shared column
+        // belongs to exactly one of them.
+        assert_eq!(monitor_at((2159, 1500)), Some(2));
+        assert_eq!(monitor_at((2160, 1500)), Some(0));
+        // DP-2's right edge is 2160+5120 = 7280, where DP-0 begins.
+        assert_eq!(monitor_at((7279, 2000)), Some(0));
+        assert_eq!(monitor_at((7280, 2000)), Some(1));
+    }
+
+    #[test]
+    fn a_point_off_every_monitor_resolves_to_none() {
+        assert_eq!(monitor_at((20000, 20000)), None);
+        assert_eq!(monitor_at((-5, -5)), None);
+    }
+
     #[test]
     fn character_key_guards_match() {
         type K = winit::keyboard::Key<winit::keyboard::SmolStr>;
@@ -2005,6 +2212,101 @@ mod tests {
             assert_eq!(m == 'p', expect_p, "p-guard for {k:?}");
         }
     }
+}
+
+/// Opens a plain (decorated, non-fullscreen) window at runtime, centred on
+/// `on` when a monitor is given and clamped to it. The GL config is the one
+/// every other window shares, so [`create_screen`] can build on it.
+fn open_window<T>(
+    target: &winit::event_loop::EventLoopWindowTarget<T>,
+    gl_config: &glutin::config::Config,
+    size: (u32, u32),
+    on: Option<&winit::monitor::MonitorHandle>,
+) -> Option<Arc<winit::window::Window>> {
+    let (mut w, mut h) = size;
+    let mut wb = WindowBuilder::new().with_title("openTessera");
+    if let Some(m) = on {
+        let (mp, ms) = (m.position(), m.size());
+        w = w.min(ms.width);
+        h = h.min(ms.height);
+        wb = wb.with_position(winit::dpi::PhysicalPosition::new(
+            mp.x + (ms.width.saturating_sub(w)) as i32 / 2,
+            mp.y + (ms.height.saturating_sub(h)) as i32 / 2,
+        ));
+    }
+    wb = wb.with_inner_size(winit::dpi::PhysicalSize::new(w, h));
+    match glutin_winit::finalize_window(target, wb, gl_config) {
+        Ok(win) => Some(Arc::new(win)),
+        Err(e) => {
+            eprintln!("warning: new window failed: {e}");
+            None
+        }
+    }
+}
+
+/// Builds a [`Screen`] around an existing window: a GL context and surface
+/// on the shared config, an egui context, and the compositor. Startup and
+/// runtime "new window" both come through here so the two can't drift.
+/// Returns None (having explained itself) if any GL step fails.
+fn create_screen<T>(
+    target: &winit::event_loop::EventLoopWindowTarget<T>,
+    display: &glutin::display::Display,
+    gl_config: &glutin::config::Config,
+    window: Arc<winit::window::Window>,
+    monitor_index: usize,
+) -> Option<Screen> {
+    let raw = window.raw_window_handle();
+    let context_attrs = glutin::context::ContextAttributesBuilder::new().build(Some(raw));
+    let context = match unsafe { display.create_context(gl_config, &context_attrs) } {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("warning: GL context for monitor {monitor_index} failed: {e}");
+            return None;
+        }
+    };
+    let size = window.inner_size();
+    let one = std::num::NonZeroU32::new(1).unwrap();
+    let (nw, nh) = (
+        std::num::NonZeroU32::new(size.width).unwrap_or(one),
+        std::num::NonZeroU32::new(size.height).unwrap_or(one),
+    );
+    let surface_attrs =
+        glutin::surface::SurfaceAttributesBuilder::<glutin::surface::WindowSurface>::new()
+            .build(window.raw_window_handle(), nw, nh);
+    let surface = match unsafe { display.create_window_surface(gl_config, &surface_attrs) } {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("warning: GL surface for monitor {monitor_index} failed: {e}");
+            return None;
+        }
+    };
+    let context = match context.make_current(&surface) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("warning: make_current for monitor {monitor_index} failed: {e}");
+            return None;
+        }
+    };
+    let vsync = std::env::var("TESSERA_VSYNC").map(|v| v != "0").unwrap_or(false);
+    surface
+        .set_swap_interval(
+            &context,
+            if vsync {
+                glutin::surface::SwapInterval::Wait(std::num::NonZeroU32::new(1).unwrap())
+            } else {
+                glutin::surface::SwapInterval::DontWait
+            },
+        )
+        .ok();
+    let gl = Arc::new(unsafe {
+        glow::Context::from_loader_function(|s| {
+            let c = std::ffi::CString::new(s).unwrap();
+            display.get_proc_address(&c) as *const std::os::raw::c_void
+        })
+    });
+    // EguiGlow compiles its shaders now, so the GL context must be current.
+    let egui = egui_glow::EguiGlow::new(target, gl.clone(), None, None);
+    Some(Screen::new(window, surface, context, gl, egui, monitor_index))
 }
 
 fn window_builder(args: &Args, monitors: &[winit::monitor::MonitorHandle], index: usize) -> WindowBuilder {

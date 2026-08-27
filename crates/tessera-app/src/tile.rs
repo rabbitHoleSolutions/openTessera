@@ -540,6 +540,22 @@ impl Tile {
         }
     }
 
+    /// Splits the tile for teardown: frees the mpv **render** context on
+    /// the CALLING thread and hands back the bare mpv core.
+    ///
+    /// `mpv_render_context_free` frees GL objects, so it must run with this
+    /// tile's GL context current — which means the main thread, right after
+    /// the owning screen's `make_current`. Doing it on a worker (no context
+    /// current anywhere) segfaults inside mpv. Terminating the core, the
+    /// genuinely slow half, touches no GL and can go on any thread.
+    pub fn split_for_teardown(self) -> tessera_mpv::Mpv {
+        // Tile has no Drop impl, so the fields can be moved out; `render`
+        // is dropped here and now, `mpv` escapes.
+        let Tile { render, mpv, .. } = self;
+        drop(render);
+        mpv
+    }
+
     /// Dumps this tile's current FBO content to a PNG. Diagnostic aid.
     pub fn dump_fbo(&self, gl: &glow::Context, path: &std::path::Path) -> std::io::Result<()> {
         let Some(fbo) = self.fbo else { return Ok(()) };

@@ -19,7 +19,12 @@ pub struct Screen {
     pub compositor: Compositor,
     pub monitor_index: usize,
     pub tiles: Vec<Tile>,
-    pub queue: PlaybackQueue,
+    /// Pointer position in this window (top-left pixel origin) as of the
+    /// last CursorMoved; None until the pointer has been in this window.
+    /// Lives on the Screen rather than in a Vec indexed by screen
+    /// position: windows are created and closed at runtime, and a parallel
+    /// Vec would silently desync.
+    pub cursor: Option<(f32, f32)>,
     layout: Vec<Rect>,
     /// Tile currently zoomed to fill the screen (F / transport icon).
     pub zoomed: Option<usize>,
@@ -56,7 +61,6 @@ impl Screen {
         gl: Arc<glow::Context>,
         egui: egui_glow::EguiGlow,
         monitor_index: usize,
-        queue: PlaybackQueue,
     ) -> Screen {
         let compositor = Compositor::new(&gl);
         let size = window.inner_size();
@@ -69,7 +73,7 @@ impl Screen {
             compositor,
             monitor_index,
             tiles: Vec::new(),
-            queue,
+            cursor: None,
             layout: Vec::new(),
             zoomed: None,
             pinned: None,
@@ -170,9 +174,9 @@ impl Screen {
     pub fn tick(
         &mut self,
         budget: &mut DecodeBudget,
+        queue: &mut PlaybackQueue,
         advance: bool,
         overlay: &mut OverlayState,
-        cursor: Option<(f32, f32)>,
         settings: &mut UiSettings,
     ) {
         self.context.make_current(&self.surface).ok();
@@ -207,7 +211,7 @@ impl Screen {
 
         if advance {
             for id in ended {
-                if let Some(next) = self.queue.advance() {
+                if let Some(next) = queue.advance() {
                     let next = next.clone();
                     if let Some(tile) = self.tiles.iter_mut().find(|t| t.id == id) {
                         tile.item = next.clone();
@@ -266,8 +270,7 @@ impl Screen {
             .collect();
         let cells = self.effective_layout();
         let monitor_index = self.monitor_index;
-        let queue_entries: Vec<overlay::QueueEntry> = self
-            .queue
+        let queue_entries: Vec<overlay::QueueEntry> = queue
             .pending(12)
             .iter()
             .map(|(i, m)| overlay::QueueEntry {
@@ -282,7 +285,7 @@ impl Screen {
             // screen: it would sit right where the user is dropping.
             None
         } else {
-            cursor.and_then(|(x, y)| {
+            self.cursor.and_then(|(x, y)| {
                 self.tiles
                     .iter()
                     .zip(self.effective_layout().iter())
@@ -310,21 +313,24 @@ impl Screen {
             .filter(|pc| pc.window_id == self.window.id());
         let mut click_on_ui = false;
         let window = self.window.clone();
+        let window_id = window.id();
         // Split borrows: the egui pass closure needs the thumbnail cache
         // while the EguiGlow itself is borrowed by run().
         let egui = &mut self.egui;
         let thumbs = &mut self.thumbs;
         let notice = overlay.notice.clone();
-        let mut help_open = overlay.help_open;
-        let mut settings_open = overlay.settings_open;
+        // The help/settings panels live on exactly one screen — the one
+        // that opened them. Every screen used to draw its own copy against
+        // the same shared state, which left several egui contexts fighting
+        // over one set of widgets.
+        let mut help_open = overlay.help_open == Some(window_id);
+        let mut settings_open = overlay.settings_open == Some(window_id);
         let window_fullscreen = self.window.fullscreen().is_some();
         egui.run(&window, |ctx| {
-            // Scale the whole overlay UI (zoom multiplies the native ppp and
-            // persists across frames). Not while the scale slider is being
-            // dragged — re-scaling mid-drag makes the slider run away.
-            if !settings.scale_dragging {
-                ctx.set_pixels_per_point(settings.ui_scale);
-            }
+            // Scale the whole overlay UI (zoom multiplies the native ppp
+            // and persists across frames). `ui_scale` only moves when the
+            // scale slider is released, so this is a no-op mid-drag.
+            ctx.set_pixels_per_point(settings.ui_scale);
             if visible {
                 overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, tile_drag, overlay.track_panel, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete);
             }
@@ -332,7 +338,7 @@ impl Screen {
                 overlay::draw_help(ctx, &mut help_open);
             }
             if settings_open {
-                overlay::draw_settings(ctx, settings, &mut settings_open);
+                overlay::draw_settings(ctx, window_id, settings, &mut settings_open);
             }
             if let Some(n) = &notice {
                 overlay::draw_notice(ctx, n);
@@ -351,8 +357,14 @@ impl Screen {
             }
         });
         overlay.queue_drag = queue_drag;
-        overlay.help_open = help_open;
-        overlay.settings_open = settings_open;
+        // Only the owning screen may close a panel (its ✕ button); the
+        // others never drew it and have nothing to say about it.
+        if !help_open && overlay.help_open == Some(window_id) {
+            overlay.help_open = None;
+        }
+        if !settings_open && overlay.settings_open == Some(window_id) {
+            overlay.settings_open = None;
+        }
         overlay.confirm_delete = confirm_delete;
         if click_on_ui {
             overlay.pending_click = None;

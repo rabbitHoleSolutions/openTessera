@@ -196,6 +196,55 @@ settings/help panels unusable by mouse:
 
 ---
 
+## 7. Per-window fullscreen + windows on demand
+
+Status: **implemented** (2026-08-27)
+
+The wall is no longer "all monitors or nothing". One ordinary window is the
+default; `--max` is the opt-in all-monitors-fullscreen video-wall mode
+(`--screens 0,2` still names specific monitors).
+
+- Status-bar "+" opens another window at runtime — its own GL context,
+  surface, egui context and tiles, built through the same `create_screen`
+  path as startup. It opens with one tile (`NEW_WINDOW_TILES`): at startup
+  nothing is playing so filling is free, but adding to a live wall would
+  evict other windows' streams via OLDEST_STARTED.
+- `W` toggles one window between windowed and fullscreen **on the monitor it
+  is currently on**, derived from the window's centre rather than the
+  monitor it was created on — so drag-to-another-screen-then-W works. (The
+  containment test is unit-tested against the real 3-monitor layout;
+  `current_monitor()` stays unusable under pop-shell.)
+- Closing a window closes just that window; the last one quits.
+- A plain window starts at `DEFAULT_WINDOW_TILES` (4, matching the Quest
+  dock) rather than filling to `--tiles`; `--max` still fills.
+
+### Queue model
+
+One `PlaybackQueue` shared by every window, owned by `main` next to the
+budget — the round-robin per-screen split is gone (it had no answer for a
+window created later). Tiles are slots fed from the one queue, as in the
+Quest app's `DockGridManager`. **Next:** a settings toggle for
+per-window vs global queues, alongside the library browser / queue builder
+ported from the Quest app.
+
+### Bugs found and fixed on the way
+
+- `mpv_render_context_free` frees GL objects, so tearing tiles down on
+  worker threads (no GL context current) segfaults. Teardown is now
+  two-phase: render contexts go on the main thread with the owning screen's
+  context current (`Tile::split_for_teardown`), then the mpv cores are
+  terminated in parallel. `shutdown` had the same latent hazard.
+- The status bar was a `TopBottomPanel`, i.e. egui's Background layer, which
+  the click router treats as "not UI" — so every status-bar click also fell
+  through and paused the tile behind the bar. It is an `Area` at
+  `WALL_ORDER` now.
+- The status bar pushed its buttons off the right edge of a narrow window;
+  controls are laid out first now and the status text clips instead.
+
+**Effort**: M (actual: ~1 session)
+
+---
+
 ## Implemented features (for context)
 
 - Phase 2 budget: eviction (OLDEST_STARTED), adaptive ceiling, single-stream rule

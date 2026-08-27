@@ -9,9 +9,13 @@ built on Pop!_OS/GNOME), macOS next.
 
 Phase 1 skeleton — playback foundation:
 
-- Multi-monitor fullscreen: one borderless fullscreen window per monitor, each
-  with its own GL context and its own playback queue (or a single windowed
-  window)
+- Windows: one ordinary window by default, each with its own GL context and
+  its own tiles. The status bar's "+" opens another at any time; `W` toggles
+  any single window between windowed and borderless-fullscreen **on whichever
+  monitor it is currently on** — drag a window to another screen, hit `W`, and
+  it becomes a wall there while your other windows are untouched. Closing a
+  window closes just that window; the last one quits. `--max` is the
+  all-monitors video-wall mode (every monitor fullscreen, filled to `--tiles`)
 - N tiles per screen via libmpv render API, GPU-direct (frames never touch CPU
   memory), hardware decode (NVDEC/VA-API/VideoToolbox via mpv)
 - Grid layout solver (coverage-scoring rows/cols search, ported from the Quest
@@ -25,8 +29,9 @@ Phase 1 skeleton — playback foundation:
   windows recover it). A single stream is always admissible alone.
   Budget is global across screens; resuming a paused tile re-requests
   admission and may evict.
-- Cursor-based wrapping playback queue per screen (name/date/size/shuffle
-  ordering, pending-tail re-sorting that preserves the current item)
+- One cursor-based wrapping playback queue shared by every window — a tile is
+  a slot fed from it (name/date/size/shuffle ordering, pending-tail re-sorting
+  that preserves the current item). A per-window/global choice is planned
 - Overlay UI (egui, Tab to toggle, `--overlay` to start visible): status bar
   with live budget/stream/eviction counters and a play/pause-all button,
   per-tile info chips (title, play state, position/duration, mute; click the
@@ -36,8 +41,8 @@ Phase 1 skeleton — playback foundation:
 - Transport: per-tile chip transport row (prev / -10s / +10s / next buttons
   plus a scrub bar), keyboard Left/Right seeks ±10s on the focused screen,
   N/P load the next/previous queue item on each tile.
-- Queue management (Quest-immersive style): hovering a tile shows its
-  screen's queue as a thumbnail strip along the bottom of that tile — click
+- Queue management (Quest-immersive style): hovering a tile shows the
+  shared queue as a thumbnail strip along the bottom of that tile — click
   a thumbnail to play it on that tile immediately, right-click to remove it
   from the queue, drag to reorder, shuffle / A–Z buttons re-sort the pending tail. Hovered thumbnails highlight.
   Thumbnails come from the media servers (Jellyfin primary art, Plex
@@ -45,17 +50,16 @@ Phase 1 skeleton — playback foundation:
   placeholder.
 - Panel management: each tile's transport row has "−" (remove that tile —
   its GL resources and stream are freed and the grid re-solves) and "+"
-  (add a tile to this screen, taking the next queue item; honors the
+  (add a tile to this window, taking the next queue item; honors the
   decode budget, `--tiles` cap, default 12, and budget-aware eviction).
-  Other screens are unaffected. Failed actions explain themselves in a
+  Other windows are unaffected. Failed actions explain themselves in a
   transient on-screen toast (budget full, tiles cap, empty queue, ...).
 - Fullscreen: "F" (or the corner-bracket icon on a tile's transport) zooms
   that tile to fill its screen — in windowed mode the window also goes
   borderless-fullscreen on its monitor, so other monitors and windows keep
   working; in multi-screen mode the other screens keep playing untouched.
-  F/Esc toggles back; Esc only quits when nothing is zoomed. `Shift-F`
-  toggles the window itself between windowed and borderless fullscreen
-  (the whole wall layout, no tile zoom) — also per-screen.
+  F/Esc toggles back; Esc only quits when nothing is zoomed. (`W` is the
+  separate whole-window toggle — the wall layout, no tile zoom.)
 - An emptied screen (all tiles removed) shows a large centered "+" to add
   a tile back.
 - Delete from transport: each tile's transport row has a 🗑 button that
@@ -96,13 +100,16 @@ cargo build --release
 ## Run
 
 ```
-# 4 tiles on every monitor, fullscreen
-opentessera --tiles 4 /path/to/videos/
+# one window, 4 tiles (the default shape)
+opentessera /path/to/videos/
 
-# windowed, single screen
+# the video wall: every monitor fullscreen, 4 tiles each
+opentessera --max --tiles 4 /path/to/videos/
+
+# a window of a particular size
 opentessera --windowed 1600x900 /path/to/file.mkv
 
-# only monitor 2, advance through a directory instead of looping
+# only monitor 2, fullscreen, advance through a directory instead of looping
 opentessera --screens 2 --advance /path/to/videos/
 
 # a dozen streams of the same source
@@ -125,7 +132,9 @@ opentessera --jellyfin --jellyfin-library Movies --plex /path/to/local/
   `TESSERA_*` env-var overrides. Local paths and remote sources can be
   freely mixed in one launch.
 
-Controls: `Esc` exit fullscreen if zoomed, otherwise quit · `Tab`
+Controls: `W` toggle this window between windowed and fullscreen (on its
+current monitor) · the status bar's `+` opens another window · `Esc` exit
+fullscreen if zoomed, otherwise quit · `Tab`
 pin/unpin the overlay UI (auto-hides after 5s idle) · `Space` pause/resume
 all tiles on the focused screen · `F` fullscreen the tile under the cursor ·
 click a tile to pause/resume it · hover a tile to show its queue strip

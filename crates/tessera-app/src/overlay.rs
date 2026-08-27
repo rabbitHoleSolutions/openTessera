@@ -16,6 +16,18 @@ use tessera_core::Rect;
 use crate::thumbs::ThumbCache;
 use crate::tile::TrackInfo;
 
+/// Layer order for the wall's own UI: status bar, tile chips + transport,
+/// hover queue strips. Deliberately *below* [`PANEL_ORDER`] — egui lifts
+/// the most recently interacted area to the top within a single order, so
+/// a transport row and a dialog sharing one order swap places the moment
+/// you click the row, and the transport ends up painted over the dialog.
+const WALL_ORDER: egui::Order = egui::Order::Middle;
+/// Layer order for the modal-ish panels (help, settings): above the wall UI
+/// so they can't be buried by it. NOT `Order::Tooltip` — egui never
+/// hit-tests tooltip-order layers, which silently makes every control in
+/// them inert.
+const PANEL_ORDER: egui::Order = egui::Order::Foreground;
+
 /// Which track row is expanded below a tile's transport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrackKind {
@@ -54,10 +66,14 @@ pub struct OverlayState {
     /// action). Cosmetic state for the button highlight; cleared by any
     /// manual mute change.
     pub solo_id: Option<usize>,
-    /// Help panel open (? or / toggles).
-    pub help_open: bool,
-    /// Settings panel open (gear button).
-    pub settings_open: bool,
+    /// Help panel open, on this window (? or / toggles it on the focused
+    /// screen). Window-scoped, not a plain bool: the panels are modal-ish
+    /// singletons, and drawing a copy on every screen means several egui
+    /// contexts fighting over one shared state.
+    pub help_open: Option<winit::window::WindowId>,
+    /// Settings panel open, on the window whose gear was clicked. See
+    /// [`OverlayState::help_open`] for why this is window-scoped.
+    pub settings_open: Option<winit::window::WindowId>,
 }
 
 /// Which kind of source the settings panel's add-form is editing.
@@ -94,10 +110,14 @@ pub struct UiSettings {
     /// Media sources (folders / Plex / Jellyfin), applied at startup.
     /// Persisted as one JSON line in settings.conf.
     pub sources: Vec<tessera_core::sources::Source>,
-    /// Transient: the scale slider is being dragged — the UI must NOT
-    /// re-scale mid-drag (the slider would run away from the pointer).
+    /// Transient: the UI-scale slider is held on this window, carrying its
+    /// live (uncommitted) value. `ui_scale` — what the overlay actually
+    /// renders at — only takes the value on release, so the UI can't
+    /// re-scale under the pointer mid-drag. The window tag pins the draft
+    /// to the egui context that owns it, so a panel drawn on any other
+    /// screen can neither inherit the draft nor cancel the drag.
     /// Excluded from equality/persistence.
-    pub scale_dragging: bool,
+    pub scale_drag: Option<(winit::window::WindowId, f32)>,
     /// Transient add-source form state in the settings panel. Excluded
     /// from equality/persistence.
     pub src_kind: SourceKind,
@@ -124,7 +144,7 @@ impl Default for UiSettings {
             max_streams: tessera_core::budget::DEFAULT_MAX_STREAMS as u32,
             audio: false,
             sources: Vec::new(),
-            scale_dragging: false,
+            scale_drag: None,
             src_kind: SourceKind::default(),
             src_path: String::new(),
             src_token: String::new(),
@@ -160,6 +180,10 @@ pub enum OverlayAction {
     ToggleWindowMode,
     /// Gear button: show/hide the settings panel.
     ToggleSettings,
+    /// Status-bar "+" button: open another window, on the monitor the
+    /// cursor is on, with its own GL context and its own tiles. It draws
+    /// from the same shared queue as every other window.
+    NewWindow,
     /// Transport fullscreen icon / F key: zoom this tile to fill its screen
     /// (toggles back).
     FullscreenToggle { tile_id: usize },
@@ -279,109 +303,156 @@ pub fn draw(
     let ppp = ctx.pixels_per_point();
 
     // Top status bar: budget, streams, evictions, play/pause-all.
-    let status_bar = egui::TopBottomPanel::top("tessera_status").show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            ui.strong(format!("openTessera — screen {monitor_index}"));
-            if pinned {
-                ui.weak("· pinned");
-            }
-            ui.separator();
-            let color = if budget.utilization > 0.9 {
-                egui::Color32::from_rgb(240, 100, 100)
-            } else if budget.utilization > 0.7 {
-                egui::Color32::from_rgb(240, 200, 100)
-            } else {
-                egui::Color32::from_rgb(140, 220, 140)
-            };
-            ui.colored_label(
-                color,
-                format!(
-                    "budget {:.0}% ({:.0}/{:.0} mbps)",
-                    budget.utilization * 100.0,
-                    budget.used_mbps,
-                    budget.ceiling_mbps
-                ),
-            );
-            if budget.adaptive < 1.0 {
-                ui.colored_label(
-                    egui::Color32::from_rgb(240, 160, 100),
-                    format!("adaptive ceiling {:.0}%", budget.adaptive * 100.0),
-                );
-            }
-            ui.label(format!("streams {}/{}", budget.active, budget.max_streams));
-            ui.label(format!("evictions {}", budget.evictions));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                // Settings toggle: painter-drawn gear — no font dependency.
-                {
-                    let (rect, resp) = ui.allocate_exact_size(
-                        egui::vec2(18.0, 16.0),
-                        egui::Sense::click(),
-                    );
-                    let p = ui.painter_at(rect);
-                    let col = if resp.hovered() {
-                        egui::Color32::WHITE
-                    } else {
-                        egui::Color32::from_gray(180)
-                    };
-                    let c = rect.center();
-                    let r = 5.0;
-                    let st = egui::Stroke::new(1.4, col);
-                    p.circle_stroke(c, r, st);
-                    for i in 0..8 {
-                        let a = i as f32 * std::f32::consts::FRAC_PI_4;
-                        let dir = egui::vec2(a.cos(), a.sin());
-                        p.line_segment([c + dir * (r + 1.0), c + dir * (r + 3.5)], st);
-                    }
-                    if resp.clicked() {
-                        actions.push(OverlayAction::ToggleSettings);
-                    }
-                    resp.on_hover_text("settings");
-                }
-                // Windowed-mode toggle: painter-drawn "window" icon (frame
-                // with a title bar) — no font dependency.
-                {
-                    let fullhint = window_fullscreen;
-                    let (rect, resp) = ui.allocate_exact_size(
-                        egui::vec2(18.0, 16.0),
-                        egui::Sense::click(),
-                    );
-                    let p = ui.painter_at(rect);
-                    let col = if resp.hovered() {
-                        egui::Color32::WHITE
-                    } else {
-                        egui::Color32::from_gray(180)
-                    };
-                    let r = rect.shrink(2.0);
-                    let bar = egui::Rect::from_min_max(r.left_top(), egui::pos2(r.right(), r.top() + 5.0));
-                    p.rect_filled(bar, egui::Rounding::same(1.5), col);
-                    p.rect_stroke(r, egui::Rounding::same(1.5), egui::Stroke::new(1.4, col));
-                    if resp.clicked() {
-                        actions.push(OverlayAction::ToggleWindowMode);
-                    }
-                    let full = fullhint;
-                    resp.on_hover_text(if full {
-                        "window mode (W): this screen becomes a normal window"
-                    } else {
-                        "fullscreen wall (W): this window fills its screen"
+    //
+    // An Area at WALL_ORDER, deliberately NOT a TopBottomPanel: panels are
+    // painted into egui's Background layer, and the click router treats
+    // Background as "not UI" (egui inserts a full-screen background layer
+    // every pass whether we paint one or not). As a panel, every click on a
+    // status-bar button ALSO fell through to the video wall and
+    // paused/resumed the tile behind the bar.
+    let status_bar = egui::Area::new(egui::Id::new("tessera_status"))
+        .order(WALL_ORDER)
+        .anchor(egui::Align2::LEFT_TOP, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            egui::Frame::none()
+                .fill(ui.style().visuals.panel_fill)
+                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                .show(ui, |ui| {
+                    ui.set_width((ctx.screen_rect().width() - 16.0).max(0.0));
+                    // Controls are laid out FIRST (right-aligned), so they
+                    // always get their space; the status text takes what is
+                    // left and clips. The other order pushed the buttons off
+                    // the right edge of a narrow window — the common case now
+                    // that one (often tiled) window is the default.
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Settings toggle: painter-drawn gear — no font dependency.
+                            {
+                                let (rect, resp) = ui.allocate_exact_size(
+                                    egui::vec2(18.0, 16.0),
+                                    egui::Sense::click(),
+                                );
+                                let p = ui.painter_at(rect);
+                                let col = if resp.hovered() {
+                                    egui::Color32::WHITE
+                                } else {
+                                    egui::Color32::from_gray(180)
+                                };
+                                let c = rect.center();
+                                let r = 5.0;
+                                let st = egui::Stroke::new(1.4, col);
+                                p.circle_stroke(c, r, st);
+                                for i in 0..8 {
+                                    let a = i as f32 * std::f32::consts::FRAC_PI_4;
+                                    let dir = egui::vec2(a.cos(), a.sin());
+                                    p.line_segment([c + dir * (r + 1.0), c + dir * (r + 3.5)], st);
+                                }
+                                if resp.clicked() {
+                                    actions.push(OverlayAction::ToggleSettings);
+                                }
+                                resp.on_hover_text("settings");
+                            }
+                            // Windowed-mode toggle: painter-drawn "window" icon (frame
+                            // with a title bar) — no font dependency.
+                            {
+                                let fullhint = window_fullscreen;
+                                let (rect, resp) = ui.allocate_exact_size(
+                                    egui::vec2(18.0, 16.0),
+                                    egui::Sense::click(),
+                                );
+                                let p = ui.painter_at(rect);
+                                let col = if resp.hovered() {
+                                    egui::Color32::WHITE
+                                } else {
+                                    egui::Color32::from_gray(180)
+                                };
+                                let r = rect.shrink(2.0);
+                                let bar = egui::Rect::from_min_max(r.left_top(), egui::pos2(r.right(), r.top() + 5.0));
+                                p.rect_filled(bar, egui::Rounding::same(1.5), col);
+                                p.rect_stroke(r, egui::Rounding::same(1.5), egui::Stroke::new(1.4, col));
+                                if resp.clicked() {
+                                    actions.push(OverlayAction::ToggleWindowMode);
+                                }
+                                let full = fullhint;
+                                resp.on_hover_text(if full {
+                                    "window mode (W): this screen becomes a normal window"
+                                } else {
+                                    "fullscreen wall (W): this window fills its screen"
+                                });
+                            }
+                            // New window: painter-drawn window frame with a "+" in it
+                            // (same no-font-dependency rule as the gear).
+                            {
+                                let (rect, resp) =
+                                    ui.allocate_exact_size(egui::vec2(18.0, 16.0), egui::Sense::click());
+                                let p = ui.painter_at(rect);
+                                let col = if resp.hovered() {
+                                    egui::Color32::WHITE
+                                } else {
+                                    egui::Color32::from_gray(180)
+                                };
+                                let r = rect.shrink(2.0);
+                                let st = egui::Stroke::new(1.4, col);
+                                p.rect_stroke(r, egui::Rounding::same(1.5), st);
+                                let c = r.center();
+                                p.line_segment([egui::pos2(c.x - 3.5, c.y), egui::pos2(c.x + 3.5, c.y)], st);
+                                p.line_segment([egui::pos2(c.x, c.y - 3.5), egui::pos2(c.x, c.y + 3.5)], st);
+                                if resp.clicked() {
+                                    actions.push(OverlayAction::NewWindow);
+                                }
+                                resp.on_hover_text("new window (its own tiles, same queue)");
+                            }
+                            if ui.small_button("?").on_hover_text("keyboard & mouse help").clicked() {
+                                actions.push(OverlayAction::ToggleHelp);
+                            }
+                            let any_playing = tiles.iter().any(|t| !t.paused);
+                            let label = if any_playing { "⏸ pause all" } else { "▶ play all" };
+                            if ui.small_button(label).clicked() {
+                                actions.push(if any_playing { OverlayAction::PauseAll } else { OverlayAction::ResumeAll });
+                            }
+                            // Status text, in the space the controls left.
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.set_clip_rect(ui.available_rect_before_wrap());
+                                ui.strong(format!("openTessera — screen {monitor_index}"));
+                                if pinned {
+                                    ui.weak("· pinned");
+                                }
+                                ui.separator();
+                                let color = if budget.utilization > 0.9 {
+                                    egui::Color32::from_rgb(240, 100, 100)
+                                } else if budget.utilization > 0.7 {
+                                    egui::Color32::from_rgb(240, 200, 100)
+                                } else {
+                                    egui::Color32::from_rgb(140, 220, 140)
+                                };
+                                ui.colored_label(
+                                    color,
+                                    format!(
+                                        "budget {:.0}% ({:.0}/{:.0} mbps)",
+                                        budget.utilization * 100.0,
+                                        budget.used_mbps,
+                                        budget.ceiling_mbps
+                                    ),
+                                );
+                                if budget.adaptive < 1.0 {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(240, 160, 100),
+                                        format!("adaptive ceiling {:.0}%", budget.adaptive * 100.0),
+                                    );
+                                }
+                                ui.label(format!("streams {}/{}", budget.active, budget.max_streams));
+                                ui.label(format!("evictions {}", budget.evictions));
+                            });
+                        });
                     });
-                }
-                if ui.small_button("?").on_hover_text("keyboard & mouse help").clicked() {
-                    actions.push(OverlayAction::ToggleHelp);
-                }
-                let any_playing = tiles.iter().any(|t| !t.paused);
-                let label = if any_playing { "⏸ pause all" } else { "▶ play all" };
-                if ui.small_button(label).clicked() {
-                    actions.push(if any_playing { OverlayAction::PauseAll } else { OverlayAction::ResumeAll });
-                }
-            });
+                });
         });
-    });
     let bar_bottom = status_bar.response.rect.bottom();
 
     // Empty screen: one big "+" so the wall can be repopulated.
     if tiles.is_empty() {
         egui::Area::new(egui::Id::new("tessera-empty-add"))
-            .order(egui::Order::Foreground)
+            .order(WALL_ORDER)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 let btn = egui::Button::new(egui::RichText::new("+").size(64.0))
@@ -398,7 +469,7 @@ pub fn draw(
             continue; // hidden while another tile is zoomed
         }
         egui::Area::new(egui::Id::new(format!("tile-chip-{}", tile.id)))
-            .order(egui::Order::Foreground)
+            .order(WALL_ORDER)
             .fixed_pos(egui::pos2(
                 cell.x / ppp + 8.0,
                 // Stay clear of the status bar when the tile is in the top row.
@@ -758,7 +829,7 @@ pub fn draw(
                 (cell.y + cell.h) / ppp - strip_h - 6.0,
             );
             egui::Area::new(egui::Id::new(format!("tile-queue-{tile_id}")))
-                .order(egui::Order::Foreground)
+                .order(WALL_ORDER)
                 .fixed_pos(pos)
                 .show(ctx, |ui| {
                     egui::Frame::none()
@@ -885,11 +956,14 @@ pub fn draw(
 /// Settings panel (gear): UI scale, cache size, audio. Edits apply
 /// immediately — the caller diffs the settings after the frame and applies
 /// them to tiles/saves them.
-pub fn draw_settings(ctx: &egui::Context, settings: &mut UiSettings, open: &mut bool) {
-    // NB: NOT Order::Tooltip — tooltip-order layers don't allow interaction
-    // in egui, which would make every control in this panel inert.
+pub fn draw_settings(
+    ctx: &egui::Context,
+    window_id: winit::window::WindowId,
+    settings: &mut UiSettings,
+    open: &mut bool,
+) {
     egui::Area::new(egui::Id::new("tessera-settings"))
-        .order(egui::Order::Foreground)
+        .order(PANEL_ORDER)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             egui::Frame::window(ui.style())
@@ -900,14 +974,32 @@ pub fn draw_settings(ctx: &egui::Context, settings: &mut UiSettings, open: &mut 
                     ui.heading("settings");
                     ui.add_space(8.0);
                     ui.label("UI scale");
+                    // The slider edits a draft while the control is held;
+                    // the overlay keeps rendering at the committed
+                    // `ui_scale` until release. Re-scaling mid-drag moves
+                    // the slider out from under the pointer, which makes
+                    // the whole UI flail while you try to aim.
+                    let held_here = matches!(settings.scale_drag, Some((w, _)) if w == window_id);
+                    let mut draft = match settings.scale_drag {
+                        Some((w, v)) if w == window_id => v,
+                        _ => settings.ui_scale,
+                    };
                     let slider = ui.add(
-                        egui::Slider::new(&mut settings.ui_scale, 0.75..=3.0)
+                        egui::Slider::new(&mut draft, 0.75..=3.0)
                             .step_by(0.25)
                             .text("x"),
                     );
-                    // Freeze the scale while dragging so the slider doesn't
-                    // move under the pointer; applied on release.
-                    settings.scale_dragging = slider.dragged();
+                    if slider.dragged() || slider.is_pointer_button_down_on() {
+                        settings.scale_drag = Some((window_id, draft));
+                    } else if held_here {
+                        // Released: commit, and the caller's diff applies it.
+                        settings.scale_drag = None;
+                        settings.ui_scale = draft;
+                    } else if slider.changed() {
+                        // Keyboard adjustment (arrows on a focused slider):
+                        // no drag to wait out, commit immediately.
+                        settings.ui_scale = draft;
+                    }
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.label("cache per stream");
@@ -937,7 +1029,7 @@ pub fn draw_settings(ctx: &egui::Context, settings: &mut UiSettings, open: &mut 
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new(src.label()).small());
                             if ui
-                                .button(egui::RichText::new("✕").small())
+                                .button(egui::RichText::new("✖").small())
                                 .on_hover_text("remove this source")
                                 .clicked()
                             {
@@ -1044,9 +1136,8 @@ pub fn draw_settings(ctx: &egui::Context, settings: &mut UiSettings, open: &mut 
 /// Keyboard/mouse help panel, centered. Drawn regardless of the overlay's
 /// auto-hide state (it stays until dismissed).
 pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
-    // Foreground, not Tooltip: tooltip-order layers don't allow interaction.
     egui::Area::new(egui::Id::new("tessera-help"))
-        .order(egui::Order::Foreground)
+        .order(PANEL_ORDER)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             egui::Frame::window(ui.style())
@@ -1065,7 +1156,7 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                                 ("Tab", "pin/unpin the overlay (auto-hides after 5s idle)"),
                                 ("Space", "pause/resume all tiles on this screen"),
                                 ("F", "fullscreen the tile under the cursor"),
-                                ("W", "toggle this screen: fullscreen wall <-> window"),
+                                ("W", "toggle THIS window: fullscreen wall <-> window (on whichever monitor it is currently on — drag it, then W)"),
                                 ("Left / Right", "seek -/+10s on all tiles of this screen"),
                                 ("Up / Down", "volume -/+5 on unmuted tiles of this screen"),
                                 ("N / Shift+P", "next / previous queue item on each tile"),
@@ -1073,6 +1164,7 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                                 ("- / +", "remove tile under cursor / add a tile"),
                                 ("?", "toggle this help"),
                                 ("gear / top bar", "settings: UI scale, cache, audio"),
+                                ("+ / top bar", "new window: its own tiles, drawn from the same shared queue"),
                             ];
                             for (k, d) in keys {
                                 ui.strong(*k);
