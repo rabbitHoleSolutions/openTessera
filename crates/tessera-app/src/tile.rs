@@ -240,6 +240,13 @@ impl Tile {
     /// Toggles this tile's audio. Returns the new muted state.
     /// Only meaningful when the app was started with --audio; otherwise the
     /// whole audio pipeline is disabled per-tile.
+    /// Sets mute directly (solo applies this to every tile at once).
+    pub fn set_muted(&self, muted: bool) {
+        if let Err(e) = self.mpv.command(&["set", "mute", if muted { "yes" } else { "no" }]) {
+            eprintln!("tile {}: set mute failed: {e}", self.id);
+        }
+    }
+
     pub fn toggle_mute(&self) -> bool {
         let muted = self.is_muted();
         if let Err(e) = self.mpv.command(&["set", "mute", if muted { "no" } else { "yes" }]) {

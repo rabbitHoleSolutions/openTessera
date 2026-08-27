@@ -50,6 +50,10 @@ pub struct OverlayState {
     pub notice: Option<(String, std::time::Instant)>,
     /// Tile track-picker row expanded below the transport (one at a time).
     pub track_panel: Option<(usize, TrackKind)>,
+    /// Tile whose audio is soloed (all other streams muted by the solo
+    /// action). Cosmetic state for the button highlight; cleared by any
+    /// manual mute change.
+    pub solo_id: Option<usize>,
     /// Help panel open (? or / toggles).
     pub help_open: bool,
     /// Settings panel open (gear button).
@@ -131,6 +135,12 @@ pub enum OverlayAction {
     /// Mute button on a tile chip: toggles mute, or explains why audio is
     /// unavailable (started without --audio).
     MuteButton { tile_id: usize },
+    /// Solo button on a tile chip: unmute this tile, mute every other
+    /// stream.
+    Solo { tile_id: usize },
+    /// Transport pin button / P key: this tile takes most of the screen,
+    /// the others share a bottom strip (toggles back).
+    TogglePin { tile_id: usize },
     /// Volume slider dragged on a tile chip (or wheel): set absolute volume.
     SetVolume { tile_id: usize, volume: i64 },
     /// A/S button: expand (or collapse) this tile's audio/subtitle track row.
@@ -183,6 +193,10 @@ pub struct TileUiInfo {
     pub duration: f64,
     pub audio_tracks: Vec<TrackInfo>,
     pub subtitle_tracks: Vec<TrackInfo>,
+    /// This tile is pinned (takes most of the screen).
+    pub pinned: bool,
+    /// This tile's audio is soloed (all other streams muted).
+    pub solo: bool,
 }
 
 /// One pending queue entry as shown in the hover queue.
@@ -484,6 +498,20 @@ pub fn draw(
                                 };
                                 resp.on_hover_text(tip);
                             }
+                            // Solo: unmute this tile, mute every other stream
+                            // (audio focus).
+                            {
+                                let mut btn = egui::Button::new(egui::RichText::new("🎤").small())
+                                    .min_size(egui::vec2(24.0, 16.0));
+                                if tile.solo {
+                                    btn = btn.fill(egui::Color32::from_rgb(70, 110, 150));
+                                }
+                                let resp = ui.add(btn);
+                                if resp.clicked() {
+                                    actions.push(OverlayAction::Solo { tile_id: tile.id });
+                                }
+                                resp.on_hover_text("solo audio: mute every other stream");
+                            }
                         });
                         // Transport row: prev, -10s, +10s, next, scrub, time.
                         ui.horizontal(|ui| {
@@ -529,6 +557,20 @@ pub fn draw(
                                 .small()
                                 .weak(),
                             );
+                            // Pin this tile: it takes most of the screen, the
+                            // rest share a bottom strip (P also toggles).
+                            {
+                                let mut btn =
+                                    egui::Button::new(egui::RichText::new("📌").small());
+                                if tile.pinned {
+                                    btn = btn.fill(egui::Color32::from_rgb(70, 110, 150));
+                                }
+                                let resp = ui.add(btn);
+                                if resp.clicked() {
+                                    actions.push(OverlayAction::TogglePin { tile_id: tile.id });
+                                }
+                                resp.on_hover_text("pin this tile: it takes most of the screen (P)");
+                            }
                             // Fullscreen this tile (painter-drawn corner-bracket
                             // icon: no font dependency).
                             let (zrect, zresp) = ui.allocate_exact_size(
@@ -885,7 +927,8 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                                 ("W", "toggle this screen: fullscreen wall <-> window"),
                                 ("Left / Right", "seek -/+10s on all tiles of this screen"),
                                 ("Up / Down", "volume -/+5 on unmuted tiles of this screen"),
-                                ("N / P", "next / previous queue item on each tile"),
+                                ("N / Shift+P", "next / previous queue item on each tile"),
+                                ("P", "pin the tile under the cursor: it takes most of the screen, the rest share a bottom strip"),
                                 ("- / +", "remove tile under cursor / add a tile"),
                                 ("?", "toggle this help"),
                                 ("gear / top bar", "settings: UI scale, cache, audio"),
@@ -909,6 +952,7 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                                 ("drag tile", "drop on another tile to swap; drop on another screen to move it (Esc cancels)"),
                                 ("wheel on tile", "that tile's volume +/-5 (Up/Down = all unmuted tiles)"),
                                 ("A / S buttons", "audio / subtitle track row (expands below the transport)"),
+                                ("🎤 / 📌 buttons", "solo audio (mute all others) / pin this tile big"),
                                 ("right-click tile", "mute/unmute audio (needs --audio)"),
                                 ("hover tile", "show the queue strip at its bottom"),
                                 ("click thumb", "play that item on the hovered tile"),

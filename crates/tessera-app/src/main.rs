@@ -182,7 +182,9 @@ CONTROLS:
   Up/Down arrows     Volume +/-5 on unmuted tiles of the focused screen
   Wheel              Volume +/-5 on the tile under the cursor
   Left/Right arrows  Seek -/+10s on all tiles of the focused screen
-  N / P              Next / previous queue item on each tile of the focused screen
+  N / Shift+P        Next / previous queue item on each tile of the focused screen
+  P                  Pin the tile under the cursor: it takes most of the screen,
+                     the others share a bottom strip (P again unpins)
   - / +              Remove the tile under the cursor / add a tile (focused screen)
   F                  Fullscreen the tile under the cursor on its screen (F/Esc exits)
   W                  Toggle THIS screen (cursor's window): fullscreen wall <-> window
@@ -651,6 +653,7 @@ fn main() {
                     if let Some(pc) = overlay.pending_click {
                         if pc.right {
                             overlay.pending_click = None;
+                            overlay.solo_id = None;
                             if let Some(idx) = screens.iter().position(|s| s.window.id() == pc.window_id) {
                                 screens[idx].click_mute(pc.x, pc.y);
                             }
@@ -993,7 +996,18 @@ fn main() {
                                             tile_next(&mut screens, id, true);
                                         }
                                     }
-                                    Key::Character(ref c) if c.eq_ignore_ascii_case("p") => {
+                                    Key::Character(ref c) if c == "p" => {
+                                        // Pin/unpin the tile under the cursor
+                                        // on the focused screen: it takes most
+                                        // of the screen, the rest share a
+                                        // bottom strip.
+                                        if let Some((x, y)) = cursor_pos[idx] {
+                                            if let Some(tile_id) = screens[idx].tile_at(x, y) {
+                                                toggle_pin(&mut screens, idx, tile_id);
+                                            }
+                                        }
+                                    }
+                                    Key::Character(ref c) if c == "P" => {
                                         let ids: Vec<usize> = screens[idx].tiles.iter().map(|t| t.id).collect();
                                         for id in ids {
                                             tile_next(&mut screens, id, false);
@@ -1103,6 +1117,19 @@ fn raw_tile_click(screens: &mut [Screen], budget: &mut DecodeBudget, pc: overlay
     }
 }
 
+/// Pins/unpins a tile: the pinned tile takes most of the screen while the
+/// others share a bottom strip (the P key and the transport pin button).
+fn toggle_pin(screens: &mut [Screen], screen_idx: usize, tile_id: usize) {
+    let monitor_index = screens[screen_idx].monitor_index;
+    if screens[screen_idx].pinned == Some(tile_id) {
+        screens[screen_idx].pinned = None;
+        println!("screen {monitor_index}: unpinned tile {tile_id}");
+    } else {
+        screens[screen_idx].pinned = Some(tile_id);
+        println!("screen {monitor_index}: pinned tile {tile_id}");
+    }
+}
+
 /// Shows a transient toast (and logs) the given message.
 fn notify(overlay: &mut overlay::OverlayState, msg: String) {
     println!("{msg}");
@@ -1162,6 +1189,12 @@ fn finish_tile_drag(
         return;
     }
     let monitor_index = screens[src].monitor_index;
+    // Dropping a strip tile onto the pinned cell features the dragged tile
+    // instead of swapping Vec positions (the big cell follows the pin id).
+    if screens[src].pinned == Some(to) {
+        toggle_pin(screens, src, drag.from_tile);
+        return;
+    }
     if screens[src].swap_tiles(drag.from_tile, to) {
         println!("screen {monitor_index}: swapped tiles {} and {}", drag.from_tile, to);
     }
@@ -1201,6 +1234,12 @@ fn move_tile_cross_screen(
         };
         (tile.item.clone(), tile.snapshot_resume())
     };
+    // The pin doesn't travel with a cross-screen move (the target screen
+    // didn't ask for it); clear it so the layout doesn't reference a
+    // missing tile.
+    if screens[src].pinned == Some(tile_id) {
+        screens[src].pinned = None;
+    }
     if !resume.paused {
         // The rebuilt instance needs the slot the old one holds.
         budget.release(tile_id);
@@ -1382,10 +1421,16 @@ fn remove_tile_action(
     if overlay.track_panel.map(|(id, _)| id) == Some(tile_id) {
         overlay.track_panel = None;
     }
+    if overlay.solo_id == Some(tile_id) {
+        overlay.solo_id = None;
+    }
     for si in 0..screens.len() {
         if screens[si].tiles.iter().any(|t| t.id == tile_id) {
             let monitor_index = screens[si].monitor_index;
             let was_zoomed = screens[si].zoomed == Some(tile_id);
+            if screens[si].pinned == Some(tile_id) {
+                screens[si].pinned = None;
+            }
             budget.release(tile_id);
             if screens[si].remove_tile(tile_id) {
                 println!(
@@ -1425,6 +1470,7 @@ fn handle_overlay_action(
             }
         }
         OverlayAction::MuteButton { tile_id } => {
+            overlay.solo_id = None;
             for screen in screens.iter_mut() {
                 if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
                     if tile.audio_enabled() {
@@ -1439,6 +1485,44 @@ fn handle_overlay_action(
                     }
                     return;
                 }
+            }
+        }
+        OverlayAction::Solo { tile_id } => {
+            // Audio focus: unmute this tile, mute every other stream on
+            // every screen.
+            let mut target_ok = false;
+            let mut muted_others = 0usize;
+            for screen in screens.iter_mut() {
+                for tile in screen.tiles.iter_mut() {
+                    if !tile.audio_enabled() {
+                        continue;
+                    }
+                    if tile.id == tile_id {
+                        target_ok = true;
+                        tile.set_muted(false);
+                        println!(
+                            "screen {} tile {tile_id}: solo — audio on (vol {}%)",
+                            screen.monitor_index,
+                            tile.volume()
+                        );
+                    } else if !tile.is_muted() {
+                        tile.set_muted(true);
+                        muted_others += 1;
+                    }
+                }
+            }
+            if !target_ok {
+                notify(overlay, "audio is off — restart with --audio to enable sound".into());
+            } else {
+                if muted_others > 0 {
+                    println!("solo: muted {muted_others} other stream(s)");
+                }
+                overlay.solo_id = Some(tile_id);
+            }
+        }
+        OverlayAction::TogglePin { tile_id } => {
+            if let Some(si) = screens.iter().position(|s| s.tiles.iter().any(|t| t.id == tile_id)) {
+                toggle_pin(screens, si, tile_id);
             }
         }
         OverlayAction::SetVolume { tile_id, volume } => {

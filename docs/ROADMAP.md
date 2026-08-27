@@ -145,6 +145,30 @@ existing render-API path (baked into the video frame).
 
 ---
 
+## 5. Pin + solo
+
+Status: **implemented** (2026-08-26)
+
+Pin (P key or 📌 transport button): the pinned tile takes most of the
+screen; the others share a bottom strip (20% of height, 96–384px, 8px
+gaps). Computed live in `Screen::effective_layout` (like zoom), so resizes
+just work; zoom (F) takes precedence while active.
+
+- Dragging a strip tile onto the pinned cell re-pins the dragged tile
+  (drop-on-pin = feature it) instead of swapping.
+- Pin clears when the tile is removed or moved cross-screen (target
+  screen didn't ask for the pin); stale ids fall back to the grid.
+- Plain `p` = pin toggle on the tile under the cursor; **Shift+P** is
+  previous now (was plain P).
+
+Solo (🎤 chip button): unmute that tile, mute every other stream on every
+screen (audio focus). Solo highlight clears on any manual mute change.
+Needs --audio; toast explains otherwise.
+
+**Effort**: S–M
+
+---
+
 ## Implemented features (for context)
 
 - Phase 2 budget: eviction (OLDEST_STARTED), adaptive ceiling, single-stream rule
@@ -156,6 +180,8 @@ existing render-API path (baked into the video frame).
   all of #1
 - Visual volume: per-tile chip slider + scroll wheel (#2)
 - Track selectors: inline A/S rows for audio + subtitles, off included (#3, #4)
+- Pin + solo: P/📌 pins a tile big with a bottom strip of the others; 🎤
+  solos audio (mutes all other streams) (#5)
 - Sources: local, Plex, Jellyfin (direct-play URIs), library filters,
   delete-at-source
 - Panel management: +/- tiles (transport buttons and -/+ hotkeys), per-window

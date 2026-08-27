@@ -23,6 +23,10 @@ pub struct Screen {
     layout: Vec<Rect>,
     /// Tile currently zoomed to fill the screen (F / transport icon).
     pub zoomed: Option<usize>,
+    /// Tile currently pinned (P / transport pin button): it takes most of
+    /// the screen while the other tiles share a bottom strip. Zoom (F)
+    /// takes precedence over the pin while active.
+    pub pinned: Option<usize>,
     /// The monitor this screen was created on; used to re-assert fullscreen
     /// when the WM displaces fullscreen windows (observed with pop-shell
     /// when another window leaves fullscreen).
@@ -64,6 +68,7 @@ impl Screen {
             queue,
             layout: Vec::new(),
             zoomed: None,
+            pinned: None,
             intended_monitor: None,
             windowed_restore: None,
             zoom_restore: None,
@@ -77,7 +82,8 @@ impl Screen {
 
     /// The layout actually used for compositing and hit-testing: the grid,
     /// or — while a tile is zoomed — one full-screen cell for that tile and
-    /// zero-size cells for the others.
+    /// zero-size cells for the others, or — while a tile is pinned — one
+    /// tall cell for it with the rest sharing a bottom strip.
     pub fn effective_layout(&self) -> Vec<Rect> {
         match self.zoomed {
             Some(zid) => {
@@ -94,7 +100,38 @@ impl Screen {
                     })
                     .collect()
             }
-            None => self.layout.clone(),
+            None => match self.pinned {
+                // A stale pin id (removed/moved tile) falls back to the grid.
+                Some(pid) if self.tiles.iter().any(|t| t.id == pid) => {
+                    let size = self.window.inner_size();
+                    let (w, h) = (size.width as f32, size.height as f32);
+                    let others = self.tiles.len() - 1;
+                    let gap = 8.0;
+                    if others == 0 {
+                        return vec![Rect { x: 0.0, y: 0.0, w, h }];
+                    }
+                    let strip_h = (h * 0.2).clamp(96.0, 384.0);
+                    let main_h = h - strip_h - gap;
+                    let strip_each = (w - gap * (others - 1) as f32) / others as f32;
+                    let mut cells = Vec::with_capacity(self.tiles.len());
+                    let mut strip_i = 0usize;
+                    for t in &self.tiles {
+                        if t.id == pid {
+                            cells.push(Rect { x: 0.0, y: 0.0, w, h: main_h });
+                        } else {
+                            cells.push(Rect {
+                                x: strip_i as f32 * (strip_each + gap),
+                                y: main_h + gap,
+                                w: strip_each,
+                                h: strip_h,
+                            });
+                            strip_i += 1;
+                        }
+                    }
+                    cells
+                }
+                _ => self.layout.clone(),
+            },
         }
     }
 
@@ -218,6 +255,8 @@ impl Screen {
                 duration: t.duration,
                 audio_tracks: t.audio_tracks.clone(),
                 subtitle_tracks: t.subtitle_tracks.clone(),
+                pinned: self.pinned == Some(t.id),
+                solo: overlay.solo_id == Some(t.id),
             })
             .collect();
         let cells = self.effective_layout();
