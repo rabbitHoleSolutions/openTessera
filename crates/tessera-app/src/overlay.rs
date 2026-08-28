@@ -76,29 +76,19 @@ pub struct OverlayState {
     pub settings_open: Option<winit::window::WindowId>,
 }
 
-/// Which kind of source the settings panel's add-form is editing.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SourceKind {
-    #[default]
-    Folder,
-    Plex,
-    Jellyfin,
-}
-
-impl SourceKind {
-    pub fn label(&self) -> &'static str {
-        match self {
-            SourceKind::Folder => "folder",
-            SourceKind::Plex => "plex",
-            SourceKind::Jellyfin => "jellyfin",
-        }
-    }
-}
-
-/// User-adjustable runtime settings (gear panel / settings.conf).
-#[derive(Clone, Debug)]
+/// App-wide runtime settings (config + sources tabs of the browser window,
+/// persisted to settings.conf).
+///
+/// Every field here is global and persisted — there is no transient widget
+/// state left to hand-exclude, so `PartialEq` is derived and the event
+/// loop's `settings != settings_before` diff cannot silently miss a new
+/// field. Per-window state (the UI scale and its drag draft) lives on
+/// `Screen`; add-form state lives on `BrowserState`.
+#[derive(Clone, Debug, PartialEq)]
 pub struct UiSettings {
-    /// egui pixels-per-point multiplier for the whole overlay UI.
+    /// Starting egui pixels-per-point for new windows. Each window then
+    /// carries its own `Screen::ui_scale`; committing a window's scale
+    /// slider updates this default too, so the next launch starts there.
     pub ui_scale: f32,
     /// Demuxer cache size in MiB per stream.
     pub cache_mb: u32,
@@ -111,42 +101,9 @@ pub struct UiSettings {
     /// an empty queue — or just the file you opened — and you fill it from
     /// the library browser.
     pub retain_queue: bool,
-    /// Media sources (folders / Plex / Jellyfin), applied at startup.
-    /// Persisted as one JSON line in settings.conf.
+    /// Media sources (folders / Plex / Jellyfin). Persisted as one JSON
+    /// line in settings.conf.
     pub sources: Vec<tessera_core::sources::Source>,
-    /// Transient: the UI-scale slider is held on this window, carrying its
-    /// live (uncommitted) value. `ui_scale` — what the overlay actually
-    /// renders at — only takes the value on release, so the UI can't
-    /// re-scale under the pointer mid-drag. The window tag pins the draft
-    /// to the egui context that owns it, so a panel drawn on any other
-    /// screen can neither inherit the draft nor cancel the drag.
-    /// Excluded from equality/persistence.
-    pub scale_drag: Option<(winit::window::WindowId, f32)>,
-    /// Transient add-source form state in the settings panel. Excluded
-    /// from equality/persistence.
-    pub src_kind: SourceKind,
-    pub src_path: String,
-    pub src_token: String,
-    pub src_library: String,
-    /// Jellyfin sign-in form. The password is used once to mint a token and
-    /// is never persisted (UiSettings' PartialEq excludes it, and only the
-    /// resulting token reaches settings.conf).
-    pub src_user: String,
-    pub src_pass: String,
-    /// Why the last "add source" click didn't take. Shown under the form;
-    /// cleared as soon as the user edits the form again.
-    pub src_error: String,
-}
-
-impl PartialEq for UiSettings {
-    fn eq(&self, other: &Self) -> bool {
-        self.ui_scale == other.ui_scale
-            && self.cache_mb == other.cache_mb
-            && self.max_streams == other.max_streams
-            && self.audio == other.audio
-            && self.retain_queue == other.retain_queue
-            && self.sources == other.sources
-    }
 }
 
 impl Default for UiSettings {
@@ -158,14 +115,6 @@ impl Default for UiSettings {
             audio: false,
             retain_queue: true,
             sources: Vec::new(),
-            scale_drag: None,
-            src_kind: SourceKind::default(),
-            src_path: String::new(),
-            src_token: String::new(),
-            src_library: String::new(),
-            src_user: String::new(),
-            src_pass: String::new(),
-            src_error: String::new(),
         }
     }
 }
@@ -209,7 +158,7 @@ pub enum OverlayAction {
     PlayNow { item: tessera_core::MediaItem },
     /// Status-bar library button (or L / Q): open a browser window on this
     /// tab.
-    NewLibraryWindow { tab: crate::library::Tab },
+    NewLibraryWindow { tab: crate::browser::Tab },
     /// Status-bar "+" button: open another window, on the monitor the
     /// cursor is on, with its own GL context and its own tiles. It draws
     /// from the same shared queue as every other window.
@@ -328,9 +277,11 @@ pub fn draw(
     actions: &mut Vec<OverlayAction>,
     queue_drag: &mut Option<usize>,
     confirm_delete: &mut Option<(usize, std::time::Instant)>,
+    empty_hint: Option<EmptyWall>,
 ) {
     const CONFIRM_SECS: f64 = 4.0;
     let ppp = ctx.pixels_per_point();
+
 
     // Top status bar: budget, streams, evictions, play/pause-all.
     //
@@ -357,30 +308,8 @@ pub fn draw(
                     ui.horizontal(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // Settings toggle: painter-drawn gear — no font dependency.
-                            {
-                                let (rect, resp) = ui.allocate_exact_size(
-                                    egui::vec2(18.0, 16.0),
-                                    egui::Sense::click(),
-                                );
-                                let p = ui.painter_at(rect);
-                                let col = if resp.hovered() {
-                                    egui::Color32::WHITE
-                                } else {
-                                    egui::Color32::from_gray(180)
-                                };
-                                let c = rect.center();
-                                let r = 5.0;
-                                let st = egui::Stroke::new(1.4, col);
-                                p.circle_stroke(c, r, st);
-                                for i in 0..8 {
-                                    let a = i as f32 * std::f32::consts::FRAC_PI_4;
-                                    let dir = egui::vec2(a.cos(), a.sin());
-                                    p.line_segment([c + dir * (r + 1.0), c + dir * (r + 3.5)], st);
-                                }
-                                if resp.clicked() {
-                                    actions.push(OverlayAction::ToggleSettings);
-                                }
-                                resp.on_hover_text("settings");
+                            if gear_button(ui).clicked() {
+                                actions.push(OverlayAction::ToggleSettings);
                             }
                             // Windowed-mode toggle: painter-drawn "window" icon (frame
                             // with a title bar) — no font dependency.
@@ -432,7 +361,7 @@ pub fn draw(
                                     );
                                 }
                                 if resp.clicked() {
-                                    actions.push(OverlayAction::NewLibraryWindow { tab: crate::library::Tab::Library });
+                                    actions.push(OverlayAction::NewLibraryWindow { tab: crate::browser::Tab::Library });
                                 }
                                 resp.on_hover_text("browser window: library (L) and queue (Q) tabs");
                             }
@@ -505,18 +434,24 @@ pub fn draw(
         });
     let bar_bottom = status_bar.response.rect.bottom();
 
-    // Empty screen: one big "+" so the wall can be repopulated.
-    if tiles.is_empty() {
-        egui::Area::new(egui::Id::new("tessera-empty-add"))
-            .order(WALL_ORDER)
-            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-            .show(ctx, |ui| {
-                let btn = egui::Button::new(egui::RichText::new("+").size(64.0))
-                    .min_size(egui::vec2(140.0, 140.0));
-                if ui.add(btn).on_hover_text("add a tile (next from queue)").clicked() {
-                    actions.push(OverlayAction::AddPanel);
-                }
-            });
+    // Empty screen: exactly one thing to do, depending on why it is empty.
+    // The big "+" and an explanatory panel used to be separate centred
+    // Areas, so on a first run they were painted on top of each other.
+    match empty_hint {
+        Some(EmptyWall::AddTile) => {
+            egui::Area::new(egui::Id::new("tessera-empty-add"))
+                .order(WALL_ORDER)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    let btn = egui::Button::new(egui::RichText::new("+").size(64.0))
+                        .min_size(egui::vec2(140.0, 140.0));
+                    if ui.add(btn).on_hover_text("add a tile (next from queue)").clicked() {
+                        actions.push(OverlayAction::AddPanel);
+                    }
+                });
+        }
+        Some(why) => draw_empty_wall(ctx, why, actions),
+        None => {}
     }
 
     // Chips are drawn for the tile under the cursor ONLY. Drawing one per
@@ -1039,18 +974,50 @@ pub fn draw(
     }
 }
 
-/// Settings panel (gear): UI scale, cache size, audio. Edits apply
-/// immediately — the caller diffs the settings after the frame and applies
-/// them to tiles/saves them.
+/// The gear icon, painter-drawn rather than a glyph: egui's bundled fonts
+/// have no gear, and a missing glyph renders as a silent empty box. Shared
+/// by the wall's status bar and the browser's tab bar so "gear = this
+/// window's own settings" means the same thing in both.
+pub fn gear_button(ui: &mut egui::Ui) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 16.0), egui::Sense::click());
+    let p = ui.painter_at(rect);
+    let col = if resp.hovered() {
+        egui::Color32::WHITE
+    } else {
+        egui::Color32::from_gray(180)
+    };
+    let c = rect.center();
+    let r = 5.0;
+    let st = egui::Stroke::new(1.4, col);
+    p.circle_stroke(c, r, st);
+    for i in 0..8 {
+        let a = i as f32 * std::f32::consts::FRAC_PI_4;
+        let dir = egui::vec2(a.cos(), a.sin());
+        p.line_segment([c + dir * (r + 1.0), c + dir * (r + 3.5)], st);
+    }
+    resp.on_hover_text("this window's settings")
+}
+
+/// The gear panel: settings that belong to THIS window and nothing else.
+///
+/// Everything global — sources, the decode budget, cache, audio, queue
+/// retention — lives in the browser window's tabs instead (S and C). The
+/// split is not cosmetic: each `Screen` runs its own egui context over one
+/// shared `UiSettings`, so a global control drawn here is drawn once per
+/// window, and the last window in the loop wins. Window-scoped controls
+/// have no such problem, which is why this panel exists at all.
+///
+/// `scale` is the caller's live value for this window and `drag` its
+/// uncommitted draft — both owned by the `Screen`, so no window tagging is
+/// needed to keep two monitors' panels apart.
 pub fn draw_settings(
     ctx: &egui::Context,
-    window_id: winit::window::WindowId,
-    settings: &mut UiSettings,
-    auth: &mut crate::auth::Auth,
-    plex_client_id: &str,
+    scale: &mut f32,
+    drag: &mut Option<f32>,
+    default_scale: &mut f32,
     open: &mut bool,
+    actions: &mut Vec<OverlayAction>,
 ) {
-    auth.poll();
     egui::Area::new(egui::Id::new("tessera-settings"))
         .order(PANEL_ORDER)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -1059,350 +1026,133 @@ pub fn draw_settings(
                 .fill(egui::Color32::from_black_alpha(235))
                 .inner_margin(egui::Margin::symmetric(20.0, 14.0))
                 .show(ui, |ui| {
-                    ui.set_width(420.0);
-                    ui.heading("settings");
+                    ui.set_width(360.0);
+                    ui.heading("this window");
                     ui.add_space(8.0);
                     ui.label("UI scale");
                     // The slider edits a draft while the control is held;
-                    // the overlay keeps rendering at the committed
-                    // `ui_scale` until release. Re-scaling mid-drag moves
-                    // the slider out from under the pointer, which makes
-                    // the whole UI flail while you try to aim.
-                    let held_here = matches!(settings.scale_drag, Some((w, _)) if w == window_id);
-                    let mut draft = match settings.scale_drag {
-                        Some((w, v)) if w == window_id => v,
-                        _ => settings.ui_scale,
-                    };
+                    // the overlay keeps rendering at the committed `scale`
+                    // until release. Re-scaling mid-drag moves the slider
+                    // out from under the pointer, which makes the whole UI
+                    // flail while you try to aim.
+                    let held = drag.is_some();
+                    let mut draft = drag.unwrap_or(*scale);
                     let slider = ui.add(
                         egui::Slider::new(&mut draft, 0.75..=3.0)
                             .step_by(0.25)
                             .text("x"),
                     );
                     if slider.dragged() || slider.is_pointer_button_down_on() {
-                        settings.scale_drag = Some((window_id, draft));
-                    } else if held_here {
-                        // Released: commit, and the caller's diff applies it.
-                        settings.scale_drag = None;
-                        settings.ui_scale = draft;
+                        *drag = Some(draft);
+                    } else if held {
+                        // Released: commit for this window, and make it the
+                        // starting point for windows opened later (and for
+                        // the next launch — this is the persisted value).
+                        *drag = None;
+                        *scale = draft;
+                        *default_scale = draft;
                     } else if slider.changed() {
                         // Keyboard adjustment (arrows on a focused slider):
                         // no drag to wait out, commit immediately.
-                        settings.ui_scale = draft;
+                        *scale = draft;
+                        *default_scale = draft;
                     }
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label("cache per stream");
-                        ui.add(
-                            egui::DragValue::new(&mut settings.cache_mb)
-                                .clamp_range(64..=8192)
-                                .suffix(" MiB"),
-                        );
-                    });
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label("max concurrent streams");
-                        ui.add(egui::DragValue::new(&mut settings.max_streams).clamp_range(1..=128));
-                    });
-                    ui.add_space(4.0);
-                    ui.checkbox(&mut settings.audio, "audio enabled (tiles still start muted)");
-                    ui.checkbox(&mut settings.retain_queue, "remember the queue between runs")
-                        .on_hover_text(
-                            "off: every launch starts with an empty queue (or just the file you opened)",
-                        );
-                    ui.add_space(10.0);
+                    ui.weak("applies to this window; also becomes the default for new ones");
+
+                    ui.add_space(12.0);
                     ui.separator();
                     ui.add_space(6.0);
-                    ui.label("sources");
-                    ui.weak("where the wall gets its media (applied on restart)");
-                    if settings.sources.is_empty() {
-                        ui.weak("none configured — add one below or pass paths on the command line");
-                    }
-                    let mut remove = None;
-                    for (i, src) in settings.sources.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(src.label()).small());
-                            if ui
-                                .button(egui::RichText::new("✖").small())
-                                .on_hover_text("remove this source")
-                                .clicked()
-                            {
-                                remove = Some(i);
-                            }
-                        });
-                    }
-                    if let Some(i) = remove {
-                        let src = settings.sources.remove(i);
-                        println!("settings: removed source \"{}\"", src.label());
-                    }
+                    ui.weak("sources, streams, cache, audio and queue retention are");
+                    ui.weak("app-wide — they live in the browser window:");
                     ui.add_space(6.0);
-                    // Add form. Folders take a path; servers get a sign-in
-                    // flow (discovery / login / plex.tv link) with the raw
-                    // token as the fallback, since that is the only path that
-                    // works with no internet or a locked-down server.
                     ui.horizontal(|ui| {
-                        egui::ComboBox::from_id_source("src-kind")
-                            .selected_text(settings.src_kind.label())
-                            .show_ui(ui, |ui| {
-                                for kind in [SourceKind::Folder, SourceKind::Plex, SourceKind::Jellyfin] {
-                                    if ui
-                                        .selectable_value(&mut settings.src_kind, kind, kind.label())
-                                        .clicked()
-                                    {
-                                        // Flows don't carry across kinds.
-                                        auth.reset();
-                                        settings.src_error.clear();
-                                    }
-                                }
+                        if ui.button("sources (S)").clicked() {
+                            actions.push(OverlayAction::NewLibraryWindow {
+                                tab: crate::browser::Tab::Sources,
                             });
-                        let path_hint = match settings.src_kind {
-                            SourceKind::Folder => "folder path",
-                            _ => "server url",
-                        };
-                        let path_resp = ui.add_sized(
-                            [230.0, 16.0],
-                            egui::TextEdit::singleline(&mut settings.src_path).hint_text(path_hint),
-                        );
-                        if path_resp.changed() {
-                            settings.src_error.clear();
+                            *open = false;
                         }
-                        path_resp.on_hover_text(match settings.src_kind {
-                            SourceKind::Folder => "folder (or file) path on disk",
-                            _ => "server url, e.g. http://nas:8096",
-                        });
+                        if ui.button("config (C)").clicked() {
+                            actions.push(OverlayAction::NewLibraryWindow {
+                                tab: crate::browser::Tab::Config,
+                            });
+                            *open = false;
+                        }
                     });
 
-                    if settings.src_kind != SourceKind::Folder {
-                        ui.horizontal(|ui| {
-                            ui.label("library");
-                            let lib = ui.add_sized(
-                                [140.0, 16.0],
-                                egui::TextEdit::singleline(&mut settings.src_library)
-                                    .hint_text("optional — all if blank"),
-                            );
-                            if lib.changed() {
-                                settings.src_error.clear();
+                    ui.add_space(10.0);
+                    // allocate_ui_with_layout, not with_layout: the latter
+                    // takes all the space left in the Area, which for a
+                    // short panel means a window-tall frame with the close
+                    // button stranded at the bottom.
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), 22.0),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            if ui.button("close").clicked() {
+                                *open = false;
                             }
-                        });
-                    }
+                        },
+                    );
+                });
+        });
+}
 
-                    let mut added: Option<tessera_core::sources::Source> = None;
-                    let lib_filter = || {
-                        let l = settings.src_library.trim();
-                        (!l.is_empty()).then(|| l.to_owned())
-                    };
+/// Why a wall window has nothing on it. A first run shows an empty grid
+/// and a gear that no longer contains sources, so the wall has to say
+/// where to go — otherwise the only path to adding a source is a hotkey
+/// nobody has been told about yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Named for the one action each state offers, since that is what the
+/// panel renders.
+pub enum EmptyWall {
+    /// Nothing configured at all: the first thing to do is add a source.
+    AddSource,
+    /// Sources exist but the queue is empty — pick something to play.
+    FillQueue,
+    /// There is a queue; the user just removed every tile. A plain "+" is
+    /// the whole story here, so no explanation is drawn.
+    AddTile,
+}
 
-                    match settings.src_kind {
-                        SourceKind::Jellyfin => {
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .add_enabled(!auth.state.busy, egui::Button::new("scan network"))
-                                    .on_hover_text("ask Jellyfin servers on this LAN to identify themselves")
-                                    .clicked()
-                                {
-                                    auth.discover();
-                                }
-                                if auth.state.busy && auth.state.plex_code.is_none() {
-                                    ui.weak("working…");
-                                }
-                            });
-                            if auth.state.scanned && auth.state.discovered.is_empty() {
-                                ui.weak("no servers answered on this network");
-                            }
-                            for srv in &auth.state.discovered {
-                                if ui
-                                    .selectable_label(settings.src_path == srv.address, &srv.name)
-                                    .on_hover_text(&srv.address)
-                                    .clicked()
-                                {
-                                    settings.src_path = srv.address.clone();
-                                }
-                            }
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                ui.label("user");
-                                ui.add_sized(
-                                    [90.0, 16.0],
-                                    egui::TextEdit::singleline(&mut settings.src_user),
-                                );
-                                ui.label("password");
-                                ui.add_sized(
-                                    [90.0, 16.0],
-                                    egui::TextEdit::singleline(&mut settings.src_pass).password(true),
-                                );
-                            });
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .add_enabled(!auth.state.busy, egui::Button::new("sign in & add"))
-                                    .on_hover_text("exchanges your password for an access token — the password is not stored")
-                                    .clicked()
-                                {
-                                    if settings.src_path.trim().is_empty() {
-                                        settings.src_error = "pick or type a server url first".into();
-                                    } else if settings.src_user.trim().is_empty() {
-                                        settings.src_error = "enter your Jellyfin username".into();
-                                    } else {
-                                        settings.src_error.clear();
-                                        let (u, p) = (settings.src_user.clone(), settings.src_pass.clone());
-                                        auth.jellyfin_login(&settings.src_path, &u, &p);
-                                    }
-                                }
-                                ui.weak("or paste an API key:");
-                                ui.add_sized(
-                                    [110.0, 16.0],
-                                    egui::TextEdit::singleline(&mut settings.src_token)
-                                        .hint_text("API key")
-                                        .password(true),
-                                );
-                                if ui.button("add").clicked() {
-                                    let (url, key) =
-                                        (settings.src_path.trim(), settings.src_token.trim());
-                                    if url.is_empty() || key.is_empty() {
-                                        settings.src_error =
-                                            "a server url and an API key are both needed".into();
-                                    } else {
-                                        added = Some(tessera_core::sources::Source::Jellyfin {
-                                            url: url.trim_end_matches('/').to_owned(),
-                                            api_key: key.to_owned(),
-                                            library: lib_filter(),
-                                        });
-                                    }
-                                }
-                            });
-                            // A completed sign-in becomes a source here, where
-                            // the library filter from the form is in scope.
-                            if let Some((url, token)) = auth.take_jellyfin_token() {
-                                added = Some(tessera_core::sources::Source::Jellyfin {
-                                    url: url.trim_end_matches('/').to_owned(),
-                                    api_key: token,
-                                    library: lib_filter(),
-                                });
-                            }
-                        }
-                        SourceKind::Plex => {
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                if ui
-                                    .add_enabled(!auth.state.busy, egui::Button::new("link with plex.tv"))
-                                    .on_hover_text("no token typing: enter a short code at plex.tv/link")
-                                    .clicked()
-                                {
-                                    auth.plex_link(plex_client_id);
-                                }
-                                if let Some(code) = &auth.state.plex_code {
-                                    ui.label(
-                                        egui::RichText::new(code)
-                                            .strong()
-                                            .size(20.0)
-                                            .color(egui::Color32::from_rgb(230, 180, 80)),
-                                    );
-                                    ui.weak("enter this at plex.tv/link, then wait here");
-                                } else if auth.state.busy {
-                                    ui.weak("working…");
-                                }
-                            });
-                            for choice in &auth.state.plex_servers {
-                                ui.horizontal(|ui| {
-                                    let base = choice.reachable.clone().unwrap_or_else(|| choice.fallback.clone());
-                                    let label = format!(
-                                        "{}{}",
-                                        choice.name,
-                                        if choice.owned { "" } else { " (shared)" }
-                                    );
-                                    if ui.button(label).on_hover_text(&base).clicked() {
-                                        added = Some(tessera_core::sources::Source::Plex {
-                                            url: base.trim_end_matches('/').to_owned(),
-                                            token: choice.token.clone(),
-                                            library: lib_filter(),
-                                        });
-                                    }
-                                    match &choice.reachable {
-                                        Some(u) => ui.weak(u.clone()),
-                                        None => ui.colored_label(
-                                            egui::Color32::from_rgb(230, 180, 80),
-                                            "didn't answer — try anyway",
-                                        ),
-                                    };
-                                });
-                            }
-                            ui.horizontal(|ui| {
-                                ui.weak("or paste a token:");
-                                ui.add_sized(
-                                    [110.0, 16.0],
-                                    egui::TextEdit::singleline(&mut settings.src_token)
-                                        .hint_text("X-Plex-Token")
-                                        .password(true),
-                                );
-                                if ui.button("add").clicked() {
-                                    let (url, tok) =
-                                        (settings.src_path.trim(), settings.src_token.trim());
-                                    if url.is_empty() || tok.is_empty() {
-                                        settings.src_error =
-                                            "a server url and a token are both needed".into();
-                                    } else {
-                                        added = Some(tessera_core::sources::Source::Plex {
-                                            url: url.trim_end_matches('/').to_owned(),
-                                            token: tok.to_owned(),
-                                            library: lib_filter(),
-                                        });
-                                    }
-                                }
-                            });
-                        }
-                        SourceKind::Folder => {
-                            let path = settings.src_path.trim();
-                            // Deliberately always clickable: a permanently grey
-                            // button reads as "this feature doesn't work". Say
-                            // what is missing instead.
-                            if ui.button("add source").clicked() {
-                                if path.is_empty() {
-                                    settings.src_error = "enter a folder path first".into();
-                                } else {
-                                    added = Some(tessera_core::sources::Source::Folder {
-                                        path: path.to_owned(),
+fn draw_empty_wall(ctx: &egui::Context, why: EmptyWall, actions: &mut Vec<OverlayAction>) {
+    egui::Area::new(egui::Id::new("tessera-empty-wall"))
+        .order(WALL_ORDER)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            egui::Frame::window(ui.style())
+                .fill(egui::Color32::from_black_alpha(200))
+                .inner_margin(egui::Margin::symmetric(28.0, 20.0))
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        match why {
+                            EmptyWall::AddSource => {
+                                ui.heading("nothing to play yet");
+                                ui.add_space(4.0);
+                                ui.weak("add a folder, a Plex server or a Jellyfin server");
+                                ui.add_space(10.0);
+                                if ui.button("add a source  (S)").clicked() {
+                                    actions.push(OverlayAction::NewLibraryWindow {
+                                        tab: crate::browser::Tab::Sources,
                                     });
                                 }
                             }
+                            EmptyWall::FillQueue => {
+                                ui.heading("the queue is empty");
+                                ui.add_space(4.0);
+                                ui.weak("pick something from the library to fill the wall");
+                                ui.add_space(10.0);
+                                if ui.button("open the library  (L)").clicked() {
+                                    actions.push(OverlayAction::NewLibraryWindow {
+                                        tab: crate::browser::Tab::Library,
+                                    });
+                                }
+                            }
+                            // Handled by the plain "+" in draw(); never reaches here.
+                            EmptyWall::AddTile => {}
                         }
-                    }
-
-                    if !auth.state.error.is_empty() {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(240, 140, 140),
-                            &auth.state.error,
-                        );
-                    }
-                    if !settings.src_error.is_empty() {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(240, 140, 140),
-                            &settings.src_error,
-                        );
-                    }
-
-                    if let Some(src) = added {
-                        if settings.sources.contains(&src) {
-                            println!("settings: source \"{}\" already configured", src.label());
-                            settings.src_error = format!("already configured: {}", src.label());
-                        } else {
-                            println!("settings: added source \"{}\"", src.label());
-                            settings.sources.push(src);
-                            settings.src_error.clear();
-                            settings.src_path.clear();
-                            settings.src_token.clear();
-                            settings.src_library.clear();
-                            settings.src_user.clear();
-                            settings.src_pass.clear();
-                            auth.reset();
-                        }
-                    }
-                    ui.add_space(8.0);
-                    ui.weak("changes apply immediately (sources on restart) and are saved to");
-                    ui.weak("~/.config/opentessera/settings.conf");
-                    ui.add_space(8.0);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("close").clicked() {
-                            *open = false;
-                        }
+                        ui.add_space(6.0);
+                        ui.weak("? for help");
                     });
                 });
         });
@@ -1420,7 +1170,7 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                 .inner_margin(egui::Margin::symmetric(20.0, 14.0))
                 .show(ui, |ui| {
                     ui.set_width(520.0);
-                    ui.heading("openTessera — keyboard & mouse");
+                    ui.heading("Tessera — keyboard & mouse");
                     ui.add_space(6.0);
                     egui::Grid::new("help-keys")
                         .num_columns(2)
@@ -1437,10 +1187,10 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                                 ("N / Shift+P", "next / previous queue item on each tile"),
                                 ("P", "pin the tile under the cursor: it takes most of the screen, the rest share a bottom strip"),
                                 ("- / +", "remove tile under cursor / add a tile"),
-                                ("S", "toggle the settings panel"),
                                 ("L / Q", "browser window, library / queue tab (opens it if there isn't one)"),
+                                ("S / C", "browser window, sources / config tab — everything app-wide"),
                                 ("?", "toggle this help"),
-                                ("gear / top bar", "settings: UI scale, cache, audio"),
+                                ("gear / top bar", "this window's own settings (UI scale)"),
                                 ("+ / top bar", "new window: its own tiles, drawn from the same shared queue"),
                             ];
                             for (k, d) in keys {

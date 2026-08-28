@@ -171,9 +171,9 @@ Needs --audio; toast explains otherwise.
 
 ## 6. Sources in settings
 
-Status: **implemented** (2026-08-26)
+Status: **implemented** (2026-08-26), **moved to the browser window** in §12.
 
-The gear panel has a sources section: list with remove buttons, plus an
+The gear panel had a sources section: list with remove buttons, plus an
 add form (kind selector: folder / plex / jellyfin; path-or-url field,
 token/key + optional library filter for servers). Sources persist as one
 JSON line (`sources = [...]`) in settings.conf — saved on every settings
@@ -300,8 +300,9 @@ X repeats indefinitely.
   libraries/collections for Plex and Jellyfin), with the Quest app's
   recursive per-folder search and Subfolders toggle.
 - Search history with a settle window (Quest: `SearchHistory`).
-- Per-window vs global queue toggle in settings — the north star noted when
-  the shared queue landed.
+- Per-window vs global queue toggle — the north star noted when the shared
+  queue landed. It is inherently per-window, so it belongs in the gear panel
+  next to UI scale (see §12), not in the config tab.
 - Row virtualisation: the list is capped at 300 rows and tells you when it
   truncates; egui has no virtualisation here.
 
@@ -344,6 +345,73 @@ coincidence — one Jellyfin entry in `sources.conf` that happened to match —
 and a second server would have sent the delete to the wrong place. Local
 `sources.conf` stays as the fallback for items listed via `--plex` /
 `--jellyfin`, which never had a configured `Source`.
+
+---
+
+## 12. Settings split by scope: global in the browser, per-window in the gear
+
+Status: **implemented** (2026-08-27)
+
+Everything app-wide moved out of the wall's gear panel and into the browser
+window as tabs; the gear now holds only what belongs to the window you
+clicked it in.
+
+**Why, beyond tidiness.** Each `Screen` runs its own egui context over one
+shared `UiSettings`, so a global control drawn in the gear was drawn once per
+window and the last screen in the loop won. That is the hazard behind
+`help_open` / `settings_open` being `Option<WindowId>` and the old
+window-tagged `scale_drag`. A control drawn in the one window that exists
+once needs none of that scaffolding. `UiSettings` is now purely persisted
+global state, so its hand-written `PartialEq` — which had to remember to
+exclude every transient field or a half-typed password would trigger a save —
+is simply derived.
+
+**The window**
+
+| Tab | Holds | Key |
+|---|---|---|
+| library | (unchanged) | `L` |
+| queue | now-playing, the queue, and "remember the queue between runs" next to the thing it remembers | `Q` |
+| sources | the list and the add form, with the LAN-discovery / password / plex.tv-link flows given a window instead of a 420px column over video | `S` |
+| config | max concurrent streams, cache per stream, audio | `C` |
+
+`library.rs` became `browser/`: `mod.rs` (tab bar, shared state, helpers)
+plus one file per tab. `overlay.rs` lost ~330 lines.
+
+**Per-window UI scale.** The premise that there were no per-window settings
+was wrong by one, and it was the one that mattered: a single `ui_scale`
+across a 5120x2160, a 3440x1440 and a 2160x3840 portrait monitor cannot be
+right for all three. `Screen` now owns `ui_scale` and its drag draft;
+committing a window's slider also updates the persisted value, which is the
+starting scale for windows opened later and for the next launch. Because the
+panel is drawn on exactly one window, the draft needed no `WindowId` tag.
+
+Per-monitor persistence (keyed on `MonitorHandle::name()`, since `WindowId`
+does not survive a restart) is the obvious follow-up and changes only where
+the seed comes from.
+
+**Fallout fixed on the way**
+
+- The browser window had no gear, so its own scale was unreachable — and it
+  is the text-heavy window that most wants one. The painter-drawn gear is now
+  shared between the wall's status bar and the browser's tab bar.
+- L/Q/S/C focused an existing browser window but the status-bar button always
+  opened another. Both now go through `OverlayAction::NewLibraryWindow`, which
+  focuses first.
+- An empty wall was a dead end once the sources form left the gear. It now
+  says which of three things is true — no sources, empty queue, or no tiles —
+  and offers the one action that fits. The big "+" was a separate centred
+  Area, so on a first run it painted on top of the explanation; they are one
+  state now.
+- `ui.with_layout` takes all remaining space, which in an `Area` is the rest
+  of the screen. The old panel was tall enough to hide it; the short one
+  stretched to full window height with the close button stranded at the
+  bottom. `allocate_ui_with_layout` with an explicit height fixes it.
+- The startup banner printed the `--audio` CLI flag while tiles took
+  `settings.audio`, so a settings.conf with audio on still announced
+  `audio=false`.
+
+**Effort**: M
 
 ---
 

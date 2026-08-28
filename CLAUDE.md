@@ -33,7 +33,12 @@ pixel coordinates 1:1 at `--ui-scale 1`). Caveats: bare `xdotool click` fires
 press+release in one frame, which egui's drag-only widgets (sliders) ignore —
 use `mousedown`/`sleep`/`mouseup`; and synthetic input can resolve a press
 against a stale pointer position, so treat a weird one-off as suspect and
-re-run before believing it.
+re-run before believing it. In practice a click only lands reliably after a
+*real* motion event into the target: `mousemove` a few pixels away, pause,
+`mousemove` onto the widget, pause, then click (a bare `click --window`
+never reaches the button). And never `pkill -f` a pattern that also matches
+your own shell command line — it kills the shell (exit 144); resolve PIDs
+with `ps -eo pid,args | grep ... | grep -v grep` instead.
 
 **Back up `~/.config/opentessera/settings.conf` first** — the app rewrites it
 on any settings change, and clicking around in the gear panel can delete the
@@ -51,7 +56,7 @@ Useful at runtime: `--windowed 1600x900` (one ordinary window),
 |---|---|
 | `tessera-mpv` | libmpv render-API wrapper: `dlopen` + hand-declared C ABI (no dev headers). `MpvLib` / `Mpv` / `RenderContext`. |
 | `tessera-core` | Pure logic, no I/O of its own beyond HTTP sources: `MediaItem`/`SourceKind`, `PlaybackQueue`, `solve_grid`, `DecodeBudget`. **This is where tests live** — put new logic here if it can be tested headlessly. |
-| `tessera-app` | The binary. `main.rs` (CLI + event loop + all the cross-screen actions), `screen.rs` (one window + GL context per `Screen`, wall or library), `tile.rs` (one mpv instance + FBO), `compositor.rs`, `overlay.rs` (wall egui), `library.rs` (browser egui), `catalog.rs` (background source listing), `thumbs.rs`, `png_util.rs`. |
+| `tessera-app` | The binary. `main.rs` (CLI + event loop + all the cross-screen actions), `screen.rs` (one window + GL context per `Screen`, wall or library), `tile.rs` (one mpv instance + FBO), `compositor.rs`, `overlay.rs` (wall egui), `browser/` (the browser window's egui: `mod.rs` tab bar + shared state, then one file per tab — `library.rs`, `queue.rs`, `sources.rs`, `config.rs`), `catalog.rs` (background source listing), `thumbs.rs`, `png_util.rs`. |
 
 ## Architecture invariants
 
@@ -68,11 +73,22 @@ that used to be a `Vec` indexed in parallel with `screens` belongs on
 `Screen` instead (that is why `Screen::cursor` exists).
 
 **A window is a `Screen` with a `ScreenRole`.** `Wall` has tiles and video;
-`Library` has neither but keeps its GL context, egui context and its place
+`Browser` has neither but keeps its GL context, egui context and its place
 in every per-screen path (tick, render, W, close, drag routing). Adding a
 window kind means a role, not a parallel window type — but check the role
-wherever an action assumes tiles (`add_tile_action` refuses on a library
+wherever an action assumes tiles (`add_tile_action` refuses on a browser
 window).
+
+**Global settings live in the browser window; per-window settings live in
+the gear.** This is the rule that keeps the shared-`UiSettings` hazard below
+from recurring: a control drawn in the one window that exists once cannot
+have several egui contexts fighting over it. `UiSettings` is now *only*
+persisted global state, so its `PartialEq` is derived — if you add a field
+that must not trigger a save, it does not belong there (per-window state
+goes on `Screen`, transient form state on `BrowserState`). L/Q/S/C and the
+browser buttons all funnel through `OverlayAction::NewLibraryWindow`, which
+focuses the existing browser window rather than opening a second; don't
+reintroduce a second path that just creates one.
 
 **Hotkeys ignore auto-repeat unless they're continuous.** Seek and volume
 arrows repeat; every toggle checks `!key_event.repeat`. A held key otherwise
@@ -84,6 +100,12 @@ on their own during testing, `xdotool keyup <key>` clears it.
 **egui Sliders ignore the width you give them.** The rail is drawn at
 `ui.spacing().slider_width` (100 by default); `add_sized` allocates the room
 but the slider does not fill it. Set `spacing_mut().slider_width` instead.
+
+**`ui.with_layout` takes every pixel that is left.** In an `Area`, that is
+the rest of the screen — so a right-aligned close button at the end of a
+short panel stretches the panel's frame to the full window height. Content
+used to hide it; the gear panel got short and it showed. Use
+`allocate_ui_with_layout` with an explicit height for trailing rows.
 
 **Blocking work never runs on the render thread.** `Source::list()` is an
 HTTP round trip or an FS walk; `catalog.rs` puts it on a worker and polls

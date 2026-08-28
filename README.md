@@ -39,17 +39,24 @@ Phase 1 skeleton — playback foundation:
     disabled rather than misleading. "clear queue" empties it outright and
     takes two clicks (it arms red for 4s); tiles keep playing whatever they
     already loaded.
-  - **library**: its own window,
+  - **library**: a tab of the browser window,
     listing each configured source on demand in the background. Live title
     filter, name/date/size ordering, and the two ways to queue things — bulk
     "add N to queue" (folded into the queue's current order, so a shuffled
     queue interleaves them) and a per-row "+" (appended at the end, leaving
     the existing order alone). Per-row "▶" plays an item immediately on the
     first wall window's first tile; rows already in the queue are marked.
-- Queue retention (settings): on, the queue comes back exactly as you left
+- Queue retention (queue tab): on, the queue comes back exactly as you left
   it, cursor included; off, every launch starts empty — or with just the file
   you opened. Either way a bare launch no longer walks every configured
   server at startup; the library browser lists on demand instead.
+- Settings are split by scope. Everything app-wide — sources, max concurrent
+  streams, cache per stream, audio, queue retention — lives in the browser
+  window's tabs (`S` sources, `C` config), which exists once no matter how
+  many monitors are running. The gear on any window holds only that window's
+  own settings, currently its UI scale: one scale across a 5K, an ultrawide
+  and a portrait monitor cannot be right for all three, so each window keeps
+  its own (and the last one you set becomes the default for new windows).
 - One cursor-based wrapping playback queue shared by every window — a tile is
   a slot fed from it (name/date/size/shuffle ordering, pending-tail re-sorting
   that preserves the current item). A per-window/global choice is planned
@@ -163,7 +170,7 @@ tessera --plex --plex-library Movies
 tessera --jellyfin --jellyfin-library Movies --plex /path/to/local/
 ```
 
-- Adding a server without typing a token: the gear panel's add-source form
+- Adding a server without typing a token: the sources tab's add-source form
   scans the LAN for Jellyfin servers (UDP 7359 broadcast) and signs in with
   a username and password (the password is exchanged once for an access
   token and never stored); Plex links through plex.tv — click "link with
@@ -183,7 +190,8 @@ tessera --jellyfin --jellyfin-library Movies --plex /path/to/local/
 
 Controls: `W` toggle this window between windowed and fullscreen (on its
 current monitor) · the status bar's `+` opens another window · `L` / `Q`
-browser window on the library / queue tab · `S` settings · `Esc` exit
+browser window on the library / queue tab · `S` / `C` browser window on the
+sources / config tab · the gear opens the window's own settings · `Esc` exit
 fullscreen if zoomed, otherwise quit · `Tab`
 pin/unpin the overlay UI (auto-hides after 5s idle) · `Space` pause/resume
 all tiles on the focused screen · `F` fullscreen the tile under the cursor ·

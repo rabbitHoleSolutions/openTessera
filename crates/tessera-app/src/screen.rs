@@ -16,7 +16,7 @@ use crate::tile::{Tile, TileEvent};
 /// the event loop each frame.
 pub struct Services<'a> {
     pub catalog: &'a mut crate::catalog::SourceCatalog,
-    pub wall_tiles: &'a [crate::library::WallTile],
+    pub wall_tiles: &'a [crate::browser::WallTile],
     pub auth: &'a mut crate::auth::Auth,
     /// Stable plex.tv device identifier for this install.
     pub plex_client_id: &'a str,
@@ -30,8 +30,9 @@ pub struct Services<'a> {
 pub enum ScreenRole {
     /// A video wall: tiles fed from the shared queue.
     Wall,
-    /// The library browser.
-    Library,
+    /// The browser: library, queue, sources and config — everything
+    /// app-wide, in the one window that exists once.
+    Browser,
 }
 
 pub struct Screen {
@@ -43,9 +44,18 @@ pub struct Screen {
     pub compositor: Compositor,
     pub monitor_index: usize,
     pub role: ScreenRole,
-    /// Browser state, used only when `role` is Library. Each library
+    /// Browser state, used only when `role` is Browser. Each browser
     /// window browses independently.
-    pub library: crate::library::LibraryState,
+    pub browser: crate::browser::BrowserState,
+    /// egui pixels-per-point for THIS window. Seeded from the persisted
+    /// default; the gear panel edits it per window, because one scale
+    /// across monitors of very different pixel densities cannot be right
+    /// for all of them.
+    pub ui_scale: f32,
+    /// Uncommitted UI-scale slider draft while the control is held. The
+    /// window that owns the panel owns the draft, so unlike the old shared
+    /// field it needs no window tag to stay out of another screen's way.
+    pub scale_drag: Option<f32>,
     pub tiles: Vec<Tile>,
     /// Pointer position in this window (top-left pixel origin) as of the
     /// last CursorMoved; None until the pointer has been in this window.
@@ -101,7 +111,9 @@ impl Screen {
             compositor,
             monitor_index,
             role: ScreenRole::Wall,
-            library: crate::library::LibraryState::default(),
+            browser: crate::browser::BrowserState::default(),
+            ui_scale: 1.0,
+            scale_drag: None,
             tiles: Vec::new(),
             cursor: None,
             layout: Vec::new(),
@@ -349,11 +361,25 @@ impl Screen {
         // while the EguiGlow itself is borrowed by run().
         let egui = &mut self.egui;
         let thumbs = &mut self.thumbs;
-        let library_state = &mut self.library;
+        let browser_state = &mut self.browser;
         let role = self.role;
+        let mut ui_scale = self.ui_scale;
+        let mut scale_drag = self.scale_drag;
+        // An empty wall is a dead end unless it says where to go: with the
+        // sources form now in another window, a first run has no visible
+        // path to adding one.
+        let empty_hint = if role != ScreenRole::Wall || !self.tiles.is_empty() {
+            None
+        } else if settings.sources.is_empty() {
+            Some(overlay::EmptyWall::AddSource)
+        } else if queue.items().is_empty() {
+            Some(overlay::EmptyWall::FillQueue)
+        } else {
+            Some(overlay::EmptyWall::AddTile)
+        };
         // The browser only reads the queue; taking a view keeps the queue
         // itself out of the egui closure, which already borrows plenty.
-        let queue_view = crate::library::QueueView {
+        let queue_view = crate::browser::QueueView {
             items: queue.items(),
             current: queue.current_index(),
         };
@@ -369,28 +395,26 @@ impl Screen {
             // Scale the whole overlay UI (zoom multiplies the native ppp
             // and persists across frames). `ui_scale` only moves when the
             // scale slider is released, so this is a no-op mid-drag.
-            ctx.set_pixels_per_point(settings.ui_scale);
-            if role == ScreenRole::Library {
-                // A library window has no wall to overlay, and its UI must
+            ctx.set_pixels_per_point(ui_scale);
+            if role == ScreenRole::Browser {
+                // A browser window has no wall to overlay, and its UI must
                 // not auto-hide the way the wall chrome does.
-                crate::library::draw(
-                    ctx,
-                    library_state,
-                    &settings.sources,
-                    services.catalog,
+                let mut bctx = crate::browser::BrowserCtx {
+                    catalog: services.catalog,
                     thumbs,
-                    &queue_view,
-                    services.wall_tiles,
-                    &mut actions,
-                );
+                    auth: services.auth,
+                    plex_client_id: services.plex_client_id,
+                    wall: services.wall_tiles,
+                };
+                crate::browser::draw(ctx, browser_state, settings, &queue_view, &mut bctx, &mut actions);
             } else if visible {
-                overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, tile_drag, overlay.track_panel, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete);
+                overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, tile_drag, overlay.track_panel, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete, empty_hint);
             }
             if help_open {
                 overlay::draw_help(ctx, &mut help_open);
             }
             if settings_open {
-                overlay::draw_settings(ctx, window_id, settings, services.auth, services.plex_client_id, &mut settings_open);
+                overlay::draw_settings(ctx, &mut ui_scale, &mut scale_drag, &mut settings.ui_scale, &mut settings_open, &mut actions);
             }
             if let Some(n) = &notice {
                 overlay::draw_notice(ctx, n);
@@ -408,6 +432,8 @@ impl Screen {
                 );
             }
         });
+        self.ui_scale = ui_scale;
+        self.scale_drag = scale_drag;
         overlay.queue_drag = queue_drag;
         // Only the owning screen may close a panel (its ✕ button); the
         // others never drew it and have nothing to say about it.

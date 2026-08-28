@@ -1,7 +1,7 @@
 mod auth;
+mod browser;
 mod catalog;
 mod compositor;
-mod library;
 mod overlay;
 mod thumbs;
 mod png_util;
@@ -393,11 +393,11 @@ fn main() {
         sources.len(),
         args.tiles,
         args.hwdec,
-        args.audio,
+        settings.audio,
         args.advance
     );
     if let Some(p) = args.populate {
-        println!("openTessera: populating {} tile(s) per screen", p.min(args.tiles));
+        println!("tessera: populating {} tile(s) per screen", p.min(args.tiles));
     }
 
     let mpv_lib = match tessera_mpv::MpvLib::load() {
@@ -532,6 +532,9 @@ fn main() {
         };
         screen.intended_monitor = Some(monitors[monitor_index].clone());
         screen.should_fullscreen = !matches!(args.screens, ScreenSel::Windowed(_, _));
+        // Each window carries its own scale from here on; the persisted
+        // value is only the starting point.
+        screen.ui_scale = settings.ui_scale;
         screens.push(screen);
     }
 
@@ -648,17 +651,17 @@ fn main() {
                     let settings_before = settings.clone();
                     // Deferred: a new window has to be created after the
                     // per-screen loop, which is iterating `screens` by index.
-                    let mut new_windows: Vec<(ScreenRole, library::Tab)> = Vec::new();
+                    let mut new_windows: Vec<(ScreenRole, browser::Tab)> = Vec::new();
                     // Snapshot every wall tile for the queue tab: a Screen
                     // can't see its siblings, so this has to be gathered
                     // before the per-screen loop borrows them one at a time.
-                    let wall_tiles: Vec<library::WallTile> = screens
+                    let wall_tiles: Vec<browser::WallTile> = screens
                         .iter()
                         .enumerate()
                         .filter(|(_, s)| s.role == ScreenRole::Wall)
                         .flat_map(|(wi, s)| {
                             let monitor = s.monitor_index;
-                            s.tiles.iter().map(move |t| library::WallTile {
+                            s.tiles.iter().map(move |t| browser::WallTile {
                                 window: wi,
                                 monitor,
                                 tile_id: t.id,
@@ -686,11 +689,23 @@ fn main() {
                         for action in std::mem::take(&mut overlay.actions) {
                             match action {
                                 OverlayAction::NewWindow => {
-                                    new_windows.push((ScreenRole::Wall, library::Tab::Library));
+                                    new_windows.push((ScreenRole::Wall, browser::Tab::Library));
                                     continue;
                                 }
                                 OverlayAction::NewLibraryWindow { tab } => {
-                                    new_windows.push((ScreenRole::Library, tab));
+                                    // Focus the browser window if there is
+                                    // one, rather than opening a second.
+                                    // The L/Q/S/C keys route through here
+                                    // too, so keys and buttons cannot drift
+                                    // apart on what "open the browser" means.
+                                    match screens.iter_mut().find(|s| s.role == ScreenRole::Browser) {
+                                        Some(b) => {
+                                            b.browser.tab = tab;
+                                            b.window.focus_window();
+                                            println!("browser window focused ({tab:?} tab)");
+                                        }
+                                        None => new_windows.push((ScreenRole::Browser, tab)),
+                                    }
                                     continue;
                                 }
                                 _ => {}
@@ -738,21 +753,22 @@ fn main() {
                         screen.intended_monitor = monitor_under_window(&screen.window).map(|(_, m)| m);
                         // A new window starts as a window; W makes it a wall.
                         screen.should_fullscreen = false;
+                        screen.ui_scale = settings.ui_scale;
                         screen.role = role;
-                        screen.library.tab = tab;
+                        screen.browser.tab = tab;
                         screen.window.set_title(match role {
                             ScreenRole::Wall => "Tessera",
-                            ScreenRole::Library => "Tessera — library",
+                            ScreenRole::Browser => "Tessera — browser",
                         });
                         screens.push(screen);
                         let idx = screens.len() - 1;
                         println!(
                             "opened {} window {idx} (monitor {monitor_index}), {} total",
-                            match role { ScreenRole::Wall => "wall", ScreenRole::Library => "library" },
+                            match role { ScreenRole::Wall => "wall", ScreenRole::Browser => "browser" },
                             screens.len()
                         );
-                        // A library window has no tiles.
-                        let tiles = if role == ScreenRole::Library { 0 } else { NEW_WINDOW_TILES };
+                        // A browser window has no tiles.
+                        let tiles = if role == ScreenRole::Browser { 0 } else { NEW_WINDOW_TILES };
                         for _ in 0..tiles {
                             let mut wall = Wall {
                                 screens: &mut screens,
@@ -784,7 +800,7 @@ fn main() {
                     // frame.
                     if settings != settings_before {
                         if settings.ui_scale != settings_before.ui_scale {
-                            println!("settings: UI scale {}x", settings.ui_scale);
+                            println!("settings: default UI scale {}x", settings.ui_scale);
                         }
                         if settings.retain_queue != settings_before.retain_queue {
                             if settings.retain_queue {
@@ -1100,7 +1116,7 @@ fn main() {
                                                     println!("screen {monitor_index} tile {}: vol {}%", tile.id, tile.volume());
                                                 } else {
                                                     overlay.notice = Some((
-                                                        "audio is off — restart with --audio to enable sound".into(),
+                                                        "audio is off — enable it in config (C), then restart".into(),
                                                         Instant::now(),
                                                     ));
                                                 }
@@ -1203,39 +1219,18 @@ fn main() {
                                         overlay.help_open =
                                             if overlay.help_open == Some(win) { None } else { Some(win) };
                                     }
-                                    Key::Character(ref c)
-                                        if c.eq_ignore_ascii_case("l") || c.eq_ignore_ascii_case("q") =>
-                                    {
-                                        // Both keys reach the same browser
+                                    Key::Character(ref c) if browser_tab_key(c).is_some() => {
+                                        // L/Q/S/C all reach the same browser
                                         // window; they differ only in which
-                                        // tab it lands on.
-                                        let tab = if c.eq_ignore_ascii_case("q") {
-                                            library::Tab::Queue
-                                        } else {
-                                            library::Tab::Library
-                                        };
-                                        match screens.iter_mut().find(|s| s.role == ScreenRole::Library) {
-                                            Some(lib) => {
-                                                lib.library.tab = tab;
-                                                lib.window.focus_window();
-                                                println!("browser window focused ({tab:?} tab)");
-                                            }
-                                            None => overlay
-                                                .actions
-                                                .push(OverlayAction::NewLibraryWindow { tab }),
-                                        }
-                                    }
-                                    Key::Character(ref c) if c.eq_ignore_ascii_case("s") => {
-                                        // Settings on the focused screen —
-                                        // window-scoped like the help panel.
-                                        let win = screens[idx].window.id();
-                                        overlay.settings_open =
-                                            if overlay.settings_open == Some(win) { None } else { Some(win) };
-                                        println!(
-                                            "settings panel {} (screen {})",
-                                            if overlay.settings_open.is_some() { "open" } else { "closed" },
-                                            screens[idx].monitor_index
-                                        );
+                                        // tab it lands on. Everything global
+                                        // lives there, so there is exactly
+                                        // one copy of each of these controls
+                                        // no matter how many screens are up.
+                                        // Focus-or-create is handled where
+                                        // the action is drained, since making
+                                        // a window needs the event loop.
+                                        let tab = browser_tab_key(c).expect("guarded above");
+                                        overlay.actions.push(OverlayAction::NewLibraryWindow { tab });
                                     }
                                     Key::Character(ref c) if c == "-" || c == "_" => {
                                         // Remove the tile under the cursor on
@@ -1399,7 +1394,7 @@ fn save_settings(s: &overlay::UiSettings) {
     }
     let sources_json = serde_json::to_string(&s.sources).unwrap_or_else(|_| "[]".into());
     let text = format!(
-        "# openTessera settings (also editable at runtime via the gear panel)\nui_scale = {}\ncache_mb = {}\nmax_streams = {}\naudio = {}\nretain_queue = {}\nsources = {}\n",
+        "# openTessera settings (also editable at runtime: S sources, C config)\nui_scale = {}\ncache_mb = {}\nmax_streams = {}\naudio = {}\nretain_queue = {}\nsources = {}\n",
         s.ui_scale, s.cache_mb, s.max_streams, s.audio, s.retain_queue, sources_json
     );
     let _ = std::fs::write(dir.join("settings.conf"), text);
@@ -1457,6 +1452,19 @@ fn toggle_pin(screens: &mut [Screen], screen_idx: usize, tile_id: usize) {
 }
 
 /// Shows a transient toast (and logs) the given message.
+/// Which browser tab a keypress asks for, if any. L/Q/S/C are one family:
+/// every app-wide control lives in the browser window, so these are the
+/// four ways in rather than four separate features.
+fn browser_tab_key(c: &str) -> Option<browser::Tab> {
+    match c.to_ascii_lowercase().as_str() {
+        "l" => Some(browser::Tab::Library),
+        "q" => Some(browser::Tab::Queue),
+        "s" => Some(browser::Tab::Sources),
+        "c" => Some(browser::Tab::Config),
+        _ => None,
+    }
+}
+
 fn notify(overlay: &mut overlay::OverlayState, msg: String) {
     println!("{msg}");
     overlay.notice = Some((msg, Instant::now()));
@@ -1707,8 +1715,8 @@ struct Wall<'a> {
 /// the "+" hotkey. Enforces the zoomed and --tiles limits.
 fn add_tile_action(wall: &mut Wall, screen_idx: usize) {
     let monitor_index = wall.screens[screen_idx].monitor_index;
-    if wall.screens[screen_idx].role == ScreenRole::Library {
-        notify(wall.overlay, "this is a library window — open a wall window for tiles".into());
+    if wall.screens[screen_idx].role == ScreenRole::Browser {
+        notify(wall.overlay, "this is the browser window — open a wall window for tiles".into());
         return;
     }
     if wall.screens[screen_idx].zoomed.is_some() {
@@ -1747,10 +1755,10 @@ fn add_tile_action(wall: &mut Wall, screen_idx: usize) {
             }
         }
         Admission::RejectedBudget { would_use, ceiling } => {
-            notify(wall.overlay, format!("not adding: decode budget full ({would_use:.0}/{ceiling} mbps)"));
+            notify(wall.overlay, format!("not adding: decode budget full ({would_use:.0}/{ceiling} mbps) — raise it in config (C)"));
         }
         Admission::RejectedMaxStreams { max } => {
-            notify(wall.overlay, format!("not adding: max concurrent streams ({max})"));
+            notify(wall.overlay, format!("not adding: max concurrent streams ({max}) — raise it in config (C)"));
         }
     }
 }
@@ -1817,7 +1825,7 @@ fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx: usi
                             if muted { "muted".to_string() } else { format!("audio on (vol {}%)", tile.volume()) }
                         );
                     } else {
-                        notify(wall.overlay, "audio is off — restart with --audio to enable sound".into());
+                        notify(wall.overlay, "audio is off — enable it in config (C), then restart".into());
                     }
                     return;
                 }
@@ -1848,7 +1856,7 @@ fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx: usi
                 }
             }
             if !target_ok {
-                notify(wall.overlay, "audio is off — restart with --audio to enable sound".into());
+                notify(wall.overlay, "audio is off — enable it in config (C), then restart".into());
             } else {
                 if muted_others > 0 {
                     println!("solo: muted {muted_others} other stream(s)");
@@ -2522,6 +2530,29 @@ mod tests {
             };
             assert_eq!(m == 'n', expect_n, "n-guard for {k:?}");
             assert_eq!(m == 'p', expect_p, "p-guard for {k:?}");
+        }
+    }
+
+    #[test]
+    fn browser_keys_cover_every_tab_in_both_cases() {
+        use super::browser_tab_key;
+        use crate::browser::Tab;
+        for (key, tab) in [
+            ("l", Tab::Library),
+            ("q", Tab::Queue),
+            ("s", Tab::Sources),
+            ("c", Tab::Config),
+        ] {
+            assert_eq!(browser_tab_key(key), Some(tab), "{key}");
+            assert_eq!(
+                browser_tab_key(&key.to_uppercase()),
+                Some(tab),
+                "shifted {key}"
+            );
+        }
+        // Keys the wall owns must not be swallowed by the browser family.
+        for other in ["w", "f", "n", "p", "?", "-", "+"] {
+            assert_eq!(browser_tab_key(other), None, "{other}");
         }
     }
 }
