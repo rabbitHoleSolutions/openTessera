@@ -86,14 +86,21 @@ pub struct OverlayState {
 /// `Screen`; add-form state lives on `BrowserState`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UiSettings {
-    /// Starting egui pixels-per-point for new windows. Each window then
-    /// carries its own `Screen::ui_scale`; committing a window's scale
-    /// slider updates this default too, so the next launch starts there.
+    /// Fallback egui pixels-per-point for a window on a monitor with no
+    /// remembered scale of its own. Each window then carries its own
+    /// `Screen::ui_scale`.
     pub ui_scale: f32,
+    /// Remembered UI scale per monitor, keyed on the monitor's name
+    /// (`MonitorHandle::name()`, e.g. "DP-2"). A `WindowId` does not
+    /// survive a restart and a monitor index shifts when displays are
+    /// plugged or unplugged, so the name is the only durable handle.
+    /// A `BTreeMap` rather than a `HashMap`: this is serialised on every
+    /// settings save, and hash order would rewrite the line each time.
+    pub monitor_scale: std::collections::BTreeMap<String, f32>,
     /// Demuxer cache size in MiB per stream.
     pub cache_mb: u32,
-    /// Max concurrent playing streams (budget count cap; the mbps ceiling
-    /// is the real decode-load guard).
+    /// Max concurrent playing streams (budget count cap; the decode-load
+    /// ceiling is the real guard).
     pub max_streams: u32,
     /// Audio pipeline enabled (tiles still start muted).
     pub audio: bool,
@@ -110,6 +117,7 @@ impl Default for UiSettings {
     fn default() -> UiSettings {
         UiSettings {
             ui_scale: 1.0,
+            monitor_scale: std::collections::BTreeMap::new(),
             cache_mb: 512,
             max_streams: tessera_core::budget::DEFAULT_MAX_STREAMS as u32,
             audio: false,
@@ -247,8 +255,10 @@ pub struct QueueEntry {
 #[derive(Clone, Copy)]
 pub struct BudgetUi {
     pub utilization: f64,
-    pub used_mbps: f64,
-    pub ceiling_mbps: f64,
+    /// Load in 1080p30-equivalent streams, and the ceiling in the same
+    /// unit. NOT a bitrate — see `MACROBLOCKS_1080P30`.
+    pub used_equivalents: f64,
+    pub ceiling_equivalents: f64,
     pub adaptive: f64,
     pub active: usize,
     pub max_streams: usize,
@@ -413,10 +423,10 @@ pub fn draw(
                                 ui.colored_label(
                                     color,
                                     format!(
-                                        "budget {:.0}% ({:.0}/{:.0} mbps)",
+                                        "budget {:.0}% ({:.1}/{:.0} streams)",
                                         budget.utilization * 100.0,
-                                        budget.used_mbps,
-                                        budget.ceiling_mbps
+                                        budget.used_equivalents,
+                                        budget.ceiling_equivalents
                                     ),
                                 );
                                 if budget.adaptive < 1.0 {
@@ -1009,12 +1019,14 @@ pub fn gear_button(ui: &mut egui::Ui) -> egui::Response {
 ///
 /// `scale` is the caller's live value for this window and `drag` its
 /// uncommitted draft — both owned by the `Screen`, so no window tagging is
-/// needed to keep two monitors' panels apart.
+/// needed to keep two monitors' panels apart. `committed` is set when the
+/// user finishes a change, which is the caller's cue to remember it against
+/// the monitor this window is on.
 pub fn draw_settings(
     ctx: &egui::Context,
     scale: &mut f32,
     drag: &mut Option<f32>,
-    default_scale: &mut f32,
+    committed: &mut bool,
     open: &mut bool,
     actions: &mut Vec<OverlayAction>,
 ) {
@@ -1045,19 +1057,18 @@ pub fn draw_settings(
                     if slider.dragged() || slider.is_pointer_button_down_on() {
                         *drag = Some(draft);
                     } else if held {
-                        // Released: commit for this window, and make it the
-                        // starting point for windows opened later (and for
-                        // the next launch — this is the persisted value).
+                        // Released: commit for this window, and remember it
+                        // for this monitor.
                         *drag = None;
                         *scale = draft;
-                        *default_scale = draft;
+                        *committed = true;
                     } else if slider.changed() {
                         // Keyboard adjustment (arrows on a focused slider):
                         // no drag to wait out, commit immediately.
                         *scale = draft;
-                        *default_scale = draft;
+                        *committed = true;
                     }
-                    ui.weak("applies to this window; also becomes the default for new ones");
+                    ui.weak("remembered for this monitor, so each display keeps its own");
 
                     ui.add_space(12.0);
                     ui.separator();

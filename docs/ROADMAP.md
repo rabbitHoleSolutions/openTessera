@@ -386,9 +386,19 @@ committing a window's slider also updates the persisted value, which is the
 starting scale for windows opened later and for the next launch. Because the
 panel is drawn on exactly one window, the draft needed no `WindowId` tag.
 
-Per-monitor persistence (keyed on `MonitorHandle::name()`, since `WindowId`
-does not survive a restart) is the obvious follow-up and changes only where
-the seed comes from.
+Scales are remembered per monitor in `UiSettings::monitor_scale`, keyed on
+`MonitorHandle::name()` — `WindowId` does not survive a restart and a monitor
+index shifts when displays are plugged in. A window seeds from its monitor's
+remembered scale, falling back to `ui_scale`; committing writes under the
+monitor the window is on *now*, so dragging a window to another display and
+adjusting it there saves against that display. Moving a window does not
+re-scale it — changing the UI out from under a drag is worse than a stale
+scale. The config tab lists what is remembered with a per-monitor "forget",
+since otherwise a scale saved on a rarely-used display is invisible.
+
+`--ui-scale` became a run-only override instead of writing into the
+persisted settings, where it silently overwrote the saved value on every
+debugging launch.
 
 **Fallout fixed on the way**
 
@@ -412,6 +422,26 @@ the seed comes from.
   `audio=false`.
 
 **Effort**: M
+
+---
+
+## 13. Budget display in units a person can read
+
+Status: **implemented** (2026-08-27)
+
+The status bar read `budget 4% (881280/23500800 mbps)`. The arithmetic was
+right and the label was not: the budget is denominated in *weighted
+macroblocks per second*, abbreviated "mbps" in the source, which on screen
+reads as twenty-three terabits of video.
+
+`MBPS_1080P30` is now `MACROBLOCKS_1080P30`, the accessors say `load`
+(`used_load`, `ceiling_load`, `effective_ceiling_load`) for the raw unit,
+and `used_equivalents()` / `ceiling_equivalents()` divide through to
+1080p30-equivalent streams for display. The bar now reads
+`budget 4% (3.6/96 streams)`, and every log line and toast that quoted the
+raw figure was converted with it.
+
+**Effort**: S
 
 ---
 

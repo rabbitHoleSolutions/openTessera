@@ -71,7 +71,13 @@ impl StreamSpec {
 
 /// Macroblocks/sec of one 1080p30 stream: ceil(1920/16) * ceil(1080/16) * 30
 /// = 120 * 68 * 30 = 244800.
-pub const MBPS_1080P30: f64 = 244_800.0;
+///
+/// This is the unit the whole budget is denominated in: *macroblocks* per
+/// second, weighted by codec. It was once abbreviated "mbps", which the
+/// status bar duly printed — and "23500800 mbps" reads as twenty-three
+/// terabits of video. Nothing here is a bitrate; the accessors say `load`
+/// and the UI divides through to 1080p30-equivalents.
+pub const MACROBLOCKS_1080P30: f64 = 244_800.0;
 
 /// Default ceiling: 96 x 1080p30-equivalents (24 x 4K30-equivalents), measured
 /// against NVDEC on an RTX 5080 with enormous headroom remaining.
@@ -105,7 +111,7 @@ struct ActiveStream {
 }
 
 pub struct DecodeBudget {
-    ceiling_mbps: f64,
+    ceiling_load: f64,
     /// Multiplier in [ADAPTIVE_FLOOR, 1.0] driven by drop feedback.
     adaptive: f64,
     max_streams: usize,
@@ -116,7 +122,7 @@ pub struct DecodeBudget {
 impl DecodeBudget {
     pub fn new(ceiling_equivalents: f64, max_streams: usize) -> DecodeBudget {
         DecodeBudget {
-            ceiling_mbps: ceiling_equivalents * MBPS_1080P30,
+            ceiling_load: ceiling_equivalents * MACROBLOCKS_1080P30,
             adaptive: 1.0,
             max_streams,
             active: Vec::new(),
@@ -124,13 +130,13 @@ impl DecodeBudget {
         }
     }
 
-    pub fn ceiling_mbps(&self) -> f64 {
-        self.ceiling_mbps
+    pub fn ceiling_load(&self) -> f64 {
+        self.ceiling_load
     }
 
     /// The effective ceiling after adaptive feedback.
-    pub fn effective_ceiling_mbps(&self) -> f64 {
-        self.ceiling_mbps * self.adaptive
+    pub fn effective_ceiling_load(&self) -> f64 {
+        self.ceiling_load * self.adaptive
     }
 
     pub fn adaptive(&self) -> f64 {
@@ -164,12 +170,24 @@ impl DecodeBudget {
         self.active.iter().map(|a| a.id).collect()
     }
 
-    pub fn used_mbps(&self) -> f64 {
+    pub fn used_load(&self) -> f64 {
         self.active.iter().map(|a| a.spec.weight()).sum()
     }
 
     pub fn utilization(&self) -> f64 {
-        self.used_mbps() / self.effective_ceiling_mbps()
+        self.used_load() / self.effective_ceiling_load()
+    }
+
+    /// Current load expressed in 1080p30 streams — the unit to show a
+    /// person. Raw load is weighted macroblocks/sec, which is a number in
+    /// the millions and means nothing on a status bar.
+    pub fn used_equivalents(&self) -> f64 {
+        self.used_load() / MACROBLOCKS_1080P30
+    }
+
+    /// The effective ceiling in the same unit.
+    pub fn ceiling_equivalents(&self) -> f64 {
+        self.effective_ceiling_load() / MACROBLOCKS_1080P30
     }
 
     pub fn total_evictions(&self) -> u64 {
@@ -179,7 +197,7 @@ impl DecodeBudget {
     fn fits(&self, spec: &StreamSpec) -> bool {
         // A single stream is always admissible alone — a wall that can't
         // play one stream is worse than one that drops all but one.
-        self.active.is_empty() || self.used_mbps() + spec.weight() <= self.effective_ceiling_mbps()
+        self.active.is_empty() || self.used_load() + spec.weight() <= self.effective_ceiling_load()
     }
 
     fn admit(&mut self, stream_id: usize, spec: &StreamSpec) {
@@ -205,12 +223,12 @@ impl DecodeBudget {
             return Admission::Admitted;
         }
         if let Some(oldest) = self.active.iter().min_by_key(|a| a.started_at) {
-            let after_evict = self.used_mbps() - oldest.spec.weight();
+            let after_evict = self.used_load() - oldest.spec.weight();
             let slot_frees = self.active.len() - 1 < self.max_streams;
             // If the last stream would be evicted, the single-stream rule
             // admits anything; otherwise check the arithmetic.
             let fits_after = self.active.len() == 1
-                || after_evict + spec.weight() <= self.effective_ceiling_mbps();
+                || after_evict + spec.weight() <= self.effective_ceiling_load();
             if slot_frees && fits_after {
                 let evicted = self.evict_oldest().expect("oldest exists");
                 self.admit(stream_id, spec);
@@ -221,8 +239,8 @@ impl DecodeBudget {
             return Admission::RejectedMaxStreams { max: self.max_streams };
         }
         Admission::RejectedBudget {
-            would_use: self.used_mbps() + spec.weight(),
-            ceiling: self.effective_ceiling_mbps(),
+            would_use: self.used_load() + spec.weight(),
+            ceiling: self.effective_ceiling_load(),
         }
     }
 
@@ -316,9 +334,9 @@ mod tests {
     #[test]
     fn weights() {
         let hd = s(1920, 1080, 30.0, Codec::Hevc);
-        assert!((hd.weight() - MBPS_1080P30).abs() < 1.0);
+        assert!((hd.weight() - MACROBLOCKS_1080P30).abs() < 1.0);
         let uhd_h264 = s(3840, 2160, 30.0, Codec::H264);
-        assert!(uhd_h264.weight() > 4.0 * MBPS_1080P30);
+        assert!(uhd_h264.weight() > 4.0 * MACROBLOCKS_1080P30);
     }
 
     #[test]
@@ -438,7 +456,7 @@ mod tests {
         b.release(2);
         assert_eq!(b.active_ids(), vec![1]);
         // Effective ceiling shrank accordingly.
-        assert!((b.effective_ceiling_mbps() - b.ceiling_mbps() * 0.85).abs() < 1.0);
+        assert!((b.effective_ceiling_load() - b.ceiling_load() * 0.85).abs() < 1.0);
 
         // Clean windows recover.
         b.recover();

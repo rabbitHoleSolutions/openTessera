@@ -20,7 +20,8 @@ Phase 1 skeleton — playback foundation:
   memory), hardware decode (NVDEC/VA-API/VideoToolbox via mpv)
 - Grid layout solver (coverage-scoring rows/cols search, ported from the Quest
   app's LayoutSolver) with per-tile aspect letterboxing
-- Decode budget controller: weighted macroblocks/sec admission with
+- Decode budget controller: weighted macroblocks/sec admission (shown in
+  the status bar as 1080p30-equivalent streams) with
   codec weights, max-streams gate, real probe data fed back on load,
   OLDEST_STARTED eviction (the oldest playing stream is paused to admit
   a new one or to sustain the user's stream count), and an adaptive
@@ -56,7 +57,9 @@ Phase 1 skeleton — playback foundation:
   many monitors are running. The gear on any window holds only that window's
   own settings, currently its UI scale: one scale across a 5K, an ultrawide
   and a portrait monitor cannot be right for all three, so each window keeps
-  its own (and the last one you set becomes the default for new windows).
+  its own — remembered per monitor by name, so a window opened on a display
+  comes back at the scale you last chose there. The config tab lists what is
+  remembered and can forget any of it.
 - One cursor-based wrapping playback queue shared by every window — a tile is
   a slot fed from it (name/date/size/shuffle ordering, pending-tail re-sorting
   that preserves the current item). A per-window/global choice is planned

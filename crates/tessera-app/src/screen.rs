@@ -339,8 +339,8 @@ impl Screen {
         let tile_drag = overlay.tile_drag.filter(|d| d.window_id == self.window.id());
         let budget_ui = BudgetUi {
             utilization: budget.utilization(),
-            used_mbps: budget.used_mbps(),
-            ceiling_mbps: budget.effective_ceiling_mbps(),
+            used_equivalents: budget.used_equivalents(),
+            ceiling_equivalents: budget.ceiling_equivalents(),
             adaptive: budget.adaptive(),
             active: budget.active_count(),
             max_streams: budget.max_streams(),
@@ -365,6 +365,7 @@ impl Screen {
         let role = self.role;
         let mut ui_scale = self.ui_scale;
         let mut scale_drag = self.scale_drag;
+        let mut scale_committed = false;
         // An empty wall is a dead end unless it says where to go: with the
         // sources form now in another window, a first run has no visible
         // path to adding one.
@@ -414,7 +415,7 @@ impl Screen {
                 overlay::draw_help(ctx, &mut help_open);
             }
             if settings_open {
-                overlay::draw_settings(ctx, &mut ui_scale, &mut scale_drag, &mut settings.ui_scale, &mut settings_open, &mut actions);
+                overlay::draw_settings(ctx, &mut ui_scale, &mut scale_drag, &mut scale_committed, &mut settings_open, &mut actions);
             }
             if let Some(n) = &notice {
                 overlay::draw_notice(ctx, n);
@@ -434,6 +435,19 @@ impl Screen {
         });
         self.ui_scale = ui_scale;
         self.scale_drag = scale_drag;
+        if scale_committed {
+            // Keyed on the monitor the window is on *now*, not the one it
+            // was created on: drag a window to another display and adjust
+            // it there, and it is that display you meant.
+            if let Some(name) = self.window.current_monitor().and_then(|m| m.name()) {
+                settings.monitor_scale.insert(name, ui_scale);
+            } else {
+                // No name to key on (rare; some backends give none) —
+                // fall back to moving the global default so the change is
+                // not silently forgotten.
+                settings.ui_scale = ui_scale;
+            }
+        }
         overlay.queue_drag = queue_drag;
         // Only the owning screen may close a panel (its ✕ button); the
         // others never drew it and have nothing to say about it.

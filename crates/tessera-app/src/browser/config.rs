@@ -43,18 +43,59 @@ pub fn draw(ctx: &egui::Context, settings: &mut UiSettings) {
                 });
 
             ui.add_space(6.0);
-            ui.weak("the mbps ceiling is the real decode-load guard; the stream cap is the blunt one");
+            ui.weak("the decode-load ceiling is the real guard; this stream cap is the blunt one");
 
             ui.add_space(14.0);
             ui.separator();
             ui.add_space(6.0);
             ui.label(egui::RichText::new("interface").strong());
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label("UI scale");
-                ui.weak(format!("{:.2}× — set per window in its gear panel", settings.ui_scale));
-            });
-            ui.weak("this is the starting scale for new windows; adjusting a window's gear changes that window and updates this default");
+            ui.weak("scale is per window, set in each window's gear and remembered per monitor");
+            ui.add_space(6.0);
+            egui::Grid::new("config-scale")
+                .num_columns(2)
+                .spacing(egui::vec2(16.0, 6.0))
+                .show(ui, |ui| {
+                    ui.label("fallback UI scale");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut settings.ui_scale)
+                                .clamp_range(0.75..=3.0)
+                                .speed(0.05)
+                                .suffix("×"),
+                        );
+                        ui.weak("for a monitor with nothing remembered");
+                    });
+                    ui.end_row();
+                });
+
+            if settings.monitor_scale.is_empty() {
+                ui.add_space(4.0);
+                ui.weak("no monitor has its own scale yet");
+            } else {
+                ui.add_space(8.0);
+                ui.label("remembered per monitor");
+                // Listed here because otherwise a scale saved months ago on
+                // a display you rarely use is invisible and unclearable.
+                let mut forget = None;
+                for (name, scale) in settings.monitor_scale.iter() {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(egui::RichText::new("✖").small())
+                            .on_hover_text("forget this monitor's scale (back to the fallback)")
+                            .clicked()
+                        {
+                            forget = Some(name.clone());
+                        }
+                        ui.label(format!("{name}  —  {scale:.2}×"));
+                    });
+                }
+                if let Some(name) = forget {
+                    settings.monitor_scale.remove(&name);
+                    println!("settings: forgot UI scale for {name}");
+                }
+                ui.weak("windows already open keep their current scale until you change it");
+            }
 
             ui.add_space(14.0);
             ui.separator();

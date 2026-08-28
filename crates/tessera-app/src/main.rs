@@ -311,9 +311,6 @@ fn main() {
     if args.audio {
         settings.audio = true;
     }
-    if let Some(s) = args.ui_scale {
-        settings.ui_scale = s.clamp(0.75, 3.0);
-    }
     if let Some(c) = args.cache_mb {
         settings.cache_mb = c.clamp(64, 8192);
     }
@@ -532,9 +529,9 @@ fn main() {
         };
         screen.intended_monitor = Some(monitors[monitor_index].clone());
         screen.should_fullscreen = !matches!(args.screens, ScreenSel::Windowed(_, _));
-        // Each window carries its own scale from here on; the persisted
-        // value is only the starting point.
-        screen.ui_scale = settings.ui_scale;
+        // Each window carries its own scale from here on; the remembered
+        // per-monitor value (or the fallback) is only the starting point.
+        screen.ui_scale = seed_scale(&settings, monitors.get(monitor_index), args.ui_scale);
         screens.push(screen);
     }
 
@@ -585,8 +582,9 @@ fn main() {
                 Admission::Admitted | Admission::AdmittedEvicting { .. } => {}
                 Admission::RejectedBudget { would_use, ceiling } => {
                     println!(
-                        "screen {monitor_index}: decode budget full, stopping at {created} tiles ({would_use:.0}/{} mbps)",
-                        ceiling
+                        "screen {monitor_index}: decode budget full, stopping at {created} tiles ({:.1}/{:.0} streams)",
+                        would_use / tessera_core::budget::MACROBLOCKS_1080P30,
+                        ceiling / tessera_core::budget::MACROBLOCKS_1080P30
                     );
                     break;
                 }
@@ -753,7 +751,11 @@ fn main() {
                         screen.intended_monitor = monitor_under_window(&screen.window).map(|(_, m)| m);
                         // A new window starts as a window; W makes it a wall.
                         screen.should_fullscreen = false;
-                        screen.ui_scale = settings.ui_scale;
+                        screen.ui_scale = seed_scale(
+                            &settings,
+                            screen.intended_monitor.as_ref(),
+                            args.ui_scale,
+                        );
                         screen.role = role;
                         screen.browser.tab = tab;
                         screen.window.set_title(match role {
@@ -800,7 +802,14 @@ fn main() {
                     // frame.
                     if settings != settings_before {
                         if settings.ui_scale != settings_before.ui_scale {
-                            println!("settings: default UI scale {}x", settings.ui_scale);
+                            println!("settings: fallback UI scale {}x", settings.ui_scale);
+                        }
+                        if settings.monitor_scale != settings_before.monitor_scale {
+                            for (name, v) in settings.monitor_scale.iter() {
+                                if settings_before.monitor_scale.get(name) != Some(v) {
+                                    println!("settings: UI scale {v}x on {name}");
+                                }
+                            }
                         }
                         if settings.retain_queue != settings_before.retain_queue {
                             if settings.retain_queue {
@@ -899,10 +908,10 @@ fn main() {
 
                         if budget.adaptive() < 1.0 {
                             println!(
-                                "budget: adaptive ceiling {:.0}% of static, {:.0}/{:.0} mbps in use, {} evictions total",
+                                "budget: adaptive ceiling {:.0}% of static, {:.1}/{:.0} streams in use, {} evictions total",
                                 budget.adaptive() * 100.0,
-                                budget.used_mbps(),
-                                budget.effective_ceiling_mbps(),
+                                budget.used_equivalents(),
+                                budget.ceiling_equivalents(),
                                 budget.total_evictions()
                             );
                         }
@@ -1371,6 +1380,17 @@ fn load_settings() -> overlay::UiSettings {
                             s.max_streams = n.clamp(1, 128);
                         }
                     }
+                    "monitor_scale" => {
+                        match serde_json::from_str::<std::collections::BTreeMap<String, f32>>(v) {
+                            Ok(map) => {
+                                s.monitor_scale =
+                                    map.into_iter().map(|(k, v)| (k, v.clamp(0.75, 3.0))).collect()
+                            }
+                            Err(e) => {
+                                eprintln!("warning: bad monitor_scale line in settings.conf: {e}")
+                            }
+                        }
+                    }
                     "audio" => s.audio = v == "true" || v == "yes" || v == "on",
                     "retain_queue" => s.retain_queue = v == "true" || v == "yes" || v == "on",
                     "sources" => match serde_json::from_str::<Vec<tessera_core::sources::Source>>(v) {
@@ -1393,9 +1413,12 @@ fn save_settings(s: &overlay::UiSettings) {
         return;
     }
     let sources_json = serde_json::to_string(&s.sources).unwrap_or_else(|_| "[]".into());
+    let scales_json = serde_json::to_string(&s.monitor_scale).unwrap_or_else(|_| "{}".into());
     let text = format!(
-        "# openTessera settings (also editable at runtime: S sources, C config)\nui_scale = {}\ncache_mb = {}\nmax_streams = {}\naudio = {}\nretain_queue = {}\nsources = {}\n",
-        s.ui_scale, s.cache_mb, s.max_streams, s.audio, s.retain_queue, sources_json
+        "# openTessera settings (also editable at runtime: S sources, C config)\n\
+         # ui_scale is the fallback; monitor_scale remembers each display by name.\n\
+         ui_scale = {}\nmonitor_scale = {}\ncache_mb = {}\nmax_streams = {}\naudio = {}\nretain_queue = {}\nsources = {}\n",
+        s.ui_scale, scales_json, s.cache_mb, s.max_streams, s.audio, s.retain_queue, sources_json
     );
     let _ = std::fs::write(dir.join("settings.conf"), text);
     println!("settings: saved to {}", dir.join("settings.conf").display());
@@ -1452,6 +1475,31 @@ fn toggle_pin(screens: &mut [Screen], screen_idx: usize, tile_id: usize) {
 }
 
 /// Shows a transient toast (and logs) the given message.
+/// The UI scale a window on `monitor` should start at. `--ui-scale` wins
+/// for the whole run without being persisted — it used to be written into
+/// the settings, so a single debugging launch overwrote whatever scale the
+/// user had set. Otherwise: this monitor's remembered scale, else the
+/// fallback.
+fn seed_scale(
+    settings: &overlay::UiSettings,
+    monitor: Option<&winit::monitor::MonitorHandle>,
+    cli: Option<f32>,
+) -> f32 {
+    let name = monitor.and_then(|m| m.name());
+    scale_for(settings, name.as_deref(), cli)
+}
+
+/// The decision itself, split out from the `MonitorHandle` so it can be
+/// tested without a display.
+fn scale_for(settings: &overlay::UiSettings, monitor: Option<&str>, cli: Option<f32>) -> f32 {
+    if let Some(s) = cli {
+        return s.clamp(0.75, 3.0);
+    }
+    monitor
+        .and_then(|n| settings.monitor_scale.get(n).copied())
+        .unwrap_or(settings.ui_scale)
+}
+
 /// Which browser tab a keypress asks for, if any. L/Q/S/C are one family:
 /// every app-wide control lives in the browser window, so these are the
 /// four ways in rather than four separate features.
@@ -1580,7 +1628,11 @@ fn move_tile_cross_screen(
         let rejected = match request_admission(screens, budget, tile_id, &tessera_core::StreamSpec::placeholder()) {
             Admission::Admitted | Admission::AdmittedEvicting { .. } => None,
             Admission::RejectedBudget { would_use, ceiling } => {
-                Some(format!("decode budget full ({would_use:.0}/{ceiling} mbps)"))
+                Some(format!(
+                    "decode budget full ({:.1}/{:.0} streams)",
+                    would_use / tessera_core::budget::MACROBLOCKS_1080P30,
+                    ceiling / tessera_core::budget::MACROBLOCKS_1080P30
+                ))
             }
             Admission::RejectedMaxStreams { max } => Some(format!("max concurrent streams ({max})")),
         };
@@ -1675,7 +1727,11 @@ fn resume_tile(screens: &mut [Screen], budget: &mut DecodeBudget, id: usize) {
             }
         }
         Admission::RejectedBudget { would_use, ceiling } => {
-            println!("tile {id}: staying paused — budget {would_use:.0}/{} mbps", ceiling);
+            println!(
+                "tile {id}: staying paused — budget {:.1}/{:.0} streams",
+                would_use / tessera_core::budget::MACROBLOCKS_1080P30,
+                ceiling / tessera_core::budget::MACROBLOCKS_1080P30
+            );
         }
         Admission::RejectedMaxStreams { max } => {
             println!("tile {id}: staying paused — max streams ({max})");
@@ -1755,7 +1811,14 @@ fn add_tile_action(wall: &mut Wall, screen_idx: usize) {
             }
         }
         Admission::RejectedBudget { would_use, ceiling } => {
-            notify(wall.overlay, format!("not adding: decode budget full ({would_use:.0}/{ceiling} mbps) — raise it in config (C)"));
+            notify(
+                wall.overlay,
+                format!(
+                    "not adding: decode budget full ({:.1}/{:.0} streams) — raise it in config (C)",
+                    would_use / tessera_core::budget::MACROBLOCKS_1080P30,
+                    ceiling / tessera_core::budget::MACROBLOCKS_1080P30
+                ),
+            );
         }
         Admission::RejectedMaxStreams { max } => {
             notify(wall.overlay, format!("not adding: max concurrent streams ({max}) — raise it in config (C)"));
@@ -2554,6 +2617,22 @@ mod tests {
         for other in ["w", "f", "n", "p", "?", "-", "+"] {
             assert_eq!(browser_tab_key(other), None, "{other}");
         }
+    }
+
+    #[test]
+    fn scale_seeds_from_the_monitor_then_the_fallback() {
+        use super::scale_for;
+        let mut s = crate::overlay::UiSettings { ui_scale: 1.25, ..Default::default() };
+        s.monitor_scale.insert("DP-2".into(), 2.0);
+
+        assert_eq!(scale_for(&s, Some("DP-2"), None), 2.0, "remembered monitor");
+        assert_eq!(scale_for(&s, Some("DP-0"), None), 1.25, "unknown monitor");
+        assert_eq!(scale_for(&s, None, None), 1.25, "no monitor name at all");
+
+        // --ui-scale is a run-only override and beats both, clamped.
+        assert_eq!(scale_for(&s, Some("DP-2"), Some(1.5)), 1.5);
+        assert_eq!(scale_for(&s, Some("DP-2"), Some(9.0)), 3.0, "clamped high");
+        assert_eq!(scale_for(&s, Some("DP-2"), Some(0.1)), 0.75, "clamped low");
     }
 }
 

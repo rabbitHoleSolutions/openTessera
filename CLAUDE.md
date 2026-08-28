@@ -79,6 +79,13 @@ window kind means a role, not a parallel window type — but check the role
 wherever an action assumes tiles (`add_tile_action` refuses on a browser
 window).
 
+**The decode budget is denominated in weighted macroblocks/sec, not
+megabits.** `MACROBLOCKS_1080P30` is 244,800; the default ceiling is 96 of
+those. The accessors say `load` for that raw unit and `*_equivalents()` for
+the 1080p30-count that the UI shows — the old name was `used_mbps`, and the
+status bar duly printed "23500800 mbps". Never put a raw load figure in
+front of a person.
+
 **Global settings live in the browser window; per-window settings live in
 the gear.** This is the rule that keeps the shared-`UiSettings` hazard below
 from recurring: a control drawn in the one window that exists once cannot
