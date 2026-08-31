@@ -51,12 +51,13 @@ pub fn draw(ctx: &egui::Context, settings: &mut UiSettings) {
             ui.label(egui::RichText::new("interface").strong());
             ui.add_space(4.0);
             ui.weak("scale is per window, set in each window's gear and remembered per monitor");
+            ui.weak("it is a target: a tile's controls shrink below it when the tile is too small to hold them");
             ui.add_space(6.0);
             egui::Grid::new("config-scale")
                 .num_columns(2)
                 .spacing(egui::vec2(16.0, 6.0))
                 .show(ui, |ui| {
-                    ui.label("fallback UI scale");
+                    ui.label("fallback target scale");
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::DragValue::new(&mut settings.ui_scale)

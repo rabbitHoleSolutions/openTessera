@@ -480,6 +480,42 @@ they are unit-tested without a display.
 
 ---
 
+## 15. Tile controls scale to the tile
+
+Status: **implemented** (2026-08-31)
+
+The chip is laid out around a transport row that wants roughly 476 points.
+On a twelve-tile wall at a UI scale of 3, a cell is about 285 points across —
+so the controls covered the video they were annotating, and spilled into the
+neighbouring tile.
+
+The chip and the hover queue strip now shrink to fit: `chip_scale` takes the
+smaller of "fits the cell's width" and "takes no more than 42% of its
+height", with a floor of 0.55 (below that the buttons stop being hittable,
+and an unusable control is worse than a crowded one). A cell with room to
+spare returns exactly 1.0, so nothing changes on the sizes that were already
+fine.
+
+Implemented as an egui *layer transform* (`Context::set_transform_layer`)
+rather than by multiplying twenty font sizes and paddings. egui transforms
+hit-testing along with the shapes — `layer_id_at` included, which is what
+the click router uses — so the buttons stay where they look. Verified both
+directions: a click on the scaled transport's skip button seeks the right
+tile, and a click in the space the chip no longer covers falls through to
+the video and pauses it.
+
+Two details the transform imposes: layout runs before it, so the chip's
+width budget is divided by the scale to end up filling the tile; and the
+transform is anchored at the chip's own corner, or it would drift toward the
+window origin.
+
+The setting is now "target UI scale" in both the gear panel and the config
+tab, since it is the size the UI aims for rather than the size it always is.
+
+**Effort**: S
+
+---
+
 ## 9. Credential and key management
 
 Status: **not started** — deliberately deferred, see below.

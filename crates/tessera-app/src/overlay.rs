@@ -107,11 +107,12 @@ pub struct PendingSeek {
 /// `Screen`; add-form state lives on `BrowserState`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UiSettings {
-    /// Fallback egui pixels-per-point for a window on a monitor with no
-    /// remembered scale of its own. Each window then carries its own
-    /// `Screen::ui_scale`.
+    /// Fallback *target* egui pixels-per-point for a window on a monitor
+    /// with no remembered scale of its own. Each window then carries its own
+    /// `Screen::ui_scale`, and per-tile controls scale down from there when
+    /// the tile is too small to hold them (see [`chip_scale`]).
     pub ui_scale: f32,
-    /// Remembered UI scale per monitor, keyed on the monitor's name
+    /// Remembered target UI scale per monitor, keyed on the monitor's name
     /// (`MonitorHandle::name()`, e.g. "DP-2"). A `WindowId` does not
     /// survive a restart and a monitor index shifts when displays are
     /// plugged or unplugged, so the name is the only durable handle.
@@ -293,6 +294,48 @@ pub struct BudgetUi {
 
 /// Thumb box the entries are fitted into (egui points).
 const THUMB_MAX: egui::Vec2 = egui::Vec2::new(84.0, 56.0);
+
+/// Logical width the tile chip is laid out around: the transport row wants
+/// roughly this much before its scrub bar stops being a scrub bar.
+const CHIP_DESIGN_W: f32 = 476.0;
+/// ...and its height, for the same reason on a short, wide cell.
+const CHIP_DESIGN_H: f32 = 62.0;
+/// A chip may take at most this fraction of a cell's height before it stops
+/// being an overlay and starts being the content.
+const CHIP_MAX_H_FRACTION: f32 = 0.42;
+/// Never scale a chip below this. Past it the buttons are too small to hit,
+/// and an unusable control is worse than one that crowds its tile.
+const CHIP_MIN_SCALE: f32 = 0.55;
+
+/// How much to shrink a tile's controls so they fit the tile.
+///
+/// A twelve-tile wall gives each cell a few hundred pixels, and the chip is
+/// laid out for a cell several times that — so at full size it covers the
+/// video it is annotating. The whole chip is drawn at its natural size and
+/// the *layer* is then scaled (`Context::set_transform_layer`), which scales
+/// hit-testing with it; scaling each font and padding by hand would leave a
+/// trail of literals to keep in step and get the click targets wrong.
+///
+/// Returns 1.0 whenever the cell is big enough, so nothing changes on the
+/// sizes that were already fine.
+fn chip_scale(cell_w_pts: f32, cell_h_pts: f32) -> f32 {
+    let by_width = cell_w_pts / CHIP_DESIGN_W;
+    let by_height = cell_h_pts * CHIP_MAX_H_FRACTION / CHIP_DESIGN_H;
+    by_width.min(by_height).clamp(CHIP_MIN_SCALE, 1.0)
+}
+
+/// Scales a layer about `anchor`, so the chip stays pinned to the corner of
+/// its tile instead of drifting toward the window origin. TSTransform is
+/// `scaling * p + translation`, so holding `anchor` fixed means a
+/// translation of `anchor * (1 - k)`.
+fn scale_layer_about(ctx: &egui::Context, layer: egui::LayerId, k: f32, anchor: egui::Pos2) {
+    let t = if (k - 1.0).abs() < 0.001 {
+        egui::emath::TSTransform::IDENTITY
+    } else {
+        egui::emath::TSTransform { scaling: k, translation: anchor.to_vec2() * (1.0 - k) }
+    };
+    ctx.set_transform_layer(layer, t);
+}
 /// Placeholder size for entries without a thumbnail.
 const THUMB_PLACEHOLDER: egui::Vec2 = egui::Vec2::new(74.0, 56.0);
 
@@ -508,13 +551,15 @@ pub fn draw(
         if !chip_for(tile.id) {
             continue;
         }
-        egui::Area::new(egui::Id::new(format!("tile-chip-{}", tile.id)))
+        let k = chip_scale(cell.w / ppp, cell.h / ppp);
+        let anchor = egui::pos2(
+            cell.x / ppp + 8.0,
+            // Stay clear of the status bar when the tile is in the top row.
+            (cell.y / ppp + 8.0).max(bar_bottom + 6.0),
+        );
+        let chip = egui::Area::new(egui::Id::new(format!("tile-chip-{}", tile.id)))
             .order(WALL_ORDER)
-            .fixed_pos(egui::pos2(
-                cell.x / ppp + 8.0,
-                // Stay clear of the status bar when the tile is in the top row.
-                (cell.y / ppp + 8.0).max(bar_bottom + 6.0),
-            ))
+            .fixed_pos(anchor)
             .show(ctx, |ui| {
                 egui::Frame::none()
                     .fill(egui::Color32::from_black_alpha(170))
@@ -526,7 +571,11 @@ pub fn draw(
                         // each side), so the scrub bar is a real scrub bar
                         // rather than the stub a fixed 460px gave on a big
                         // tile. Still bounded, so a tiny tile stays sane.
-                        let avail = (cell.w / ppp - 16.0).clamp(320.0, 900.0);
+                        //
+                        // Divided by the chip scale because layout happens
+                        // before the layer transform: at k = 0.6 the chip has
+                        // to lay out 1/0.6 as wide to end up filling the tile.
+                        let avail = ((cell.w / ppp - 16.0) / k).clamp(320.0, 900.0 / k);
                         ui.set_max_width(avail);
                         ui.set_min_width(avail.min(460.0));
                         ui.horizontal(|ui| {
@@ -857,6 +906,7 @@ pub fn draw(
                         }
                     });
             });
+        scale_layer_about(ctx, chip.response.layer_id, k, anchor);
     }
 
     // Tile drag-to-rearrange feedback: the source cell gets an outline; the
@@ -890,13 +940,18 @@ pub fn draw(
     }
     if let Some((tile_id, cell)) = hover {
         if !queue.is_empty() {
-            let strip_w = ((cell.w / ppp) - 12.0).max(140.0);
+            // Same treatment as the chip: laid out at full size, then the
+            // layer is scaled. Width is divided by k so it still spans the
+            // tile afterwards, and the top edge is placed using the *scaled*
+            // height, or the strip would float above the tile's bottom.
+            let k = chip_scale(cell.w / ppp, cell.h / ppp);
+            let strip_w = (((cell.w / ppp) - 12.0) / k).max(140.0);
             let strip_h = THUMB_MAX.y + 18.0;
             let pos = egui::pos2(
                 cell.x / ppp + 6.0,
-                (cell.y + cell.h) / ppp - strip_h - 6.0,
+                (cell.y + cell.h) / ppp - strip_h * k - 6.0,
             );
-            egui::Area::new(egui::Id::new(format!("tile-queue-{tile_id}")))
+            let strip = egui::Area::new(egui::Id::new(format!("tile-queue-{tile_id}")))
                 .order(WALL_ORDER)
                 .fixed_pos(pos)
                 .show(ctx, |ui| {
@@ -1017,6 +1072,7 @@ pub fn draw(
                             });
                         });
                 });
+            scale_layer_about(ctx, strip.response.layer_id, k, pos);
         }
     }
 }
@@ -1078,7 +1134,7 @@ pub fn draw_settings(
                     ui.set_width(360.0);
                     ui.heading("this window");
                     ui.add_space(8.0);
-                    ui.label("UI scale");
+                    ui.label("target UI scale");
                     // The slider edits a draft while the control is held;
                     // the overlay keeps rendering at the committed `scale`
                     // until release. Re-scaling mid-drag moves the slider
@@ -1106,6 +1162,8 @@ pub fn draw_settings(
                         *committed = true;
                     }
                     ui.weak("remembered for this monitor, so each display keeps its own");
+                    ui.weak("a target, not a fixed size: a tile's controls shrink below it");
+                    ui.weak("when the tile is too small to hold them at full size");
 
                     ui.add_space(12.0);
                     ui.separator();
@@ -1349,5 +1407,29 @@ fn fmt_time(t: f64) -> String {
         format!("{h}:{m:02}:{s:02}")
     } else {
         format!("{m:02}:{s:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{chip_scale, CHIP_DESIGN_W, CHIP_MIN_SCALE};
+
+    #[test]
+    fn chip_scales_down_only_when_the_cell_is_small() {
+        // A cell with room to spare is left exactly as it was — this is the
+        // one property that keeps the change invisible on big walls.
+        assert_eq!(chip_scale(1920.0, 1080.0), 1.0);
+        assert_eq!(chip_scale(CHIP_DESIGN_W, 400.0), 1.0);
+
+        // Narrow: scaled by width.
+        let half = chip_scale(CHIP_DESIGN_W * 0.7, 1000.0);
+        assert!((half - 0.7).abs() < 0.01, "got {half}");
+
+        // Short but wide: scaled by height instead.
+        assert!(chip_scale(1920.0, 80.0) < 1.0);
+
+        // Never past the floor, however tiny the cell.
+        assert_eq!(chip_scale(10.0, 10.0), CHIP_MIN_SCALE);
+        assert_eq!(chip_scale(0.0, 0.0), CHIP_MIN_SCALE);
     }
 }

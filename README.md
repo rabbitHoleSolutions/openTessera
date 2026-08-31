@@ -59,7 +59,10 @@ Phase 1 skeleton — playback foundation:
   and a portrait monitor cannot be right for all three, so each window keeps
   its own — remembered per monitor by name, so a window opened on a display
   comes back at the scale you last chose there. The config tab lists what is
-  remembered and can forget any of it.
+  remembered and can forget any of it. It is a *target*: a tile's own
+  controls shrink below it (to a floor) when the tile is too small to hold
+  them at full size, so a twelve-tile wall does not bury its video under
+  chrome.
 - One cursor-based wrapping playback queue shared by every window — a tile is
   a slot fed from it (name/date/size/shuffle ordering, pending-tail re-sorting
   that preserves the current item). A per-window/global choice is planned

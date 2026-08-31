@@ -114,6 +114,17 @@ rate. `seek_step` holds the timing rules on their own so they can be tested
 headlessly. Anything else expensive that ends up on a repeating key needs
 the same treatment.
 
+**Per-tile chrome scales by layer transform, not by scaling literals.**
+A cell on a twelve-tile wall is a few hundred points wide and the chip is
+laid out for far more, so the chip is drawn at its natural size and the
+*layer* is scaled with `ctx.set_transform_layer` (`chip_scale` /
+`scale_layer_about`). egui transforms hit-testing along with the shapes —
+including `layer_id_at`, which the click router depends on — so the buttons
+stay where they look. Two consequences to remember: layout happens *before*
+the transform, so any width budget must be divided by `k` to end up filling
+the tile; and a transform anchored anywhere but the chip's own corner makes
+it drift toward the window origin.
+
 **egui Sliders ignore the width you give them.** The rail is drawn at
 `ui.spacing().slider_width` (100 by default); `add_sized` allocates the room
 but the slider does not fill it. Set `spacing_mut().slider_width` instead.
