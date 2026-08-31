@@ -480,7 +480,7 @@ they are unit-tested without a display.
 
 ---
 
-## 15. Tile controls scale to the tile
+## 15. Controls scale to what contains them
 
 Status: **implemented** (2026-08-31)
 
@@ -508,6 +508,21 @@ Two details the transform imposes: layout runs before it, so the chip's
 width budget is divided by the scale to end up filling the tile; and the
 transform is anchored at the chip's own corner, or it would drift toward the
 window origin.
+
+Window-level chrome — the status bar, and the help and settings panels —
+scales to the window on the same principle (`window_scale`), but by a
+different mechanism. The layer transform cannot be used for anything that
+spans its window: `Area::content_ui` intersects both max_rect and clip_rect
+with the screen rect *before* the transform runs, so a bar laid out at
+`width / k` gets clipped back to the window and then shrunk, ending short of
+the right edge with "pause all" sliced in half. That is what the first
+attempt did. `scale_style` multiplies the Ui's fonts and spacing instead,
+which has no such limit; the cost is that painter-drawn icons carry explicit
+sizes and have to take the factor as an argument.
+
+This also fixed a standing bug: the settings panel is 400 points wide, and on
+a WM-tiled window at a target scale of 3 (297 points) it clipped off the
+edge, taking its close button with it. It now fits.
 
 The setting is now "target UI scale" in both the gear panel and the config
 tab, since it is the size the UI aims for rather than the size it always is.

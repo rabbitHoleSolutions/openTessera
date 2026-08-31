@@ -114,16 +114,26 @@ rate. `seek_step` holds the timing rules on their own so they can be tested
 headlessly. Anything else expensive that ends up on a repeating key needs
 the same treatment.
 
-**Per-tile chrome scales by layer transform, not by scaling literals.**
-A cell on a twelve-tile wall is a few hundred points wide and the chip is
-laid out for far more, so the chip is drawn at its natural size and the
-*layer* is scaled with `ctx.set_transform_layer` (`chip_scale` /
-`scale_layer_about`). egui transforms hit-testing along with the shapes —
-including `layer_id_at`, which the click router depends on — so the buttons
-stay where they look. Two consequences to remember: layout happens *before*
-the transform, so any width budget must be divided by `k` to end up filling
-the tile; and a transform anchored anywhere but the chip's own corner makes
-it drift toward the window origin.
+**Chrome scales to what contains it, by one of two mechanisms — and they
+are not interchangeable.** Tile chips scale to their cell (`chip_scale`);
+the status bar and the panels scale to their window (`window_scale`).
+
+*Per-tile* chrome uses a **layer transform** (`scale_layer_about` ->
+`ctx.set_transform_layer`): drawn at natural size, the whole layer is then
+scaled. egui transforms hit-testing along with the shapes — `layer_id_at`
+included, which the click router depends on — so buttons stay where they
+look. Layout happens *before* the transform, so a width budget must be
+divided by `k` to end up filling the tile, and the transform must be
+anchored at the chip's own corner or it drifts toward the window origin.
+
+*Window-level* chrome uses **style scaling** (`scale_style`), because the
+transform cannot do this job: `Area::content_ui` intersects its max_rect
+AND its clip_rect with `screen_rect` *before* any transform runs, so a
+full-width status bar laid out at `width / k` is clipped back to the window
+and then shrunk — it ends short of the right edge with its last button
+sliced in half (observed, not theorised). Style scaling has no such limit,
+but it misses explicit pixel sizes, so painter-drawn icons take the factor
+as an argument (see `gear_button`).
 
 **egui Sliders ignore the width you give them.** The rail is drawn at
 `ui.spacing().slider_width` (100 by default); `add_sized` allocates the room

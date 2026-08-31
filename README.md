@@ -62,7 +62,8 @@ Phase 1 skeleton — playback foundation:
   remembered and can forget any of it. It is a *target*: a tile's own
   controls shrink below it (to a floor) when the tile is too small to hold
   them at full size, so a twelve-tile wall does not bury its video under
-  chrome.
+  chrome. The status bar and the panels do the same against the window, so a
+  narrow WM-tiled window keeps all its controls on screen.
 - One cursor-based wrapping playback queue shared by every window — a tile is
   a slot fed from it (name/date/size/shuffle ordering, pending-tail re-sorting
   that preserves the current item). A per-window/global choice is planned

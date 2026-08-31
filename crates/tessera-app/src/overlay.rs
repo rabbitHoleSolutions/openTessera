@@ -307,6 +307,41 @@ const CHIP_MAX_H_FRACTION: f32 = 0.42;
 /// and an unusable control is worse than one that crowds its tile.
 const CHIP_MIN_SCALE: f32 = 0.55;
 
+/// Logical size the status bar is laid out around: its text and its six
+/// controls, before anything has to clip.
+const BAR_DESIGN_W: f32 = 720.0;
+const BAR_DESIGN_H: f32 = 26.0;
+/// The bar may take at most this fraction of a window's height. A single
+/// row is a big share of a squat, WM-tiled window.
+const BAR_MAX_H_FRACTION: f32 = 0.07;
+/// Floor for window-level chrome. Higher than the per-tile floor: the status
+/// bar and the panels are the things you read, not just poke at.
+const WINDOW_MIN_SCALE: f32 = 0.6;
+
+/// Logical widths the modal-ish panels are laid out around, margins included.
+const HELP_DESIGN_W: f32 = 560.0;
+const SETTINGS_DESIGN_W: f32 = 400.0;
+
+/// How much to shrink window-level chrome so it fits the window.
+///
+/// Same idea as [`chip_scale`] one level up: the status bar and the panels
+/// are sized for a window with room, and a narrow one (a WM tile, or any
+/// window at a target scale of 3) does not have it. A panel that overflows
+/// is worse than a small one — the settings panel used to clip off the left
+/// edge of a narrow window, taking its controls with it.
+///
+/// `max_h_fraction` of 0 means "don't judge by height", which is what the
+/// panels want: their height depends on their content.
+fn window_scale(w_pts: f32, h_pts: f32, design_w: f32, design_h: f32, max_h_fraction: f32) -> f32 {
+    let by_width = (w_pts - 16.0) / design_w;
+    let by_height = if max_h_fraction > 0.0 && design_h > 0.0 {
+        h_pts * max_h_fraction / design_h
+    } else {
+        f32::INFINITY
+    };
+    by_width.min(by_height).clamp(WINDOW_MIN_SCALE, 1.0)
+}
+
 /// How much to shrink a tile's controls so they fit the tile.
 ///
 /// A twelve-tile wall gives each cell a few hundred pixels, and the chip is
@@ -322,6 +357,35 @@ fn chip_scale(cell_w_pts: f32, cell_h_pts: f32) -> f32 {
     let by_width = cell_w_pts / CHIP_DESIGN_W;
     let by_height = cell_h_pts * CHIP_MAX_H_FRACTION / CHIP_DESIGN_H;
     by_width.min(by_height).clamp(CHIP_MIN_SCALE, 1.0)
+}
+
+/// Scales a Ui's text and spacing in place, for chrome that must still span
+/// its container.
+///
+/// The layer transform used for tile chips cannot do this job: an `Area`'s
+/// content is bounded and clipped to the screen rect *before* the transform
+/// runs, so a full-width status bar laid out at `width / k` is clipped back
+/// to the window and then shrunk — ending short of the right edge with its
+/// last button sliced in half. Scaling the style has no such limit, at the
+/// cost of having to scale explicit pixel sizes at their call sites too.
+fn scale_style(ui: &mut egui::Ui, k: f32) {
+    if (k - 1.0).abs() < 0.01 {
+        return;
+    }
+    let style = ui.style_mut();
+    for (_, font) in style.text_styles.iter_mut() {
+        // A floor, or a very narrow window renders unreadable slivers.
+        font.size = (font.size * k).max(7.0);
+    }
+    let sp = &mut style.spacing;
+    sp.item_spacing *= k;
+    sp.button_padding *= k;
+    sp.interact_size *= k;
+    sp.indent *= k;
+    sp.icon_width *= k;
+    sp.icon_width_inner *= k;
+    sp.icon_spacing *= k;
+    sp.slider_width *= k;
 }
 
 /// Scales a layer about `anchor`, so the chip stays pinned to the corner of
@@ -370,6 +434,8 @@ pub fn draw(
     // every pass whether we paint one or not). As a panel, every click on a
     // status-bar button ALSO fell through to the video wall and
     // paused/resumed the tile behind the bar.
+    let win = ctx.screen_rect();
+    let bar_k = window_scale(win.width(), win.height(), BAR_DESIGN_W, BAR_DESIGN_H, BAR_MAX_H_FRACTION);
     let status_bar = egui::Area::new(egui::Id::new("tessera_status"))
         .order(WALL_ORDER)
         .anchor(egui::Align2::LEFT_TOP, egui::vec2(0.0, 0.0))
@@ -378,7 +444,11 @@ pub fn draw(
                 .fill(ui.style().visuals.panel_fill)
                 .inner_margin(egui::Margin::symmetric(8.0, 4.0))
                 .show(ui, |ui| {
-                    ui.set_width((ctx.screen_rect().width() - 16.0).max(0.0));
+                    // Style-scaled rather than layer-scaled: the bar spans the
+                    // window, and an Area's content is clipped to the screen
+                    // before any layer transform runs. See `scale_style`.
+                    scale_style(ui, bar_k);
+                    ui.set_width((win.width() - 16.0).max(0.0));
                     // Controls are laid out FIRST (right-aligned), so they
                     // always get their space; the status text takes what is
                     // left and clips. The other order pushed the buttons off
@@ -387,7 +457,7 @@ pub fn draw(
                     ui.horizontal(|ui| {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             // Settings toggle: painter-drawn gear — no font dependency.
-                            if gear_button(ui).clicked() {
+                            if gear_button(ui, bar_k).clicked() {
                                 actions.push(OverlayAction::ToggleSettings);
                             }
                             // Windowed-mode toggle: painter-drawn "window" icon (frame
@@ -395,7 +465,7 @@ pub fn draw(
                             {
                                 let fullhint = window_fullscreen;
                                 let (rect, resp) = ui.allocate_exact_size(
-                                    egui::vec2(18.0, 16.0),
+                                    egui::vec2(18.0, 16.0) * bar_k,
                                     egui::Sense::click(),
                                 );
                                 let p = ui.painter_at(rect);
@@ -422,7 +492,7 @@ pub fn draw(
                             // list lines in it (no font dependency).
                             {
                                 let (rect, resp) = ui
-                                    .allocate_exact_size(egui::vec2(18.0, 16.0), egui::Sense::click());
+                                    .allocate_exact_size(egui::vec2(18.0, 16.0) * bar_k, egui::Sense::click());
                                 let p = ui.painter_at(rect);
                                 let col = if resp.hovered() {
                                     egui::Color32::WHITE
@@ -448,7 +518,7 @@ pub fn draw(
                             // (same no-font-dependency rule as the gear).
                             {
                                 let (rect, resp) =
-                                    ui.allocate_exact_size(egui::vec2(18.0, 16.0), egui::Sense::click());
+                                    ui.allocate_exact_size(egui::vec2(18.0, 16.0) * bar_k, egui::Sense::click());
                                 let p = ui.painter_at(rect);
                                 let col = if resp.hovered() {
                                     egui::Color32::WHITE
@@ -1081,8 +1151,8 @@ pub fn draw(
 /// have no gear, and a missing glyph renders as a silent empty box. Shared
 /// by the wall's status bar and the browser's tab bar so "gear = this
 /// window's own settings" means the same thing in both.
-pub fn gear_button(ui: &mut egui::Ui) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 16.0), egui::Sense::click());
+pub fn gear_button(ui: &mut egui::Ui, k: f32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 16.0) * k, egui::Sense::click());
     let p = ui.painter_at(rect);
     let col = if resp.hovered() {
         egui::Color32::WHITE
@@ -1090,13 +1160,13 @@ pub fn gear_button(ui: &mut egui::Ui) -> egui::Response {
         egui::Color32::from_gray(180)
     };
     let c = rect.center();
-    let r = 5.0;
-    let st = egui::Stroke::new(1.4, col);
+    let r = 5.0 * k;
+    let st = egui::Stroke::new(1.4 * k, col);
     p.circle_stroke(c, r, st);
     for i in 0..8 {
         let a = i as f32 * std::f32::consts::FRAC_PI_4;
         let dir = egui::vec2(a.cos(), a.sin());
-        p.line_segment([c + dir * (r + 1.0), c + dir * (r + 3.5)], st);
+        p.line_segment([c + dir * (r + 1.0 * k), c + dir * (r + 3.5 * k)], st);
     }
     resp.on_hover_text("this window's settings")
 }
@@ -1123,6 +1193,8 @@ pub fn draw_settings(
     open: &mut bool,
     actions: &mut Vec<OverlayAction>,
 ) {
+    let win = ctx.screen_rect();
+    let k = window_scale(win.width(), win.height(), SETTINGS_DESIGN_W, 0.0, 0.0);
     egui::Area::new(egui::Id::new("tessera-settings"))
         .order(PANEL_ORDER)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -1131,7 +1203,8 @@ pub fn draw_settings(
                 .fill(egui::Color32::from_black_alpha(235))
                 .inner_margin(egui::Margin::symmetric(20.0, 14.0))
                 .show(ui, |ui| {
-                    ui.set_width(360.0);
+                    scale_style(ui, k);
+                    ui.set_width(360.0 * k);
                     ui.heading("this window");
                     ui.add_space(8.0);
                     ui.label("target UI scale");
@@ -1267,6 +1340,8 @@ fn draw_empty_wall(ctx: &egui::Context, why: EmptyWall, actions: &mut Vec<Overla
 /// Keyboard/mouse help panel, centered. Drawn regardless of the overlay's
 /// auto-hide state (it stays until dismissed).
 pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
+    let win = ctx.screen_rect();
+    let k = window_scale(win.width(), win.height(), HELP_DESIGN_W, 0.0, 0.0);
     egui::Area::new(egui::Id::new("tessera-help"))
         .order(PANEL_ORDER)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
@@ -1275,7 +1350,8 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                 .fill(egui::Color32::from_black_alpha(235))
                 .inner_margin(egui::Margin::symmetric(20.0, 14.0))
                 .show(ui, |ui| {
-                    ui.set_width(520.0);
+                    scale_style(ui, k);
+                    ui.set_width(520.0 * k);
                     ui.heading("Tessera — keyboard & mouse");
                     ui.add_space(6.0);
                     egui::Grid::new("help-keys")
@@ -1431,5 +1507,48 @@ mod tests {
         // Never past the floor, however tiny the cell.
         assert_eq!(chip_scale(10.0, 10.0), CHIP_MIN_SCALE);
         assert_eq!(chip_scale(0.0, 0.0), CHIP_MIN_SCALE);
+    }
+
+    #[test]
+    fn window_chrome_scales_down_only_when_the_window_is_small() {
+        use super::{
+            window_scale, BAR_DESIGN_H, BAR_DESIGN_W, BAR_MAX_H_FRACTION, SETTINGS_DESIGN_W,
+            WINDOW_MIN_SCALE,
+        };
+
+        // Roomy window: untouched.
+        assert_eq!(
+            window_scale(1700.0, 900.0, BAR_DESIGN_W, BAR_DESIGN_H, BAR_MAX_H_FRACTION),
+            1.0
+        );
+
+        // Narrow: the status bar shrinks by width.
+        let narrow = window_scale(550.0, 900.0, BAR_DESIGN_W, BAR_DESIGN_H, BAR_MAX_H_FRACTION);
+        assert!(narrow < 1.0 && narrow > WINDOW_MIN_SCALE, "got {narrow}");
+
+        // Narrower than the floor allows: the bar stops shrinking and its
+        // text clips instead, which is already how it handles a tight window
+        // (the controls are laid out first, so they survive).
+        assert_eq!(
+            window_scale(400.0, 900.0, BAR_DESIGN_W, BAR_DESIGN_H, BAR_MAX_H_FRACTION),
+            WINDOW_MIN_SCALE
+        );
+
+        // Squat: one row is too big a share of the height even when wide.
+        assert!(window_scale(1700.0, 200.0, BAR_DESIGN_W, BAR_DESIGN_H, BAR_MAX_H_FRACTION) < 1.0);
+
+        // Panels pass max_h_fraction 0, so height never shrinks them — their
+        // height is content, not a fixed row.
+        assert_eq!(window_scale(1700.0, 120.0, SETTINGS_DESIGN_W, 0.0, 0.0), 1.0);
+
+        // The panel that used to clip off a narrow window's edge now fits.
+        let tight = window_scale(340.0, 800.0, SETTINGS_DESIGN_W, 0.0, 0.0);
+        assert!(tight < 1.0, "got {tight}");
+        assert!(340.0 - 16.0 >= SETTINGS_DESIGN_W * tight, "still overflows");
+
+        assert_eq!(
+            window_scale(10.0, 10.0, BAR_DESIGN_W, BAR_DESIGN_H, BAR_MAX_H_FRACTION),
+            WINDOW_MIN_SCALE
+        );
     }
 }

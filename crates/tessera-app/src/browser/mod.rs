@@ -181,7 +181,7 @@ pub fn draw(
                 // thing: this window's own settings. Without it a browser
                 // window would have no way to set its own UI scale — and
                 // it is the text-heavy window that most wants one.
-                if crate::overlay::gear_button(ui).clicked() {
+                if crate::overlay::gear_button(ui, 1.0).clicked() {
                     actions.push(OverlayAction::ToggleSettings);
                 }
                 if state.tab == Tab::Library
