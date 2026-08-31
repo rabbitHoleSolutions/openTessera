@@ -114,26 +114,33 @@ rate. `seek_step` holds the timing rules on their own so they can be tested
 headlessly. Anything else expensive that ends up on a repeating key needs
 the same treatment.
 
-**Chrome scales to what contains it, by one of two mechanisms — and they
-are not interchangeable.** Tile chips scale to their cell (`chip_scale`);
-the status bar and the panels scale to their window (`window_scale`).
+**Chrome scales to what contains it — always by `scale_style`, never by a
+layer transform.** Tile chips scale to their cell (`chip_scale`); the status
+bar and the panels scale to their window (`window_scale`). Both then call
+`scale_style`, which multiplies the Ui's fonts and spacing.
 
-*Per-tile* chrome uses a **layer transform** (`scale_layer_about` ->
-`ctx.set_transform_layer`): drawn at natural size, the whole layer is then
-scaled. egui transforms hit-testing along with the shapes — `layer_id_at`
-included, which the click router depends on — so buttons stay where they
-look. Layout happens *before* the transform, so a width budget must be
-divided by `k` to end up filling the tile, and the transform must be
-anchored at the chip's own corner or it drifts toward the window origin.
+egui's `set_transform_layer` looks like the better tool — it scales
+hit-testing for free — and it is a trap for anything that can reach the edge
+of its window. `Area::content_ui` intersects both its max_rect and its
+clip_rect with `screen_rect` *before* the transform runs, and `Layers::drain`
+then transforms the clip rect along with the shapes. A full-width status bar
+laid out at `width / k` is clipped back to the window and *then* shrunk; a
+chip on the rightmost column loses everything past the window edge. Both were
+built, shipped and had to be undone. Style scaling has no such limit; the
+cost is that explicit pixel sizes (painter-drawn icons, `min_size`,
+`add_sized`) are not style and take the factor at their call sites.
 
-*Window-level* chrome uses **style scaling** (`scale_style`), because the
-transform cannot do this job: `Area::content_ui` intersects its max_rect
-AND its clip_rect with `screen_rect` *before* any transform runs, so a
-full-width status bar laid out at `width / k` is clipped back to the window
-and then shrunk — it ends short of the right edge with its last button
-sliced in half (observed, not theorised). Style scaling has no such limit,
-but it misses explicit pixel sizes, so painter-drawn icons take the factor
-as an argument (see `gear_button`).
+**A chip never lays out wider than its cell, and the transport row's fixed
+width must count *both* ends.** `chip_width` bounds the first; `ROW_FIXED`
+the second. `ROW_FIXED` used to be `TRAILING` and counted only the controls
+after the scrub bar, so the row was always ~110pt wider than the budget it
+was handed — invisible on a big tile, and on the rightmost column it ran off
+the window and lost the trash button.
+
+**Scale floors belong in physical pixels, not in the scale factor.** At a
+target scale of 3 a `k` of 0.3 still leaves a 14px button; a flat 0.55 floor
+stopped the chip shrinking long before it fit its cell. See
+`CHIP_MIN_CONTROL_PX`.
 
 **egui Sliders ignore the width you give them.** The rail is drawn at
 `ui.spacing().slider_width` (100 by default); `add_sized` allocates the room

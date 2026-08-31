@@ -496,18 +496,32 @@ and an unusable control is worse than a crowded one). A cell with room to
 spare returns exactly 1.0, so nothing changes on the sizes that were already
 fine.
 
-Implemented as an egui *layer transform* (`Context::set_transform_layer`)
-rather than by multiplying twenty font sizes and paddings. egui transforms
-hit-testing along with the shapes — `layer_id_at` included, which is what
-the click router uses — so the buttons stay where they look. Verified both
-directions: a click on the scaled transport's skip button seeks the right
-tile, and a click in the space the chip no longer covers falls through to
-the video and pauses it.
+Everything scales through `scale_style`, which multiplies the Ui's fonts and
+spacing. The first two attempts used egui's layer transform
+(`Context::set_transform_layer`) instead, which is tempting because it scales
+hit-testing for free — and wrong for anything that can reach the edge of its
+window. `Area::content_ui` intersects both max_rect and clip_rect with
+`screen_rect` *before* the transform runs, and `Layers::drain` then transforms
+the clip rect along with the shapes. The status bar, laid out at `width / k`,
+was clipped back to the window and then shrunk, ending short of the right edge
+with "pause all" sliced in half. The chip hit the same wall on the rightmost
+column. Style scaling has no such limit; the cost is that explicit pixel sizes
+take the factor at their call sites.
 
-Two details the transform imposes: layout runs before it, so the chip's
-width budget is divided by the scale to end up filling the tile; and the
-transform is anchored at the chip's own corner, or it would drift toward the
-window origin.
+Two further defects surfaced from the same case:
+
+- The transport row's fixed width (`ROW_FIXED`, was `TRAILING`) counted only
+  the controls *after* the scrub bar, not the four seek buttons before it. The
+  row had therefore always been about 110pt wider than the `avail` it was
+  handed — harmless on a big tile, but on the rightmost column the excess ran
+  past the window edge and the trash button was sliced off.
+- The scale floor was a flat 0.55, which at a target scale of 3 stopped the
+  chip shrinking long before it fit its cell. Floors belong in physical
+  pixels: `CHIP_MIN_CONTROL_PX` is 14px, so a high target scale can shrink
+  much further and still leave a hittable button.
+
+`chip_width` now bounds the chip to its cell outright, so the worst case is
+clipping at the tile's own edge rather than the window's.
 
 Window-level chrome — the status bar, and the help and settings panels —
 scales to the window on the same principle (`window_scale`), but by a
