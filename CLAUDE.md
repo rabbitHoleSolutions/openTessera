@@ -104,6 +104,16 @@ browser) can swallow the key release, after which X repeats forever. That
 server-side stuck-key state survives app restarts — if hotkeys start firing
 on their own during testing, `xdotool keyup <key>` clears it.
 
+**Auto-repeating keys must coalesce whatever they drive.** X repeats at
+roughly 25/sec, so a held arrow turned into 25 mpv seeks a second — each one
+a demuxer flush, and a fresh HTTP range request for remote sources. Seeks
+accumulate in `OverlayState::pending_seek` and go out when the key settles
+(200ms), on release, or every 600ms of holding, whichever comes first; the
+transport draws `time_pos + pending_seek` so the readout still moves at key
+rate. `seek_step` holds the timing rules on their own so they can be tested
+headlessly. Anything else expensive that ends up on a repeating key needs
+the same treatment.
+
 **egui Sliders ignore the width you give them.** The rail is drawn at
 `ui.spacing().slider_width` (100 by default); `add_sized` allocates the room
 but the slider does not fill it. Set `spacing_mut().slider_width` instead.

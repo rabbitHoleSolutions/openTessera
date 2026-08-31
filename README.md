@@ -198,6 +198,9 @@ sources / config tab · the gear opens the window's own settings · `Esc` exit
 fullscreen if zoomed, otherwise quit · `Tab`
 pin/unpin the overlay UI (auto-hides after 5s idle) · `Space` pause/resume
 all tiles on the focused screen · `F` fullscreen the tile under the cursor ·
+`Left`/`Right` seek -/+10s on the tile under the cursor — hold to scan, and
+the jump accumulates and is applied in batches rather than stuttering
+through one seek per key repeat ·
 click a tile to pause/resume it · hover a tile to show its queue strip
 (click a thumbnail to play it there) · with `--audio`: right-click a tile
 to unmute/mute it

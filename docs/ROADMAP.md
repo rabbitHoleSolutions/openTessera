@@ -445,6 +445,41 @@ raw figure was converted with it.
 
 ---
 
+## 14. Held-arrow seeking coalesces
+
+Status: **implemented** (2026-08-31)
+
+Holding an arrow key stuttered: X auto-repeats at roughly 25/sec and every
+repeat became its own `seek` command, so the video ground through dozens of
+demuxer flushes a second (and, for Plex/Jellyfin sources, dozens of fresh
+HTTP range requests). Other players queue up the distance and jump in
+sensible intervals.
+
+Deltas now accumulate in `OverlayState::pending_seek` and go out as one seek
+when the key settles (200ms of quiet), on key release, or every 600ms of
+continuous holding — whichever comes first. Measured: a 2.5s hold went from
+roughly 60 seeks to 4.
+
+Two details make it feel immediate rather than laggy:
+
+- The transport renders `time_pos + pending_seek`, so the clock and scrub
+  handle move at key-repeat rate even though the video moves in batches. On
+  flush the tile's `last_time_pos` is set optimistically to the destination,
+  so the readout does not snap backwards while the seek lands.
+- A long-hold tick that arrives before another key repeat would otherwise
+  issue a zero-length seek — a real flush for no movement. `seek_step`
+  returns `Hold` for that case instead.
+
+Moving the cursor to another tile mid-hold flushes what is pending to the
+tile it was aimed at before the new one starts accumulating.
+
+The timing rules live in `seek_step`, separate from the tile plumbing, so
+they are unit-tested without a display.
+
+**Effort**: S
+
+---
+
 ## 9. Credential and key management
 
 Status: **not started** — deliberately deferred, see below.

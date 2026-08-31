@@ -298,6 +298,10 @@ impl Screen {
             .iter()
             .map(|t| TileUiInfo {
                 id: t.id,
+                pending_seek: match overlay.pending_seek {
+                    Some(ps) if ps.tile_id == t.id => ps.delta,
+                    _ => 0.0,
+                },
                 title: t.item.title.clone(),
                 paused: t.is_paused(),
                 muted: t.is_muted(),

@@ -74,6 +74,27 @@ pub struct OverlayState {
     /// Settings panel open, on the window whose gear was clicked. See
     /// [`OverlayState::help_open`] for why this is window-scoped.
     pub settings_open: Option<winit::window::WindowId>,
+    /// A seek being accumulated while an arrow key auto-repeats.
+    pub pending_seek: Option<PendingSeek>,
+}
+
+/// A seek the user is still spelling out. Holding an arrow fires roughly 25
+/// key repeats a second, and turning each into its own mpv seek stutters the
+/// video through dozens of demuxer flushes (and, for remote sources, dozens
+/// of fresh HTTP range requests). The deltas add up here and go out as one
+/// seek when the key settles or the hold runs long — the same coalescing
+/// every other player does.
+///
+/// Not window-scoped despite being shared state: seeking targets the tile
+/// under the cursor, and there is one cursor. A second window's arrow keys
+/// simply take over the accumulator, which is what changing target means.
+#[derive(Debug, Clone, Copy)]
+pub struct PendingSeek {
+    pub tile_id: usize,
+    /// Seconds still to apply, relative to the tile's current position.
+    pub delta: f64,
+    pub last_input: std::time::Instant,
+    pub last_flush: std::time::Instant,
 }
 
 /// App-wide runtime settings (config + sources tabs of the browser window,
@@ -229,6 +250,11 @@ pub struct TileDrag {
 /// Screen while egui runs).
 pub struct TileUiInfo {
     pub id: usize,
+    /// Seconds of accumulated, not-yet-issued seek. The transport renders
+    /// the position the user is heading for rather than the one mpv is
+    /// still on, so a held arrow key reads as continuous motion even though
+    /// the actual seeks are several hundred ms apart.
+    pub pending_seek: f64,
     pub title: String,
     pub paused: bool,
     pub muted: bool,
@@ -665,8 +691,19 @@ pub fn draw(
                             // made seeking a two-hour film hopeless.
                             const TRAILING: f32 = 330.0;
                             let scrub_w = (avail - TRAILING).max(110.0);
+                            // Where the user is heading: mpv's position plus
+                            // whatever seek is still accumulating. Duration is
+                            // -1 until mpv has read the file, so the clamp has
+                            // to be guarded — clamp(0.0, -1.0) panics.
+                            let target = if tile.time_pos < 0.0 {
+                                tile.time_pos // unknown; fmt_time renders "--:--"
+                            } else if tile.duration > 0.0 {
+                                (tile.time_pos + tile.pending_seek).clamp(0.0, tile.duration)
+                            } else {
+                                (tile.time_pos + tile.pending_seek).max(0.0)
+                            };
                             if tile.duration > 0.0 {
-                                let mut pos = tile.time_pos.clamp(0.0, tile.duration);
+                                let mut pos = target;
                                 // egui draws a Slider's rail at
                                 // spacing.slider_width (100 by default) and
                                 // ignores whatever room add_sized gives it —
@@ -677,7 +714,7 @@ pub fn draw(
                                         .show_value(false),
                                 );
                                 if (sresp.clicked() || sresp.drag_stopped())
-                                    && (pos - tile.time_pos).abs() > 0.5
+                                    && (pos - target).abs() > 0.5
                                 {
                                     actions.push(OverlayAction::SeekTo { tile_id: tile.id, to: pos });
                                 }
@@ -687,7 +724,7 @@ pub fn draw(
                             ui.label(
                                 egui::RichText::new(format!(
                                     "{} / {}",
-                                    fmt_time(tile.time_pos),
+                                    fmt_time(target),
                                     fmt_time(tile.duration)
                                 ))
                                 .small()
@@ -1193,7 +1230,7 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                                 ("Space", "pause/resume all tiles on this screen"),
                                 ("F", "fullscreen the tile under the cursor"),
                                 ("W", "toggle THIS window: fullscreen wall <-> window (on whichever monitor it is currently on — drag it, then W)"),
-                                ("Left / Right", "seek -/+10s on the tile under the cursor"),
+                                ("Left / Right", "seek -/+10s on the tile under the cursor; hold to scan (the jump adds up and is applied in batches, so it doesn't stutter)"),
                                 ("Up / Down", "volume -/+5 on unmuted tiles of this screen"),
                                 ("N / Shift+P", "next / previous queue item on each tile"),
                                 ("P", "pin the tile under the cursor: it takes most of the screen, the rest share a bottom strip"),
