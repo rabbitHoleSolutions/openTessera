@@ -3,6 +3,7 @@ mod browser;
 mod catalog;
 mod compositor;
 mod overlay;
+mod platform;
 mod thumbs;
 mod png_util;
 mod screen;
@@ -20,8 +21,7 @@ use tessera_core::{Admission, DecodeBudget, PlaybackQueue, QueueOrder};
 use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
-use winit::platform::x11::WindowBuilderExtX11;
-use winit::window::{Fullscreen, WindowBuilder};
+use winit::window::WindowBuilder;
 
 use compositor::set_gl_loader;
 use overlay::{OverlayAction, OverlayState};
@@ -38,11 +38,6 @@ enum ScreenSel {
     /// toggles its own fullscreen with W.
     Windowed(u32, u32),
 }
-
-/// WM_CLASS, and the name the desktop entry matches with StartupWMClass.
-/// Set explicitly rather than left to default from the binary name, so
-/// renaming the binary can't silently break the dock association.
-const APP_ID: &str = "tessera";
 
 /// The window/taskbar icon, baked into the binary so a window looks right
 /// even when the app is run straight out of target/release with nothing
@@ -81,6 +76,12 @@ const DRAG_SLOP_PX: f32 = 8.0;
 /// without this a single notch would step the volume twice.
 const WHEEL_NOTCH_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Smooth-scroll travel (logical px) that counts as one wheel notch.
+/// Trackpads and the Magic Mouse (macOS, Wayland) report a gesture as a
+/// stream of small pixel deltas — dozens per swipe — and stepping the volume
+/// on each one slammed it from 0 to the cap. X11 never sends these.
+const WHEEL_PIXELS_PER_NOTCH: f64 = 40.0;
+
 struct Args {
     files: Vec<PathBuf>,
     tiles: usize,
@@ -108,7 +109,7 @@ fn parse_args() -> Result<Args, String> {
         tiles: 12,
         populate: None,
         screens: ScreenSel::Windowed(DEFAULT_WINDOW.0, DEFAULT_WINDOW.1),
-        hwdec: "nvdec-copy".into(),
+        hwdec: platform::DEFAULT_HWDEC.into(),
         audio: false,
         audio_device: None,
         ui_scale: None,
@@ -162,6 +163,9 @@ fn parse_args() -> Result<Args, String> {
                 print_usage();
                 std::process::exit(0);
             }
+            // Launch Services' process serial number, which older macOS
+            // passes to apps opened from Finder. Not ours to parse.
+            s if s.starts_with("-psn_") => {}
             s if s.starts_with('-') => return Err(format!("unknown flag {s}")),
             s => args.files.push(PathBuf::from(s)),
         }
@@ -202,10 +206,7 @@ OPTIONS:
                      (default: system default; check `pactl list sinks short`)
   --ui-scale F       Overlay UI scale, 0.75-3.0 (default 1.0; also in settings)
   --cache-mb N       Demuxer cache per stream in MiB (default 512; also in settings)
-  --hwdec MODE       mpv hardware decode mode (default nvdec-copy — hardware
-                     decode without the CUDA/GL zero-copy interop, which
-                     segfaults in mpv 0.34 when many decoders re-initialize;
-                     use auto-safe for zero-copy at your own risk)
+  --hwdec MODE       {hwdec_help}
   --max-streams N    Budget: max concurrent streams (default 128; also in settings)
   --ceiling N        Budget: 1080p30-equivalent decode ceiling (default 96)
   --status-interval S  Seconds between status prints (default 5)
@@ -238,7 +239,8 @@ CONTROLS:
   S                  Toggle the settings panel (gear) on the focused screen
   L / Q              Browser window on the library / queue tab (opens it if
                      there isn't one yet)
-  Esc                Exit fullscreen if zoomed; otherwise quit"
+  Esc                Exit fullscreen if zoomed; otherwise quit",
+        hwdec_help = platform::HWDEC_HELP
     );
 }
 
@@ -264,38 +266,9 @@ fn install_fatal_handler() {
     }
 }
 
-/// Raises the soft fd limit to the hard limit. Every tile's mpv holds
-/// dozens of fds (stream socket, demuxer cache, event pipes, and — with
-/// audio — a pipewire context), so a full wall easily exhausts the GNOME
-/// session's default 1024 soft limit. That doesn't just fail loads: GL
-/// fence creation needs an fd too, and exhausting them wedged the NVIDIA
-/// DRM driver hard enough to take the whole desktop down (2026-08-26).
-fn raise_fd_limit() {
-    unsafe {
-        let mut rl: libc::rlimit = std::mem::zeroed();
-        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) != 0 || rl.rlim_cur >= rl.rlim_max {
-            return;
-        }
-        let (old, target) = (rl.rlim_cur, rl.rlim_max);
-        rl.rlim_cur = target;
-        if libc::setrlimit(libc::RLIMIT_NOFILE, &rl) == 0 {
-            let show = |v: libc::rlim_t| {
-                if v == libc::RLIM_INFINITY { "unlimited".to_string() } else { v.to_string() }
-            };
-            println!("fd limit: raised soft limit {} -> {}", show(old), show(target));
-        }
-    }
-}
-
-/// Current fd usage (open descriptors in /proc/self/fd) for the status
-/// line — fd exhaustion is invisible otherwise.
-fn fd_count() -> usize {
-    std::fs::read_dir("/proc/self/fd").map(|d| d.count()).unwrap_or(0)
-}
-
 fn main() {
     install_fatal_handler();
-    raise_fd_limit();
+    platform::raise_fd_limit();
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
@@ -416,6 +389,9 @@ fn main() {
     };
 
     let event_loop = EventLoop::new().unwrap();
+    // Between creating the event loop and running it: the file that
+    // launched us from Finder is delivered as soon as it runs.
+    platform::install_open_handler();
     let monitors: Vec<_> = event_loop.available_monitors().collect();
     for (i, m) in monitors.iter().enumerate() {
         let size = m.size();
@@ -529,6 +505,9 @@ fn main() {
         };
         screen.intended_monitor = Some(monitors[monitor_index].clone());
         screen.should_fullscreen = !matches!(args.screens, ScreenSel::Windowed(_, _));
+        if screen.should_fullscreen {
+            platform::finish_fullscreen_window(&screen.window, &monitors[monitor_index]);
+        }
         // Each window carries its own scale from here on; the remembered
         // per-monitor value (or the fallback) is only the starting point.
         screen.ui_scale = seed_scale(&settings, monitors.get(monitor_index), args.ui_scale);
@@ -556,83 +535,103 @@ fn main() {
     // request ignored) until they receive focus — the settle re-asserts
     // fullscreen on the intended monitors, which also grabs focus.
     let mut wm_settle_at: Option<(Instant, u32)> =
-        Some((Instant::now() + Duration::from_millis(1500), 5));
+        platform::WM_SETTLE.then(|| (Instant::now() + Duration::from_millis(1500), 5));
     let mut overlay = OverlayState { pinned: args.overlay, ..Default::default() };
     let mut last_input = Instant::now();
+    // Unconsumed smooth-scroll travel (see WHEEL_PIXELS_PER_NOTCH).
+    let mut wheel_accum = 0.0f64;
+    // A ctrl-click being treated as a right-click (macOS), so its release
+    // is too even if ctrl comes up first.
+    let mut secondary_left = false;
+    // Set once the wall has been torn down, by whichever path got there
+    // first — Esc, closing the last window, or the OS quitting us.
+    let mut shut_down = false;
+    // Files opened from the OS while running, being listed off-thread.
+    let (opened_tx, opened_rx) = std::sync::mpsc::channel::<Vec<tessera_core::MediaItem>>();
 
-    for screen_idx in 0..screens.len() {
-        // Startup population. --max is the video-wall mode: fill every
-        // screen to the --tiles cap. A plain window starts at
-        // DEFAULT_WINDOW_TILES instead — a wall of 12 streams is not what
-        // you want from a bare `tessera`. --populate overrides either.
-        let default_populate = match args.screens {
-            ScreenSel::Windowed(_, _) => DEFAULT_WINDOW_TILES.min(args.tiles),
-            _ => args.tiles,
-        };
-        let populate_limit = args.populate.map_or(default_populate, |p| p.min(args.tiles));
-        let target_tiles = queue.len().clamp(1, populate_limit);
-        let monitor_index = screens[screen_idx].monitor_index;
-        let mut created = 0;
-        while created < target_tiles {
-            let item = match queue.current() {
-                Some(m) => m.clone(),
-                None => break,
-            };
-            match request_admission(&mut screens, &mut budget, next_tile_id, &tessera_core::StreamSpec::placeholder()) {
-                Admission::Admitted | Admission::AdmittedEvicting { .. } => {}
-                Admission::RejectedBudget { would_use, ceiling } => {
-                    println!(
-                        "screen {monitor_index}: decode budget full, stopping at {created} tiles ({:.1}/{:.0} streams)",
-                        would_use / tessera_core::budget::MACROBLOCKS_1080P30,
-                        ceiling / tessera_core::budget::MACROBLOCKS_1080P30
-                    );
-                    break;
-                }
-                Admission::RejectedMaxStreams { max } => {
-                    println!("screen {monitor_index}: max streams ({max}) reached, stopping at {created} tiles");
-                    break;
-                }
-            }
-            screens[screen_idx].context.make_current(&screens[screen_idx].surface).ok();
-            match Tile::new(&mpv_lib, next_tile_id, &item, &tile_opts, None) {
-                Ok(tile) => {
-                    screens[screen_idx].add_tile(tile);
-                    next_tile_id += 1;
-                    created += 1;
-                    queue.advance();
-                }
-                Err(e) => {
-                    budget.release(next_tile_id);
-                    eprintln!("screen {monitor_index}: tile creation failed: {e}");
-                    break;
-                }
-            }
-        }
-        if created == 0 && !queue.is_empty() {
-            eprintln!("warning: screen {monitor_index} has items but no tiles");
-        }
+    // Startup population. --max is the video-wall mode: fill every
+    // screen to the --tiles cap. A plain window starts at
+    // DEFAULT_WINDOW_TILES instead — a wall of 12 streams is not what
+    // you want from a bare `tessera`. --populate overrides either.
+    let default_populate = match args.screens {
+        ScreenSel::Windowed(_, _) => DEFAULT_WINDOW_TILES.min(args.tiles),
+        _ => args.tiles,
+    };
+    let populate_limit = args.populate.map_or(default_populate, |p| p.min(args.tiles));
+    if !platform::DEFER_STARTUP_TILES {
+        populate_startup(&mut screens, &mut budget, &mut queue, &mpv_lib, &tile_opts, &mut next_tile_id, populate_limit);
     }
-
-    println!(
-        "running: {} screen(s), {} tile(s), budget {:.0}%",
-        screens.len(),
-        screens.iter().map(|s| s.tiles.len()).sum::<usize>(),
-        budget.utilization() * 100.0
-    );
 
     let start = Instant::now();
     let mut last_status = Instant::now();
     let mut last_drops: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
     let vsync = std::env::var("TESSERA_VSYNC").map(|v| v != "0").unwrap_or(false);
     let frame_interval = if vsync { Duration::from_millis(15) } else { Duration::from_millis(16) };
+    // When the next frame is due, counted from the start of the last one.
+    // It used to be `now + frame_interval` re-armed on every callback — and
+    // the loop's last callback each iteration comes *after* the frame's
+    // work, so the real period was that work plus 16ms: ~45Hz on an M1 Max
+    // at four tiles, with 60fps video visibly dropping frames to match.
+    let mut next_frame_at = Instant::now();
 
     event_loop
         .run(move |event, target| {
-            target.set_control_flow(ControlFlow::WaitUntil(Instant::now() + frame_interval));
+            target.set_control_flow(ControlFlow::WaitUntil(next_frame_at));
+            let is_init = matches!(event, Event::NewEvents(StartCause::Init));
             match event {
                 Event::NewEvents(StartCause::Init)
                 | Event::NewEvents(StartCause::ResumeTimeReached { .. })
                 | Event::NewEvents(StartCause::WaitCancelled { .. }) => {
+                    // Input still renders straight away (WaitCancelled);
+                    // this only sets when the timer next fires. A frame
+                    // that overran its interval is followed immediately.
+                    next_frame_at = Instant::now() + frame_interval;
+                    target.set_control_flow(ControlFlow::WaitUntil(next_frame_at));
+                    if is_init && platform::DEFER_STARTUP_TILES {
+                        // A Finder open that launched us has landed by now
+                        // (see DEFER_STARTUP_TILES). It means what paths on
+                        // the command line mean: play this, not the saved
+                        // queue — so it replaces sources and queue alike.
+                        let launched_with = platform::take_opened_paths();
+                        if !launched_with.is_empty() {
+                            let (opened_sources, items) = list_paths(&launched_with);
+                            if items.is_empty() {
+                                notify(&mut overlay, "no video files found in what was opened".into());
+                            } else {
+                                sources = opened_sources;
+                                queue.clear();
+                                queue.add_items(items);
+                                println!("opened: {} item(s) replace the queue", queue.len());
+                            }
+                        }
+                        populate_startup(&mut screens, &mut budget, &mut queue, &mpv_lib, &tile_opts, &mut next_tile_id, populate_limit);
+                    }
+                    // Files opened while running: listed off the render
+                    // thread (a folder is a directory walk), played when
+                    // the listing lands.
+                    let opened = platform::take_opened_paths();
+                    if !opened.is_empty() {
+                        let tx = opened_tx.clone();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(list_paths(&opened).1);
+                        });
+                    }
+                    while let Ok(items) = opened_rx.try_recv() {
+                        let mut wall = Wall {
+                            screens: &mut screens,
+                            budget: &mut budget,
+                            queue: &mut queue,
+                            sources: &sources,
+                            overlay: &mut overlay,
+                            mpv_lib: &mpv_lib,
+                            tile_opts: &tile_opts,
+                            next_tile_id: &mut next_tile_id,
+                            max_tiles: args.tiles,
+                            wm_settle_at: &mut wm_settle_at,
+                        };
+                        play_opened(&mut wall, items);
+                    }
+                    sync_fullscreen_chrome(&screens);
                     // Overlay auto-hide: visible while pinned or while user
                     // input arrived within the last 5 seconds.
                     overlay.visible = overlay.pinned || last_input.elapsed() < Duration::from_secs(5);
@@ -879,7 +878,7 @@ fn main() {
                         let dt = last_status.elapsed().as_secs_f64();
                         last_status = Instant::now();
                         let elapsed = start.elapsed().as_secs();
-                        println!("--- t+{elapsed}s --- fds {}", fd_count());
+                        println!("--- t+{elapsed}s --- fds {}", platform::fd_count());
 
                         // Adaptive decode-budget feedback: sample per-tile
                         // decoder drop rates; sustained drops shrink the
@@ -956,6 +955,25 @@ fn main() {
                     // frame's egui pass (see OverlayState::pending_click).
                     let window = screens[idx].window.clone();
                     let _ = screens[idx].egui.on_window_event(&window, &event);
+                    // OS shortcuts (macOS Cmd chords) outrank the wall's
+                    // hotkeys: Cmd+W is a close request like the close
+                    // button's, and no chord is ever read as its bare
+                    // letter. None on Linux, where nothing changes.
+                    let chord = match &event {
+                        WindowEvent::KeyboardInput { event: ke, .. } => platform::key_chord(ke, mods),
+                        _ => None,
+                    };
+                    let event = match chord {
+                        None => event,
+                        Some(platform::Chord::CloseWindow) => WindowEvent::CloseRequested,
+                        Some(platform::Chord::ToggleFullscreen) => {
+                            if toggle_window_mode(&mut screens, idx) {
+                                wm_settle_at = Some((Instant::now() + Duration::from_millis(600), 4));
+                            }
+                            return;
+                        }
+                        Some(platform::Chord::Swallow) => return,
+                    };
                     match event {
                         WindowEvent::CloseRequested => {
                             // Closing the last window quits; closing one of
@@ -965,6 +983,7 @@ fn main() {
                                     save_queue(&queue);
                                 }
                                 shutdown(&mut screens);
+                                shut_down = true;
                                 target.exit();
                             } else {
                                 if cursor_over == Some(window_id) {
@@ -1034,7 +1053,26 @@ fn main() {
                                 cursor_over = None;
                             }
                         }
-                        WindowEvent::MouseInput { state, button, .. } => match (state, button) {
+                        WindowEvent::MouseInput { state, button, .. } => {
+                            // Ctrl-click is a right-click on macOS (never
+                            // on Linux). Its release goes with it even if
+                            // ctrl comes up first: a left release would
+                            // consume the parked right press before the
+                            // frame got to it.
+                            let button = match (state, button) {
+                                (ElementState::Pressed, MouseButton::Left)
+                                    if platform::is_secondary_click(button, mods) =>
+                                {
+                                    secondary_left = true;
+                                    MouseButton::Right
+                                }
+                                (ElementState::Released, MouseButton::Left) if secondary_left => {
+                                    secondary_left = false;
+                                    MouseButton::Right
+                                }
+                                _ => button,
+                            };
+                            match (state, button) {
                             (ElementState::Pressed, MouseButton::Left) => {
                                 left_held = true;
                                 last_input = Instant::now();
@@ -1090,7 +1128,8 @@ fn main() {
                                 }
                             }
                             _ => {}
-                        },
+                            }
+                        }
                         WindowEvent::MouseWheel { delta, .. } => {
                             last_input = Instant::now();
                             // Scroll over a tile = that tile's volume ±5.
@@ -1101,15 +1140,17 @@ fn main() {
                                     let step = match delta {
                                         MouseScrollDelta::LineDelta(_, l) if l > 0.0 => 5,
                                         MouseScrollDelta::LineDelta(_, l) if l < 0.0 => -5,
-                                        MouseScrollDelta::PixelDelta(p) if p.y > 0.0 => 5,
-                                        MouseScrollDelta::PixelDelta(p) if p.y < 0.0 => -5,
+                                        MouseScrollDelta::PixelDelta(p) => {
+                                            let dy = p.y / screens[idx].window.scale_factor();
+                                            5 * pixel_wheel_notches(&mut wheel_accum, dy) as i64
+                                        }
                                         _ => 0,
                                     };
                                     if step != 0 {
                                         // winit/X11 reports a MouseWheel for both the press
                                         // and the release of a scroll button — throttle the
-                                        // duplicate half of each notch (trackpad pixel
-                                        // deltas pass through untouched).
+                                        // duplicate half of each notch (smooth-scroll
+                                        // deltas are notched by accumulation instead).
                                         let from_button = matches!(delta, MouseScrollDelta::LineDelta(..));
                                         let throttled = from_button
                                             && matches!(last_wheel_at, Some(at) if at.elapsed() < WHEEL_NOTCH_INTERVAL);
@@ -1186,6 +1227,7 @@ fn main() {
                                                 save_queue(&queue);
                                             }
                                             shutdown(&mut screens);
+                                            shut_down = true;
                                             target.exit();
                                         }
                                     }
@@ -1308,12 +1350,161 @@ fn main() {
                         _ => {}
                     }
                 }
+                Event::LoopExiting if !shut_down => {
+                    // Quit by the OS rather than by us — macOS's Cmd+Q
+                    // menu item terminates the app from under the event
+                    // loop. Same teardown as Esc, or the queue since the
+                    // last timed save is lost.
+                    if settings.retain_queue {
+                        save_queue(&queue);
+                    }
+                    shutdown(&mut screens);
+                    shut_down = true;
+                }
                 _ => {}
             }
         })
         .unwrap();
 
     println!("bye (uptime {:.1}s)", start.elapsed().as_secs_f64());
+}
+
+/// Fills each screen with its startup tiles from the queue, up to
+/// `populate_limit` per screen.
+#[allow(clippy::too_many_arguments)]
+fn populate_startup(
+    screens: &mut [Screen],
+    budget: &mut DecodeBudget,
+    queue: &mut PlaybackQueue,
+    mpv_lib: &Arc<tessera_mpv::MpvLib>,
+    tile_opts: &TileOptions,
+    next_tile_id: &mut usize,
+    populate_limit: usize,
+) {
+    for screen_idx in 0..screens.len() {
+        let target_tiles = queue.len().clamp(1, populate_limit);
+        let monitor_index = screens[screen_idx].monitor_index;
+        let mut created = 0;
+        while created < target_tiles {
+            let item = match queue.current() {
+                Some(m) => m.clone(),
+                None => break,
+            };
+            match request_admission(screens, budget, *next_tile_id, &tessera_core::StreamSpec::placeholder()) {
+                Admission::Admitted | Admission::AdmittedEvicting { .. } => {}
+                Admission::RejectedBudget { would_use, ceiling } => {
+                    println!(
+                        "screen {monitor_index}: decode budget full, stopping at {created} tiles ({:.1}/{:.0} streams)",
+                        would_use / tessera_core::budget::MACROBLOCKS_1080P30,
+                        ceiling / tessera_core::budget::MACROBLOCKS_1080P30
+                    );
+                    break;
+                }
+                Admission::RejectedMaxStreams { max } => {
+                    println!("screen {monitor_index}: max streams ({max}) reached, stopping at {created} tiles");
+                    break;
+                }
+            }
+            screens[screen_idx].context.make_current(&screens[screen_idx].surface).ok();
+            match Tile::new(mpv_lib, *next_tile_id, &item, tile_opts, None) {
+                Ok(tile) => {
+                    screens[screen_idx].add_tile(tile);
+                    *next_tile_id += 1;
+                    created += 1;
+                    queue.advance();
+                }
+                Err(e) => {
+                    budget.release(*next_tile_id);
+                    eprintln!("screen {monitor_index}: tile creation failed: {e}");
+                    break;
+                }
+            }
+        }
+        if created == 0 && !queue.is_empty() {
+            eprintln!("warning: screen {monitor_index} has items but no tiles");
+        }
+    }
+
+    println!(
+        "running: {} screen(s), {} tile(s), budget {:.0}%",
+        screens.len(),
+        screens.iter().map(|s| s.tiles.len()).sum::<usize>(),
+        budget.utilization() * 100.0
+    );
+}
+
+/// Lists paths handed to us to play — the command line, or a Finder open
+/// — as the sources they become and the items they yield. A file is a
+/// one-item folder source, exactly as on the command line.
+fn list_paths(paths: &[PathBuf]) -> (Vec<tessera_core::sources::Source>, Vec<tessera_core::MediaItem>) {
+    let mut sources = Vec::new();
+    let mut items = Vec::new();
+    for p in paths {
+        let src = tessera_core::sources::Source::Folder { path: p.display().to_string() };
+        match src.list() {
+            Ok(list) => {
+                println!("source {}: {} item(s)", src.label(), list.len());
+                items.extend(list);
+            }
+            Err(e) => eprintln!("warning: source {} failed: {e}", src.label()),
+        }
+        if !sources.contains(&src) {
+            sources.push(src);
+        }
+    }
+    (sources, items)
+}
+
+/// Plays files the OS opened while the wall was running ("Open With" on a
+/// running Tessera): the first plays now on the first wall tile — or on a
+/// new tile, if no wall window has one — and all of them join the end of
+/// the queue.
+fn play_opened(wall: &mut Wall, items: Vec<tessera_core::MediaItem>) {
+    let Some(first) = items.first().cloned() else {
+        notify(wall.overlay, "nothing playable in what was opened".into());
+        return;
+    };
+    let n = items.len();
+    wall.queue.append_items(items);
+    println!("opened: {n} item(s) added to the queue ({} total)", wall.queue.len());
+    let has_tile = wall.screens.iter().any(|s| s.role == ScreenRole::Wall && !s.tiles.is_empty());
+    if has_tile {
+        let idx = wall.screens.iter().position(|s| s.role == ScreenRole::Wall && !s.tiles.is_empty());
+        handle_overlay_action(wall, OverlayAction::PlayNow { item: first }, idx.unwrap_or(0));
+    } else if let Some(idx) = wall.screens.iter().position(|s| s.role == ScreenRole::Wall) {
+        if can_add_tile(wall, idx) {
+            spawn_tile(wall, idx, first);
+        }
+    } else {
+        notify(wall.overlay, "no wall window to play on — open one with + first".into());
+        return;
+    }
+    if let Some(s) = wall.screens.iter().find(|s| s.role == ScreenRole::Wall) {
+        s.window.focus_window();
+    }
+}
+
+/// The smooth-scroll half of the wheel: accumulates pixel travel and hands
+/// back whole notches, keeping the remainder for the next event. A reversal
+/// starts from zero, so a gesture never has to unwind what the previous
+/// one left over.
+fn pixel_wheel_notches(accum: &mut f64, dy: f64) -> i32 {
+    if dy == 0.0 {
+        return 0;
+    }
+    if *accum != 0.0 && accum.signum() != dy.signum() {
+        *accum = 0.0;
+    }
+    *accum += dy;
+    let notches = (*accum / WHEEL_PIXELS_PER_NOTCH).trunc();
+    *accum -= notches * WHEEL_PIXELS_PER_NOTCH;
+    notches as i32
+}
+
+/// Brings the OS's app-wide fullscreen chrome (macOS menu bar and Dock) in
+/// line with whether any window is currently a fullscreen wall.
+fn sync_fullscreen_chrome(screens: &[Screen]) {
+    platform::sync_fullscreen_chrome(screens.iter().any(|s| platform::is_fullscreen(&s.window)));
 }
 
 
@@ -1782,17 +1973,7 @@ struct Wall<'a> {
 /// Adds a tile to a screen from its queue — the transport "+" button and
 /// the "+" hotkey. Enforces the zoomed and --tiles limits.
 fn add_tile_action(wall: &mut Wall, screen_idx: usize) {
-    let monitor_index = wall.screens[screen_idx].monitor_index;
-    if wall.screens[screen_idx].role == ScreenRole::Browser {
-        notify(wall.overlay, "this is the browser window — open a wall window for tiles".into());
-        return;
-    }
-    if wall.screens[screen_idx].zoomed.is_some() {
-        notify(wall.overlay, "exit fullscreen (F) before adding tiles".into());
-        return;
-    }
-    if wall.screens[screen_idx].tiles.len() >= wall.max_tiles {
-        notify(wall.overlay, format!("not adding: already at the {}-tile limit", wall.max_tiles));
+    if !can_add_tile(wall, screen_idx) {
         return;
     }
     let item = match wall.queue.advance().cloned() {
@@ -1802,6 +1983,31 @@ fn add_tile_action(wall: &mut Wall, screen_idx: usize) {
             return;
         }
     };
+    spawn_tile(wall, screen_idx, item);
+}
+
+/// Whether this screen can take another tile, explaining (as a toast) why
+/// not: browser windows have none, a zoomed wall is showing one, and
+/// --tiles caps the rest.
+fn can_add_tile(wall: &mut Wall, screen_idx: usize) -> bool {
+    if wall.screens[screen_idx].role == ScreenRole::Browser {
+        notify(wall.overlay, "this is the browser window — open a wall window for tiles".into());
+        return false;
+    }
+    if wall.screens[screen_idx].zoomed.is_some() {
+        notify(wall.overlay, "exit fullscreen (F) before adding tiles".into());
+        return false;
+    }
+    if wall.screens[screen_idx].tiles.len() >= wall.max_tiles {
+        notify(wall.overlay, format!("not adding: already at the {}-tile limit", wall.max_tiles));
+        return false;
+    }
+    true
+}
+
+/// Starts a tile playing `item` on a screen, through the decode budget.
+fn spawn_tile(wall: &mut Wall, screen_idx: usize, item: tessera_core::MediaItem) {
+    let monitor_index = wall.screens[screen_idx].monitor_index;
     let id = *wall.next_tile_id;
     match request_admission(wall.screens, wall.budget, id, &tessera_core::StreamSpec::placeholder()) {
         Admission::Admitted | Admission::AdmittedEvicting { .. } => {
@@ -2283,17 +2489,20 @@ fn shutdown(screens: &mut [Screen]) {
 /// decorations — changing them mid-transition makes pop-shell re-tile the
 /// window back over the fullscreen switch); window-ifying turns decorations
 /// on and restores the saved geometry (or a sensible default).
+///
+/// Returns whether the WM needs watching afterwards (see
+/// [`fix_displaced_walls`]) — only ever on a platform that has one to fight.
 fn toggle_window_mode(screens: &mut [Screen], idx: usize) -> bool {
     let screen = &mut screens[idx];
     let window = screen.window.clone();
     let monitor_index = screen.monitor_index;
     let mut schedule_fix = false;
-    if window.fullscreen().is_some() {
+    if platform::is_fullscreen(&window) {
         schedule_fix = true;
         // Fullscreen wall -> normal window.
         screen.zoomed = None;
         screen.should_fullscreen = false;
-        window.set_fullscreen(None);
+        platform::exit_fullscreen(&window);
         window.set_decorations(true);
         let restore = screen
             .windowed_restore
@@ -2342,10 +2551,10 @@ fn toggle_window_mode(screens: &mut [Screen], idx: usize) -> bool {
             .map(|(_, m)| m)
             .or_else(|| screen.intended_monitor.clone())
             .or_else(|| window.current_monitor());
-        window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(monitor)));
+        platform::enter_fullscreen(&window, monitor);
         println!("screen {}: fullscreen wall", screen.monitor_index);
     }
-    schedule_fix
+    schedule_fix && platform::WM_SETTLE
 }
 
 /// The monitor a window is actually on, found by containment of the
@@ -2407,11 +2616,11 @@ fn fix_displaced_walls(screens: &mut [Screen]) -> bool {
         let inside = monitor_contains(&m, centre);
         // Non-fullscreen (tiled by the WM) or fullscreen on the wrong
         // monitor: re-assert fullscreen aimed at the intended monitor.
-        if screen.window.fullscreen().is_some() && inside {
+        if platform::is_fullscreen(&screen.window) && inside {
             continue;
         }
         let window = screen.window.clone();
-        window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(Some(m))));
+        platform::enter_fullscreen(&window, Some(m));
         println!("screen {}: re-anchored to its monitor", screen.monitor_index);
         fixed_any = true;
     }
@@ -2430,21 +2639,21 @@ fn toggle_fullscreen(screens: &mut [Screen], idx: usize, tile_id: Option<usize>)
         // Only restore the window if the ZOOM took it fullscreen (W's
         // fullscreen is undone by W, not by un-zooming).
         if let Some((pos, size)) = screen.zoom_restore.take() {
-            screen.window.set_fullscreen(None);
+            platform::exit_fullscreen(&screen.window);
             screen.window.set_outer_position(pos);
             let _ = screen.window.request_inner_size(size);
             screen.resize(size.width, size.height);
         }
     } else if let Some(id) = tile_id {
         screen.zoomed = Some(id);
-        if screen.window.fullscreen().is_none() {
+        if !platform::is_fullscreen(&screen.window) {
             // Windowed window: also take over the whole monitor.
             if let Ok(pos) = screen.window.outer_position() {
                 let size = screen.window.inner_size();
                 screen.zoom_restore = Some((pos, size));
             }
             let monitor = screen.window.current_monitor();
-            screen.window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(monitor)));
+            platform::enter_fullscreen(&screen.window, monitor);
         }
     }
 }
@@ -2758,6 +2967,26 @@ mod tests {
     }
 
     #[test]
+    fn smooth_scroll_steps_once_per_notch_of_travel() {
+        use super::{pixel_wheel_notches, WHEEL_PIXELS_PER_NOTCH as N};
+        let mut acc = 0.0;
+        // A swipe arrives as many small deltas; only whole notches step.
+        let steps: i32 = (0..20).map(|_| pixel_wheel_notches(&mut acc, N / 8.0)).sum();
+        assert_eq!(steps, 2, "20 x 1/8 notch = 2.5 notches, 2 applied");
+        assert!((acc - N / 2.0).abs() < 1e-9, "the half notch is kept");
+
+        // Reversing throws the leftover away rather than unwinding it.
+        assert_eq!(pixel_wheel_notches(&mut acc, -N * 0.9), 0);
+        assert_eq!(pixel_wheel_notches(&mut acc, -N * 0.2), -1);
+
+        // A fast fling can be several notches in one event.
+        let mut acc = 0.0;
+        assert_eq!(pixel_wheel_notches(&mut acc, N * 3.5), 3);
+        assert_eq!(pixel_wheel_notches(&mut acc, 0.0), 0, "zero is not a reversal");
+        assert!((acc - N / 2.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn held_arrow_coalesces_into_few_seeks() {
         use super::{seek_step, SeekStep, SEEK_MAX_HOLD, SEEK_SETTLE};
         use std::time::Duration;
@@ -2883,10 +3112,10 @@ fn window_builder(args: &Args, monitors: &[winit::monitor::MonitorHandle], index
         ScreenSel::Windowed(w, h) => app_window()
             .with_title("Tessera")
             .with_inner_size(winit::dpi::PhysicalSize::new(*w, *h)),
-        _ => app_window()
-            .with_title(format!("Tessera — screen {index}"))
-            .with_decorations(false)
-            .with_fullscreen(Some(Fullscreen::Borderless(Some(monitor.clone())))),
+        _ => platform::fullscreen_window_builder(
+            app_window().with_title(format!("Tessera — screen {index}")),
+            monitor,
+        ),
     }
 }
 
@@ -2894,7 +3123,5 @@ fn window_builder(args: &Args, monitors: &[winit::monitor::MonitorHandle], index
 /// entry's StartupWMClass matches and the dock groups our windows) and the
 /// embedded icon.
 fn app_window() -> WindowBuilder {
-    WindowBuilder::new()
-        .with_name(APP_ID, APP_ID)
-        .with_window_icon(window_icon())
+    platform::window_builder(WindowBuilder::new()).with_window_icon(window_icon())
 }

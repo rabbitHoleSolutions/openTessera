@@ -1563,6 +1563,7 @@ dependencies = [
  "image",
  "libc",
  "libloading",
+ "objc2",
  "png",
  "raw-window-handle 0.5.2",
  "serde_json",

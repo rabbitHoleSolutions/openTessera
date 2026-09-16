@@ -2,8 +2,8 @@
 
 Open-source desktop multi-stream video wall. A sister application to the Meta
 Quest app **Tessera**: many simultaneous video streams, arranged as tiles, with
-library curation and organization tools. Targets Linux first (this project was
-built on Pop!_OS/GNOME), macOS next.
+library curation and organization tools. Built on Linux (Pop!_OS/GNOME); also
+runs on macOS (Apple Silicon, see below).
 
 ## Current status
 
@@ -118,8 +118,9 @@ saturated the machine at 8x 4K — hence the Rust + libmpv stack decision.
 ## Requirements
 
 - Rust (stable)
-- libmpv 1.x (`libmpv.so.1`; on Debian/Ubuntu: `mpv` or `libmpv1`; dev headers
-  are NOT required — the C ABI is declared in `tessera-mpv` and loaded at
+- libmpv (`libmpv.so.1` or `.so.2`; on Debian/Ubuntu: `mpv` or `libmpv1`; on
+  macOS `brew install mpv`, which provides `libmpv.2.dylib`; dev headers are
+  NOT required — the C ABI is declared in `tessera-mpv` and loaded at
   runtime). Set `TESSERA_MPV_LIB` to point at a specific library file.
 - For hardware decode: NVIDIA (NVDEC), Mesa (VA-API), or macOS (VideoToolbox).
   The default is `--hwdec nvdec-copy` — NVDEC decoding with a frame copy
@@ -127,6 +128,7 @@ saturated the machine at 8x 4K — hence the Rust + libmpv stack decision.
   (mpv 0.34 + NVIDIA: `cuGraphicsUnregisterResource` race when decoders
   re-initialize during playback, e.g. loading a 4K HEVC file mid-wall).
   Override with `--hwdec auto-safe` for zero-copy if you feel lucky.
+  On macOS the default is `videotoolbox` (zero-copy; that crash is NVIDIA's).
 
 ## Build
 
@@ -147,6 +149,25 @@ files. `--default` additionally makes it the default video player (opt-in,
 since that takes over double-clicking every video on the machine);
 `--uninstall` reverses it. Config in `~/.config/opentessera` is never
 touched either way.
+
+## Install (macOS)
+
+```
+./packaging/macos/build-app.sh --install
+```
+
+Builds `Tessera.app` and copies it to `~/Applications`, where it appears under
+**Open With** for videos and folders. `--default` also makes it the default
+player for video types — macOS asks you to confirm each type, and the script
+prints what it replaced (undo: Get Info → Open with → Change All). It loads
+Homebrew's libmpv, so `brew install mpv` first. Config lives in
+`~/.config/opentessera` here too.
+
+macOS differences: fullscreen (W, F, `--max`) covers the monitor without
+creating a Space; Cmd+W closes a window, Ctrl+Cmd+F toggles fullscreen,
+Cmd+Q quits (queue saved), ctrl-click is a right-click. A file opened from
+Finder while Tessera is running plays immediately on the first tile and joins
+the queue; one that launches it replaces the queue, as on the command line.
 
 ## Run
 

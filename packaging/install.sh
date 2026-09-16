@@ -17,6 +17,15 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# macOS installs an app bundle instead; same flags, its own script.
+if [ "$(uname -s)" = Darwin ]; then
+  case " $* " in
+    *" --uninstall "*) exec "$REPO/packaging/macos/build-app.sh" "$@" ;;
+    *) exec "$REPO/packaging/macos/build-app.sh" --install "$@" ;;
+  esac
+fi
+
 BIN_DIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}"
 APP_DIR="$DATA_DIR/applications"

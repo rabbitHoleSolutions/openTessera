@@ -545,6 +545,75 @@ tab, since it is the size the UI aims for rather than the size it always is.
 
 ---
 
+## 16. macOS
+
+Status: **implemented, first pass** (2026-09-11) — built and run on an M1 Max
+(macOS 26, three 1x displays), Homebrew mpv 0.41. Personal-use bundle only;
+distribution is not done (see Next).
+
+Everything OS-specific now lives in `tessera-app/src/platform/` — `linux.rs`
+holds the behaviour the app was built on, moved rather than reinterpreted, and
+`macos.rs` the counterpart. The rest of the app names no OS. Outside it: the
+libmpv candidate list in `tessera-mpv`, and the bundle in `packaging/macos/`.
+
+What differs, and why:
+
+- **libmpv**: `libmpv.2.dylib`, tried inside the bundle
+  (`Contents/Frameworks`), on the dyld path, then under Homebrew/MacPorts —
+  a Finder-launched app has none of those prefixes on any search path. Linux
+  now falls back to `libmpv.so.2` when `.so.1` is absent (mpv ≥ 0.35).
+- **hwdec**: `videotoolbox`, zero-copy. The NVIDIA interop crash behind
+  `nvdec-copy` doesn't exist here; 4K 10-bit HEVC plays with zero drops.
+- **Fullscreen** is "simple" fullscreen — re-framed over the monitor on the
+  current desktop, no Space, no animation — the closest match to Linux
+  borderless, and robust when `--max` changes several windows at once. The
+  menu bar and Dock auto-hide while any wall is fullscreen; that state is
+  app-wide, and winit's per-window save/restore of it left the menu bar hidden
+  whenever two walls came out of fullscreen in the "wrong" order, so it is
+  recomputed from the windows every frame. The pop-shell settle timer is off.
+- **Finder opens** ("Open With", double-click, drop on the Dock icon) arrive
+  as an Apple Event, not argv; winit 0.29 has no hook, so
+  `application:openURLs:` is added to its delegate class at runtime. At launch
+  the file means what a command-line path means — it replaces the queue — so
+  startup tiles wait for the first tick, when the event has landed. While
+  running, "play now" on the first wall tile, and queued.
+- **Keys**: Cmd chords are never read as hotkeys. Cmd+W closes the window
+  (the last one quits), Ctrl+Cmd+F toggles fullscreen like W, Cmd+Q comes
+  through winit's menu — and the OS quit now gets the same teardown and
+  queue save as Esc (`LoopExiting`). Ctrl-click is a right-click.
+- **UI scale** multiplies the display's own scale (`set_zoom_factor`), so 1.0
+  on a Retina display is normal size rather than half. On a 1x display it is
+  the same absolute scale as Linux.
+- **fd limit**: the hard limit reads `unlimited`, which setrlimit rejects, so
+  raising to it failed silently and a Dock launch kept launchd's 256. Capped
+  at `kern.maxfilesperproc` now. `/dev/fd` stands in for `/proc/self/fd`.
+
+Found on the way, fixed for both:
+
+- **Frame pacing.** The loop re-armed `WaitUntil(now + 16ms)` on every
+  callback, including the one after the frame's work, so the period was the
+  work *plus* 16ms — 45Hz at four tiles on the M1, 60fps video dropping to
+  match. The deadline is now anchored to the frame's start.
+- **Smooth scrolling** (trackpads, Magic Mouse; also Wayland) stepped the
+  volume on every pixel delta — dozens per swipe. It accumulates into notches
+  now. X11 only ever sends line deltas, so the Linux X11 path is unchanged.
+
+Next:
+
+- Distribution: copy libmpv and its dylib closure into `Contents/Frameworks`
+  (e.g. dylibbundler), sign with a Developer ID, notarize. The loader already
+  looks there first.
+- Untested by hand so far: W/F/`--max` interactively, cross-window tile drag,
+  Cmd+W / Ctrl+Cmd+F, ctrl-click, trackpad volume, mixed Retina + 1x
+  displays (window placement converts through each monitor's scale factor;
+  the monitor-under-window test mixes physical coordinates across displays).
+- Keep the display awake while playing (IOPMAssertion here; Linux has the
+  same gap — mpv's own inhibit belongs to its VO, which `vo=libmpv` skips).
+
+**Effort**: M
+
+---
+
 ## 9. Credential and key management
 
 Status: **not started** — deliberately deferred, see below.

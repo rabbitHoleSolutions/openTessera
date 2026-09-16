@@ -10,7 +10,7 @@ Icon=tessera
 Terminal=false
 Categories=AudioVideo;Video;Player;
 Keywords=video;wall;multi;mosaic;player;jellyfin;plex;
-# Matches WM_CLASS, which main.rs sets explicitly to APP_ID. Without this
+# Matches WM_CLASS, which platform/linux.rs sets explicitly to APP_ID. Without this
 # the dock shows a second, generic entry instead of lighting up this one.
 StartupWMClass=tessera
 StartupNotify=false

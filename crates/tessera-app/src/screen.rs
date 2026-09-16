@@ -395,12 +395,14 @@ impl Screen {
         // over one set of widgets.
         let mut help_open = overlay.help_open == Some(window_id);
         let mut settings_open = overlay.settings_open == Some(window_id);
-        let window_fullscreen = self.window.fullscreen().is_some();
+        let window_fullscreen = crate::platform::is_fullscreen(&self.window);
         egui.run(&window, |ctx| {
             // Scale the whole overlay UI (zoom multiplies the native ppp
             // and persists across frames). `ui_scale` only moves when the
             // scale slider is released, so this is a no-op mid-drag.
-            ctx.set_pixels_per_point(ui_scale);
+            // Whether it is absolute or relative to the display's own
+            // scale is the platform's call (Retina).
+            crate::platform::apply_ui_scale(ctx, ui_scale);
             if role == ScreenRole::Browser {
                 // A browser window has no wall to overlay, and its UI must
                 // not auto-hide the way the wall chrome does.

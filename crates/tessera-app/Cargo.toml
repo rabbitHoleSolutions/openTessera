@@ -25,3 +25,9 @@ libc = { workspace = true }
 image = { version = "0.24", default-features = false, features = ["jpeg", "png"] }
 png = "0.17"
 raw-window-handle = { workspace = true }
+
+# Cocoa calls winit 0.29 doesn't wrap (Finder open events, menu bar/Dock
+# state). Pinned to the version winit itself uses, so it adds nothing to
+# the build.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.4.1"

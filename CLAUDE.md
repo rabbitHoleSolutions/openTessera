@@ -11,7 +11,7 @@ ideas, no shared code. See `README.md` for the user-facing feature list and
 cargo build --release          # binary: target/release/tessera
 ./packaging/install.sh         # user-local install (bin + icon + .desktop)
 cargo check --workspace        # fast loop while editing
-cargo test --workspace         # 43 tests, mostly tessera-core (layout, budget, queue, sources)
+cargo test --workspace         # 63 tests, mostly tessera-core (layout, budget, queue, sources)
 cargo clippy --workspace       # 7 pre-existing warnings; don't let the count grow
 ```
 
@@ -44,6 +44,18 @@ with `ps -eo pid,args | grep ... | grep -v grep` instead.
 on any settings change, and clicking around in the gear panel can delete the
 user's configured sources.
 
+**On macOS** (Apple Silicon, Homebrew `rust` + `mpv`) the same windowed
+launch and `TESSERA_DUMP_DIR` work unchanged; run with `HOME=<scratch>` to
+keep the real config untouched. There is no xdotool, and `osascript` key
+injection goes to whatever app is frontmost — don't aim Cmd chords at the
+user's session. `./packaging/macos/build-app.sh` builds `target/Tessera.app`;
+`open -n --env HOME=<scratch> --stdout <log> --stderr <log> -a
+$PWD/target/Tessera.app <file>` exercises a real Finder-style launch (Apple
+Event, launchd environment, fd limit 256), and a second `open -a ... <file>`
+the running-instance path. `osascript -e 'tell application id
+"io.github.rabbitholesolutions.opentessera" to quit'` is the Cmd+Q path.
+`linux.rs` never compiles on a Mac — type-check it by stubbing its X11 import.
+
 Useful at runtime: `--windowed 1600x900` (one ordinary window),
 `--screens 0` (single monitor), `--tiles N`, `--populate N`, `--overlay`
 (start with the UI pinned), `--status-interval N`. Env: `TESSERA_MPV_LIB`,
@@ -56,12 +68,26 @@ Useful at runtime: `--windowed 1600x900` (one ordinary window),
 |---|---|
 | `tessera-mpv` | libmpv render-API wrapper: `dlopen` + hand-declared C ABI (no dev headers). `MpvLib` / `Mpv` / `RenderContext`. |
 | `tessera-core` | Pure logic, no I/O of its own beyond HTTP sources: `MediaItem`/`SourceKind`, `PlaybackQueue`, `solve_grid`, `DecodeBudget`. **This is where tests live** — put new logic here if it can be tested headlessly. |
-| `tessera-app` | The binary. `main.rs` (CLI + event loop + all the cross-screen actions), `screen.rs` (one window + GL context per `Screen`, wall or library), `tile.rs` (one mpv instance + FBO), `compositor.rs`, `overlay.rs` (wall egui), `browser/` (the browser window's egui: `mod.rs` tab bar + shared state, then one file per tab — `library.rs`, `queue.rs`, `sources.rs`, `config.rs`), `catalog.rs` (background source listing), `thumbs.rs`, `png_util.rs`. |
+| `tessera-app` | The binary. `main.rs` (CLI + event loop + all the cross-screen actions), `platform/` (everything OS-specific: `linux.rs`, `macos.rs`, same items in both), `screen.rs` (one window + GL context per `Screen`, wall or library), `tile.rs` (one mpv instance + FBO), `compositor.rs`, `overlay.rs` (wall egui), `browser/` (the browser window's egui: `mod.rs` tab bar + shared state, then one file per tab — `library.rs`, `queue.rs`, `sources.rs`, `config.rs`), `catalog.rs` (background source listing), `thumbs.rs`, `png_util.rs`. |
 
 ## Architecture invariants
 
 These are the things that bite. Most bugs so far have been a violation of one
 of them.
+
+**Nothing outside `platform/` names an OS.** Fullscreen goes through
+`platform::{enter,exit,is}_fullscreen` — never `window.set_fullscreen` /
+`window.fullscreen()` directly, because macOS walls are *simple* fullscreen,
+which `fullscreen()` doesn't report. A new difference becomes a named item in
+both `linux.rs` and `macos.rs` (identical signatures); `linux.rs` holds the
+behaviour the app was tuned on, so a change there is a Linux change. The only
+`cfg` elsewhere is libmpv's candidate list in `tessera-mpv`.
+
+**Frame pacing is anchored to the frame's start.** `next_frame_at` is set
+when a frame begins and every callback re-arms `WaitUntil(next_frame_at)`.
+Re-arming `now + 16ms` per callback (as it once did) makes the period the
+frame's work *plus* 16ms, because the loop's last callback comes after the
+work.
 
 **One `Screen` per window, created and destroyed at runtime.** Windows are
 opened from the status bar's "+" and closed individually (`CloseRequested`
@@ -274,9 +300,12 @@ segfaults on NVIDIA when decoders re-init mid-playback. Don't "optimize" it back
 - Update `docs/ROADMAP.md` when a tracked feature lands (status + what shipped).
 - The binary is `tessera`; the project and the config dir stay `openTessera`
   / `~/.config/opentessera` (renaming the dir would orphan real credentials).
-  `main.rs` sets WM_CLASS explicitly to `APP_ID` — the desktop entry's
-  `StartupWMClass` must match it, or the dock shows a second generic entry
-  instead of lighting up ours.
+  `platform/linux.rs` sets WM_CLASS explicitly to `APP_ID` — the desktop
+  entry's `StartupWMClass` must match it, or the dock shows a second generic
+  entry instead of lighting up ours. On macOS the identity is the bundle ID
+  in `packaging/macos/Info.plist`.
 - Positional paths on the command line REPLACE the saved sources rather than
   merging with them: opening a video from the file manager has to play that
-  video. `--plex`/`--jellyfin` still merge, being an explicit ask.
+  video. `--plex`/`--jellyfin` still merge, being an explicit ask. A Finder
+  open that *launches* the app on macOS means the same thing (hence
+  `DEFER_STARTUP_TILES`); one that arrives while running plays now and queues.

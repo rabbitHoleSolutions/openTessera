@@ -1,7 +1,8 @@
 //! libmpv render API wrapper.
 //!
-//! Loads `libmpv.so.1` (or `$TESSERA_MPV_LIB`) at runtime via dlopen and
-//! declares the C ABI by hand, so no system development headers are needed.
+//! Loads libmpv (`libmpv.so.1`/`.so.2` on Linux, `libmpv.2.dylib` on macOS,
+//! or `$TESSERA_MPV_LIB`) at runtime via dlopen and declares the C ABI by
+//! hand, so no system development headers are needed.
 //! Requires libmpv client API >= 1.0 with the OpenGL render backend.
 
 use std::ffi::{CStr, CString};
@@ -164,11 +165,45 @@ macro_rules! sym {
     };
 }
 
+/// Where to look for libmpv, in order. `$TESSERA_MPV_LIB` alone when set —
+/// an explicit choice shouldn't silently fall back to something else.
+fn library_candidates() -> Vec<String> {
+    if let Ok(p) = std::env::var("TESSERA_MPV_LIB") {
+        return vec![p];
+    }
+    if cfg!(target_os = "macos") {
+        vec![
+            // Bundled inside Tessera.app (Contents/Frameworks), for a build
+            // that ships its own; dyld expands the prefix.
+            "@executable_path/../Frameworks/libmpv.2.dylib".into(),
+            // The dyld search path, then the package managers' prefixes,
+            // which a Finder-launched app does not have on any search path.
+            "libmpv.2.dylib".into(),
+            "/opt/homebrew/lib/libmpv.2.dylib".into(),
+            "/usr/local/lib/libmpv.2.dylib".into(),
+            "/opt/local/lib/libmpv.2.dylib".into(),
+        ]
+    } else {
+        // .so.1 is mpv < 0.35 (Ubuntu 22.04 / Pop!_OS); newer distros ship
+        // .so.2. The ABI this crate declares is the same in both.
+        vec!["libmpv.so.1".into(), "libmpv.so.2".into()]
+    }
+}
+
 impl MpvLib {
     pub fn load() -> Result<Arc<Self>, Error> {
-        let path = std::env::var("TESSERA_MPV_LIB").unwrap_or_else(|_| "libmpv.so.1".to_string());
+        let mut failures = Vec::new();
+        for path in library_candidates() {
+            match unsafe { Library::new(&path) } {
+                Ok(lib) => return Self::from_library(lib),
+                Err(e) => failures.push(format!("{path}: {e}")),
+            }
+        }
+        Err(Error::LibraryOpen(failures.join("; ")))
+    }
+
+    fn from_library(lib: Library) -> Result<Arc<Self>, Error> {
         unsafe {
-            let lib = Library::new(&path).map_err(|e| Error::LibraryOpen(format!("{path}: {e}")))?;
             let this = MpvLib {
                 create: sym!(lib, mpv_create),
                 initialize: sym!(lib, mpv_initialize),
