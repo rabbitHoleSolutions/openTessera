@@ -577,6 +577,14 @@ What differs, and why:
   the file means what a command-line path means — it replaces the queue — so
   startup tiles wait for the first tick, when the event has landed. While
   running, "play now" on the first wall tile, and queued.
+- **Drag-and-drop** onto a window (implemented 2026-09-21). winit registers
+  every window for `NSFilenamesPboardType` and accepts the drag, so the
+  cursor already promised a drop that nothing handled — `DroppedFile` was
+  never matched. It now plays on the window it was dropped on (a drop names
+  its window, unlike a Finder open), falling back to the first wall window
+  with a tile. winit sends one event per file with no end-of-drop marker, so
+  the paths accumulate and flush once a frame; listing runs off-thread,
+  since a dropped folder is a directory walk.
 - **Keys**: Cmd chords are never read as hotkeys. Cmd+W closes the window
   (the last one quits), Ctrl+Cmd+F toggles fullscreen like W, Cmd+Q comes
   through winit's menu — and the OS quit now gets the same teardown and

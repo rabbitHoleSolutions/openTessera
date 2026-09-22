@@ -546,8 +546,17 @@ fn main() {
     // Set once the wall has been torn down, by whichever path got there
     // first — Esc, closing the last window, or the OS quitting us.
     let mut shut_down = false;
-    // Files opened from the OS while running, being listed off-thread.
-    let (opened_tx, opened_rx) = std::sync::mpsc::channel::<Vec<tessera_core::MediaItem>>();
+    // Files opened from the OS while running, being listed off-thread. The
+    // window is where a drag-and-drop landed, so the files play on the
+    // window they were dropped on; a Finder open names no window (None).
+    let (opened_tx, opened_rx) =
+        std::sync::mpsc::channel::<(Option<winit::window::WindowId>, Vec<tessera_core::MediaItem>)>();
+    // Files dropped onto a window this frame. winit sends one DroppedFile
+    // per file with no marker for where the drop ends, so they accumulate
+    // and flush once a frame — otherwise dropping five files would fire
+    // five separate "play this now", and only the last would survive.
+    let mut dropped: Vec<PathBuf> = Vec::new();
+    let mut dropped_on: Option<winit::window::WindowId> = None;
 
     // Startup population. --max is the video-wall mode: fill every
     // screen to the --tiles cap. A plain window starts at
@@ -613,10 +622,21 @@ fn main() {
                     if !opened.is_empty() {
                         let tx = opened_tx.clone();
                         std::thread::spawn(move || {
-                            let _ = tx.send(list_paths(&opened).1);
+                            let _ = tx.send((None, list_paths(&opened).1));
                         });
                     }
-                    while let Ok(items) = opened_rx.try_recv() {
+                    // Whatever was dropped this frame, listed the same way —
+                    // a dropped folder is a directory walk, which must not
+                    // run on the render thread.
+                    if !dropped.is_empty() {
+                        let paths = std::mem::take(&mut dropped);
+                        let target = dropped_on.take();
+                        let tx = opened_tx.clone();
+                        std::thread::spawn(move || {
+                            let _ = tx.send((target, list_paths(&paths).1));
+                        });
+                    }
+                    while let Ok((target, items)) = opened_rx.try_recv() {
                         let mut wall = Wall {
                             screens: &mut screens,
                             budget: &mut budget,
@@ -629,7 +649,7 @@ fn main() {
                             max_tiles: args.tiles,
                             wm_settle_at: &mut wm_settle_at,
                         };
-                        play_opened(&mut wall, items);
+                        play_opened(&mut wall, items, target);
                     }
                     sync_fullscreen_chrome(&screens);
                     // Overlay auto-hide: visible while pinned or while user
@@ -997,6 +1017,15 @@ fn main() {
                         }
                         WindowEvent::Resized(size) => {
                             screens[idx].resize(size.width, size.height);
+                        }
+                        // Drag-and-drop from Finder. winit already tells the
+                        // OS we accept the drag, so without this arm the
+                        // cursor promises a drop that then does nothing.
+                        // Collected here, flushed once a frame (see `dropped`).
+                        WindowEvent::DroppedFile(path) => {
+                            dropped.push(path);
+                            dropped_on = Some(window_id);
+                            last_input = Instant::now();
                         }
                         WindowEvent::ModifiersChanged(m) => {
                             mods = m.state();
@@ -1455,11 +1484,16 @@ fn list_paths(paths: &[PathBuf]) -> (Vec<tessera_core::sources::Source>, Vec<tes
     (sources, items)
 }
 
-/// Plays files the OS opened while the wall was running ("Open With" on a
-/// running Tessera): the first plays now on the first wall tile — or on a
-/// new tile, if no wall window has one — and all of them join the end of
-/// the queue.
-fn play_opened(wall: &mut Wall, items: Vec<tessera_core::MediaItem>) {
+/// Plays files that arrived while the wall was running — an "Open With" on
+/// a running Tessera, or a drag-and-drop onto one of its windows. The first
+/// plays now, on the window named by `onto` (where a drop landed) or else
+/// the first wall window with a tile — on a new tile, if that window has
+/// none — and all of them join the end of the queue.
+fn play_opened(
+    wall: &mut Wall,
+    items: Vec<tessera_core::MediaItem>,
+    onto: Option<winit::window::WindowId>,
+) {
     let Some(first) = items.first().cloned() else {
         notify(wall.overlay, "nothing playable in what was opened".into());
         return;
@@ -1467,21 +1501,28 @@ fn play_opened(wall: &mut Wall, items: Vec<tessera_core::MediaItem>) {
     let n = items.len();
     wall.queue.append_items(items);
     println!("opened: {n} item(s) added to the queue ({} total)", wall.queue.len());
-    let has_tile = wall.screens.iter().any(|s| s.role == ScreenRole::Wall && !s.tiles.is_empty());
-    if has_tile {
-        let idx = wall.screens.iter().position(|s| s.role == ScreenRole::Wall && !s.tiles.is_empty());
-        handle_overlay_action(wall, OverlayAction::PlayNow { item: first }, idx.unwrap_or(0));
-    } else if let Some(idx) = wall.screens.iter().position(|s| s.role == ScreenRole::Wall) {
-        if can_add_tile(wall, idx) {
-            spawn_tile(wall, idx, first);
-        }
-    } else {
+    // A drag-and-drop names the window it landed on, and plays there — the
+    // window you dropped on is the one you meant. An OS open names none, and
+    // a drop onto the browser window has no tiles to play on; both fall back
+    // to the first wall window that already has one.
+    let target = onto
+        .and_then(|id| wall.screens.iter().position(|s| s.window.id() == id))
+        .filter(|&i| wall.screens[i].role == ScreenRole::Wall);
+    let with_tile = wall.screens.iter().position(|s| s.role == ScreenRole::Wall && !s.tiles.is_empty());
+    let any_wall = wall.screens.iter().position(|s| s.role == ScreenRole::Wall);
+    let Some(idx) = target.or(with_tile).or(any_wall) else {
         notify(wall.overlay, "no wall window to play on — open one with + first".into());
         return;
+    };
+    if wall.screens[idx].tiles.is_empty() {
+        if !can_add_tile(wall, idx) {
+            return;
+        }
+        spawn_tile(wall, idx, first);
+    } else {
+        handle_overlay_action(wall, OverlayAction::PlayNow { item: first }, idx);
     }
-    if let Some(s) = wall.screens.iter().find(|s| s.role == ScreenRole::Wall) {
-        s.window.focus_window();
-    }
+    wall.screens[idx].window.focus_window();
 }
 
 /// The smooth-scroll half of the wheel: accumulates pixel travel and hands
