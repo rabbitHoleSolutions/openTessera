@@ -171,7 +171,12 @@ impl DecodeBudget {
     }
 
     pub fn used_load(&self) -> f64 {
-        self.active.iter().map(|a| a.spec.weight()).sum()
+        // `+ 0.0` normalizes the empty-iterator case. f64's `Sum` folds from
+        // -0.0 (the true additive identity: -0.0 + x == x for every x, where
+        // 0.0 + -0.0 == 0.0 would lose the sign), so an idle wall summed to
+        // -0.0 and the status bar read "budget -0% (-0.0/96 streams)".
+        // -0.0 + 0.0 == 0.0, and any other value is unchanged.
+        self.active.iter().map(|a| a.spec.weight()).sum::<f64>() + 0.0
     }
 
     pub fn utilization(&self) -> f64 {
@@ -434,6 +439,25 @@ mod tests {
         let util = b.update(7, s(3840, 2160, 60.0, Codec::H264));
         assert!(util > 0.1);
         assert_eq!(b.spec(7).unwrap().width, 3840);
+    }
+
+    #[test]
+    fn idle_budget_is_positive_zero() {
+        // An idle wall must read "budget 0%", not "-0%": f64's Sum folds from
+        // -0.0, so the empty active list used to carry the sign all the way
+        // to the status bar.
+        let mut b = DecodeBudget::new(96.0, 16);
+        assert!(b.used_load().is_sign_positive());
+        assert!(b.used_equivalents().is_sign_positive());
+        assert!(b.utilization().is_sign_positive());
+        assert_eq!(format!("{:.0}%", b.utilization() * 100.0), "0%");
+        assert_eq!(format!("{:.1}", b.used_equivalents()), "0.0");
+
+        // And still positive zero after a stream comes and goes.
+        b.request(1, &s(1920, 1080, 30.0, Codec::H264));
+        b.release(1);
+        assert!(b.used_load().is_sign_positive());
+        assert_eq!(format!("{:.1}", b.used_equivalents()), "0.0");
     }
 
     #[test]
