@@ -11,7 +11,7 @@ ideas, no shared code. See `README.md` for the user-facing feature list and
 cargo build --release          # binary: target/release/tessera
 ./packaging/install.sh         # user-local install (bin + icon + .desktop)
 cargo check --workspace        # fast loop while editing
-cargo test --workspace         # 111 tests, mostly tessera-core (layout, budget, queue, sources)
+cargo test --workspace         # 113 tests, mostly tessera-core (layout, budget, queue, sources)
 cargo clippy --workspace       # 7 pre-existing warnings; don't let the count grow
 ```
 
@@ -78,7 +78,7 @@ Useful at runtime: `--windowed 1600x900` (one ordinary window),
 | Crate | Responsibility |
 |---|---|
 | `tessera-mpv` | libmpv render-API wrapper: `dlopen` + hand-declared C ABI (no dev headers). `MpvLib` / `Mpv` / `RenderContext`. |
-| `tessera-core` | Pure logic, no I/O of its own beyond HTTP sources: `MediaItem`/`SourceKind`, `PlaybackQueue`, `solve_grid`, `DecodeBudget`, `title` (file name → show/season/episode/year), `subs` (SRT cues, search), `timecode` (`HH:MM:SS`, seek targets incl. chapters), `view` (per-tile crop/zoom). **This is where tests live** — put new logic here if it can be tested headlessly. |
+| `tessera-core` | Pure logic, no I/O of its own beyond HTTP sources: `MediaItem`/`SourceKind`, `PlaybackQueue`, `solve_grid`, `DecodeBudget`, `title` (file name → show/season/episode/year), `subs` (SRT cues, search), `timecode` (`HH:MM:SS`, seek targets incl. chapters), `view` (per-tile crop/zoom), `monitor` (a monitor by number, connector or position). **This is where tests live** — put new logic here if it can be tested headlessly. |
 | `tessera-app` | The binary. `main.rs` (CLI + event loop + all the cross-screen actions), `platform/` (everything OS-specific: `linux.rs`, `macos.rs`, same items in both), `screen.rs` (one window + GL context per `Screen`, wall or library), `tile.rs` (one mpv instance + FBO), `compositor.rs`, `overlay.rs` (wall egui), `browser/` (the browser window's egui: `mod.rs` tab bar + shared state, then one file per tab — `library.rs`, `queue.rs`, `sources.rs`, `config.rs`), `catalog.rs` (background source listing), `thumbs.rs`, `png_util.rs`, `instance.rs` (the single-instance socket, which also carries the API), `rpc.rs` (the API: what each request does, on which thread), `mcp.rs` (`tessera mcp`: the stdio MCP server over that API). |
 
 ## Architecture invariants
@@ -313,6 +313,13 @@ through to the video wall behind it. The status bar is an `Area` at
 A single, WM-tiled window is the default now, so the bar is often narrow;
 the other nesting order pushes the buttons off-screen instead of clipping
 the status text.
+
+**Under pop-shell, the WM owns where a windowed window sits.** It snaps a
+tiled window back to its slot ~0.3s after the app moves it, and restores
+the slot when fullscreen ends (so a fullscreen "hop" doesn't move it
+either). Placement at creation sticks, and so does fullscreen on a monitor
+(re-asserted by `fix_displaced_walls`). Report where a window *is*
+(`monitor_under_window`), never where it was asked to go.
 
 **`ctx.set_pixels_per_point()` takes effect on the *next* frame** (it routes
 through `set_zoom_factor`). Any UI-scale logic has to account for that one-frame

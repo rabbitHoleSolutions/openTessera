@@ -40,8 +40,21 @@ back in every argument.
 | `tessera_frame` | the tile's current frame, or one `at` another time, as a ~768px JPEG; `save` writes to `~/Pictures/Tessera` | no |
 | `tessera_queue` | `list`, `add` (same path rules as open), `next`, `previous` | no |
 | `tessera_close` | remove a tile (the file is untouched) | no |
-| `tessera_window` | `list` monitors (number, size, connector) and windows (monitor, fullscreen, tiles); `fullscreen` / `windowed` (the W toggle, optionally onto `monitor`); `move` to a monitor; `new` window | no |
+| `tessera_window` | `list` monitors (number, connector, position) and windows (monitor, fullscreen, tiles); `fullscreen` / `windowed` (the W toggle, optionally onto `monitor`); `move` to a monitor; `new` window — replies with where the window actually ended up | no |
 | `tessera_sources` | `list` the configured sources; `add` a folder (subfolders included) — servers and cameras need a sign-in, so they stay in the sources tab | no |
+
+A `monitor` argument (here and on `tessera_open`, and `--monitor` on the
+command line) takes a number, a connector name (`DP-4`), or a position:
+`left` / `middle` / `right` by horizontal order, `top` / `bottom` only for
+monitors stacked above one another. A word that fits no monitor is an
+error listing what does.
+
+Under a tiling window manager (pop-shell), *moving an existing windowed
+window* is up to the WM: it snaps a tiled window back to its slot ~0.3s
+after the app moves it, and restores that slot when fullscreen ends. What
+always works: placement when a window is created (`--monitor`, or
+`tessera_open` with `monitor` where no window is), and fullscreen on a
+monitor. `tessera_window` waits for the WM and reports the truth.
 
 Seek takes seconds (`90`), `HH:MM:SS`, relative (`+30`, `-10`), `next
 chapter` / `previous chapter`, `chapter 3`, or part of a chapter title.

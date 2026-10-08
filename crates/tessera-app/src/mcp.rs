@@ -192,12 +192,28 @@ impl Server {
                         v["monitor"].as_u64().map(|m| format!(" on monitor {m}")).unwrap_or_default(),
                         if v["fullscreen"] == json!(true) { ", fullscreen" } else { "" }
                     ),
-                    _ => format!(
-                        "window {}: {} on monitor {}",
-                        v["window"],
-                        if v["fullscreen"] == json!(true) { "fullscreen" } else { "windowed" },
-                        v["monitor"]
-                    ),
+                    _ => {
+                        // Report where it really is once the window manager
+                        // has had its say, not what was asked for: a tiling
+                        // WM can put a moved window straight back.
+                        std::thread::sleep(Duration::from_millis(1500));
+                        let wi = v["window"].as_u64();
+                        let now = self.rpc("window", json!({ "action": "list" }), Duration::from_secs(5))?;
+                        let w = now["windows"].as_array().and_then(|ws| ws.iter().find(|w| w["index"].as_u64() == wi)).cloned();
+                        let Some(w) = w else { return Ok(text("the window closed")) };
+                        let fs = w["fullscreen"] == json!(true);
+                        let mut line = format!("window {}: {} on monitor {}", w["index"], if fs { "fullscreen" } else { "windowed" }, w["monitor"]);
+                        let wanted_fs = match action { "fullscreen" => Some(true), "windowed" => Some(false), _ => None };
+                        if (v["monitor"].is_u64() && w["monitor"] != v["monitor"]) || wanted_fs.is_some_and(|f| f != fs) {
+                            line.push_str(&format!(
+                                " — the window manager put it there instead of on monitor {}. A tiling window manager places \
+                                 windows itself; fullscreen on a monitor always works, and so does tessera_open with `monitor` \
+                                 when no window is there yet.",
+                                v["monitor"]
+                            ));
+                        }
+                        line
+                    }
                 }))
             }
             "tessera_sources" => {
@@ -787,12 +803,14 @@ fn windows_text(v: &Value) -> String {
     let mut out = Vec::new();
     for m in v["monitors"].as_array().into_iter().flatten() {
         let on: Vec<String> = m["windows"].as_array().into_iter().flatten().map(|w| w.to_string()).collect();
+        let mut names: Vec<String> = m["name"].as_str().map(str::to_owned).into_iter().collect();
+        names.extend(m["positions"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned));
         out.push(format!(
             "monitor {}: {}x{}{}{}",
             m["index"],
             m["size"][0],
             m["size"][1],
-            m["name"].as_str().map(|n| format!(" ({n})")).unwrap_or_default(),
+            if names.is_empty() { String::new() } else { format!(" ({})", names.join(", ")) },
             if on.is_empty() { String::new() } else { format!(" — window {}", on.join(", ")) }
         ));
     }
@@ -1092,7 +1110,7 @@ fn player_tools() -> Vec<Value> {
                     "tile": tile_prop(),
                     "new_tile": { "type": "boolean", "description": "Play in a new tile beside the others instead of replacing one." },
                     "unmuted": { "type": "boolean", "description": "Make sure it plays with sound." },
-                    "monitor": { "type": "integer", "description": "Play on this monitor (number from tessera_window action=list): in the window already there, or a new one." },
+                    "monitor": { "type": ["integer", "string"], "description": "Play on this monitor — a number, a connector name (\"DP-4\") or a position (\"left\", \"middle\", \"right\"): in the window already there, or a new one." },
                     "fullscreen": { "type": "boolean", "description": "true: make that window fill its monitor; false: make it an ordinary window." },
                 },
                 "required": ["paths"],
@@ -1194,12 +1212,12 @@ fn player_tools() -> Vec<Value> {
              the window fills its monitor (or `monitor`); action=windowed: back to an ordinary window; action=move: to \
              `monitor`, keeping its mode; action=new: open another wall window (on `monitor`, `fullscreen` optional), which \
              fills from the queue. `window` defaults to the one showing the focused tile. To play something on a given \
-             monitor, tessera_open with `monitor` is simpler. Example: {\"action\": \"fullscreen\", \"monitor\": 1}.",
+             monitor, tessera_open with `monitor` is simpler. Monitors can be named by number, connector or position. Example: {\"action\": \"fullscreen\", \"monitor\": \"right\"}.",
             json!({
                 "type": "object",
                 "properties": {
                     "action": { "type": "string", "enum": ["list", "fullscreen", "windowed", "move", "new"] },
-                    "monitor": { "type": "integer", "description": "Monitor number from action=list." },
+                    "monitor": { "type": ["integer", "string"], "description": "A number from action=list, a connector name (\"DP-4\"), or a position (\"left\", \"middle\", \"right\", \"top\", \"bottom\")." },
                     "window": { "type": "integer", "description": "Window number from action=list (default: the focused tile's)." },
                     "fullscreen": { "type": "boolean", "description": "new: open it fullscreen." },
                 },

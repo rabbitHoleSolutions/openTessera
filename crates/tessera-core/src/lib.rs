@@ -1,6 +1,7 @@
 pub mod budget;
 pub mod layout;
 pub mod media;
+pub mod monitor;
 pub mod queue;
 pub mod signin;
 pub mod sources;

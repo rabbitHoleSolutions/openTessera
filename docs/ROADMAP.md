@@ -1224,6 +1224,13 @@ launch/quit/log, on-demand screenshots, a UI state dump, and synthetic
 pointer input through the real event path — which replace the
 `TESSERA_DUMP_DIR` + xdotool routine for checking a change.
 
+Monitors are also named by connector (`DP-4`) or position (`left`,
+`middle`, `right`; `top`/`bottom` only when stacked) — `tessera_core::
+monitor`, suggested by Tia's agent so clients don't each keep a table. A
+windowed *move* doesn't stick under pop-shell (tried: plain move, and a
+fullscreen hop — both snapped back to the tile slot); `tessera_window`
+reports where the window really is.
+
 Monitors (2026-10-08): `--monitor N` / `--fullscreen` on the command
 line, `tessera_window` (list monitors and windows; fullscreen, windowed,
 move, new), and `monitor`/`fullscreen` on `tessera_open` — which opens a

@@ -464,10 +464,7 @@ fn dispatch(
         "status" => Ok(ok(status(wall, settings, cursor_over))),
         "window" => {
             let action = s("action").unwrap_or("list");
-            let monitor = p.get("monitor").and_then(Value::as_u64).map(|n| n as usize);
-            if let Some(n) = monitor {
-                check_monitor(wall, n)?;
-            }
+            let monitor = monitor_arg(wall, p)?;
             match action {
                 "list" => Ok(ok(windows_json(wall))),
                 "new" => {
@@ -556,10 +553,8 @@ fn dispatch(
             // A monitor asked for: a wall window already there, or a new
             // one opened there — with the file at the head of the queue, so
             // its first tile is this file.
-            let on_monitor = match p.get("monitor").and_then(Value::as_u64) {
+            let on_monitor = match monitor_arg(wall, p)? {
                 Some(n) => {
-                    let n = n as usize;
-                    check_monitor(wall, n)?;
                     let here = |want_tiles: bool| {
                         wall.screens.iter().position(|s| {
                             s.role == ScreenRole::Wall && monitor_of(s) == Some(n) && (!want_tiles || !s.tiles.is_empty())
@@ -966,26 +961,32 @@ fn monitor_of(s: &crate::screen::Screen) -> Option<usize> {
     monitor_under_window(&s.window).map(|(i, _)| i).or(Some(s.monitor_index))
 }
 
-fn check_monitor(wall: &Wall, n: usize) -> Result<(), String> {
-    let count = wall.screens.first().map_or(0, |s| s.window.available_monitors().count());
-    if n < count {
-        Ok(())
-    } else {
-        Err(format!("there is no monitor {n} — monitors are 0 to {} (see tessera_window action=list)", count.saturating_sub(1)))
-    }
+/// The `monitor` argument, if given: a number, a connector name ("DP-4")
+/// or a position ("left"), resolved against the monitors there are now.
+fn monitor_arg(wall: &Wall, p: &Value) -> Result<Option<usize>, String> {
+    let spec = match p.get("monitor") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => v.to_string(),
+    };
+    let infos = wall.screens.first().map(|s| crate::monitor_infos(s.window.available_monitors())).unwrap_or_default();
+    tessera_core::monitor::resolve_monitor(&spec, &infos).map(Some)
 }
 
 /// Monitors (with which windows are on each) and windows.
 fn windows_json(wall: &Wall) -> Value {
     let Some(first) = wall.screens.first() else { return json!({ "monitors": [], "windows": [] }) };
-    let monitors: Vec<Value> = first
-        .window
-        .available_monitors()
+    let infos = crate::monitor_infos(first.window.available_monitors());
+    let monitors: Vec<Value> = infos
+        .iter()
         .enumerate()
         .map(|(i, m)| {
-            let (pos, size) = (m.position(), m.size());
             let on: Vec<usize> = wall.screens.iter().enumerate().filter(|(_, s)| monitor_of(s) == Some(i)).map(|(wi, _)| wi).collect();
-            json!({ "index": i, "name": m.name(), "size": [size.width, size.height], "position": [pos.x, pos.y], "windows": on })
+            json!({
+                "index": i, "name": m.name, "size": [m.w, m.h], "position": [m.x, m.y], "windows": on,
+                // The words that name it, so a client can say "left".
+                "positions": tessera_core::monitor::position_words(&infos, i),
+            })
         })
         .collect();
     let windows: Vec<Value> = wall
@@ -1026,6 +1027,11 @@ fn place_window(wall: &mut Wall, wi: usize, monitor: Option<usize>, fullscreen: 
                 s.windowed_restore = Some((pos, window.inner_size()));
             }
         }
+        // Going fullscreen somewhere else: "windowed" afterwards should stay
+        // there, not return to where it was before.
+        if target.as_ref().is_some_and(|(n, _)| Some(*n) != monitor_of(s)) {
+            s.windowed_restore = None;
+        }
         // Aim at the monitor asked for, else the one it is on now (as W does).
         let m = match target {
             Some((n, m)) => Some((n, m)),
@@ -1043,6 +1049,16 @@ fn place_window(wall: &mut Wall, wi: usize, monitor: Option<usize>, fullscreen: 
             settle = toggle_window_mode(wall.screens, wi);
         }
         if let Some((n, m)) = target {
+            let s = &mut wall.screens[wi];
+            s.monitor_index = n;
+            s.intended_monitor = Some(m.clone());
+            s.windowed_restore = None;
+            // A request, not a guarantee: a tiling WM (pop-shell) snaps a
+            // tiled window back to its slot ~0.3s after the app moves it,
+            // and restores that slot when fullscreen ends, so neither a
+            // move nor a fullscreen hop sticks there. What does: placement
+            // when a window is created, and fullscreen on a monitor. The
+            // shim reports where the window really ended up.
             let (mp, ms) = (m.position(), m.size());
             let size = window.outer_size();
             let (w, h) = (size.width.min(ms.width), size.height.min(ms.height));
@@ -1050,11 +1066,6 @@ fn place_window(wall: &mut Wall, wi: usize, monitor: Option<usize>, fullscreen: 
                 mp.x + (ms.width - w) as i32 / 2,
                 mp.y + (ms.height - h) as i32 / 2,
             ));
-            let s = &mut wall.screens[wi];
-            s.monitor_index = n;
-            s.intended_monitor = Some(m);
-            // Remembered as where W returns it to, too.
-            s.windowed_restore = None;
         }
     }
     if settle && crate::platform::WM_SETTLE {

@@ -106,8 +106,11 @@ struct Args {
     jellyfin: bool,
     plex_library: Option<String>,
     jellyfin_library: Option<String>,
-    /// --monitor N: which monitor the (single) window starts on.
-    monitor: Option<usize>,
+    /// --monitor: which monitor the (single) window starts on — a number,
+    /// a connector name or a position, resolved once monitors are known.
+    monitor: Option<String>,
+    /// --fullscreen: start that window fullscreen.
+    fullscreen: bool,
 }
 
 /// Where a window opened at runtime should go. None of these means "near
@@ -122,7 +125,6 @@ pub struct Placement {
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut fullscreen = false;
     let mut args = Args {
         files: Vec::new(),
         tiles: 12,
@@ -143,6 +145,7 @@ fn parse_args() -> Result<Args, String> {
         plex_library: None,
         jellyfin_library: None,
         monitor: None,
+        fullscreen: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -151,8 +154,8 @@ fn parse_args() -> Result<Args, String> {
             "--tiles" => args.tiles = value()?.parse().map_err(|_| "bad --tiles")?,
             "--populate" => args.populate = Some(value()?.parse().map_err(|_| "bad --populate")?),
             "--max" => args.screens = ScreenSel::All,
-            "--monitor" => args.monitor = Some(value()?.parse().map_err(|_| "bad --monitor (a monitor number)")?),
-            "--fullscreen" => fullscreen = true,
+            "--monitor" => args.monitor = Some(value()?),
+            "--fullscreen" => args.fullscreen = true,
             "--screens" => match value()?.as_str() {
                 "all" => args.screens = ScreenSel::All,
                 n => args.screens = ScreenSel::Indices(
@@ -208,11 +211,8 @@ fn parse_args() -> Result<Args, String> {
     if args.monitor.is_some() && !windowed {
         return Err("--monitor picks the one window's monitor; --screens/--max already choose theirs".into());
     }
-    if fullscreen {
-        if !windowed {
-            return Err("--fullscreen is for the one window; --screens/--max are already fullscreen".into());
-        }
-        args.screens = ScreenSel::Indices(vec![args.monitor.unwrap_or(0)]);
+    if args.fullscreen && !windowed {
+        return Err("--fullscreen is for the one window; --screens/--max are already fullscreen".into());
     }
     Ok(args)
 }
@@ -232,8 +232,9 @@ OPTIONS:
                      (the video-wall mode; without it you get one window)
   --screens SPEC     Monitors to use fullscreen: 'all' or comma-separated
                      indices, e.g. '1' or '0,2'
-  --monitor N        Start the window on monitor N (the numbers printed at
-                     startup as monitor N: ...; 0 by default)
+  --monitor M        Start the window on monitor M: a number (as printed at
+                     startup, monitor N: ...; 0 by default), a connector
+                     name (DP-4) or a position (left, middle, right)
   --fullscreen       Start the window fullscreen on that monitor (as W does)
   --windowed WxH     Size of the initial window (default 1600x900). Extra
                      windows: the '+' button in the status bar; W toggles
@@ -483,6 +484,23 @@ fn main() {
         std::process::exit(1);
     }
 
+    // --monitor resolves against the real monitors: a number, a connector
+    // name (DP-4) or a position (left/middle/right). --fullscreen then means
+    // what `--screens N` always did.
+    let mut args = args;
+    let chosen_monitor = match &args.monitor {
+        Some(spec) => match tessera_core::monitor::resolve_monitor(spec, &monitor_infos(monitors.iter().cloned())) {
+            Ok(i) => Some(i),
+            Err(e) => {
+                eprintln!("error: --monitor: {e}");
+                std::process::exit(2);
+            }
+        },
+        None => None,
+    };
+    if args.fullscreen {
+        args.screens = ScreenSel::Indices(vec![chosen_monitor.unwrap_or(0)]);
+    }
     let monitor_indices: Vec<usize> = match &args.screens {
         ScreenSel::All => (0..monitors.len()).collect(),
         ScreenSel::Indices(list) => {
@@ -498,14 +516,7 @@ fn main() {
             }
             list.clone()
         }
-        ScreenSel::Windowed(_, _) => {
-            let m = args.monitor.unwrap_or(0);
-            if m >= monitors.len() {
-                eprintln!("error: monitor {m} not found (have {})", monitors.len());
-                std::process::exit(2);
-            }
-            vec![m]
-        }
+        ScreenSel::Windowed(_, _) => vec![chosen_monitor.unwrap_or(0)],
     };
 
     let (first_window, gl_config) = {
@@ -2985,6 +2996,17 @@ fn toggle_window_mode(screens: &mut [Screen], idx: usize) -> bool {
         println!("screen {}: fullscreen wall", screen.monitor_index);
     }
     schedule_fix && platform::WM_SETTLE
+}
+
+/// What `tessera_core::monitor` needs to know about each monitor, in
+/// `available_monitors()` order.
+fn monitor_infos(monitors: impl Iterator<Item = winit::monitor::MonitorHandle>) -> Vec<tessera_core::monitor::MonitorInfo> {
+    monitors
+        .map(|m| {
+            let (p, s) = (m.position(), m.size());
+            tessera_core::monitor::MonitorInfo { name: m.name(), x: p.x, y: p.y, w: s.width, h: s.height }
+        })
+        .collect()
 }
 
 /// The monitor a window is actually on, found by containment of the
