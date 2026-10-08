@@ -129,8 +129,9 @@ impl BrowserState {
 pub struct QueueView<'a> {
     pub items: &'a [MediaItem],
     /// Index of the item the wall is currently on. Everything at or before
-    /// it is history and cannot be reordered or removed.
-    pub current: usize,
+    /// it is history and cannot be reordered or removed. None until
+    /// anything has started: then the whole queue is pending.
+    pub current: Option<usize>,
 }
 
 impl QueueView<'_> {

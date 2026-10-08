@@ -125,11 +125,11 @@ pub fn draw(
                 return;
             }
             // The first pending item has nothing to swap up into.
-            let first_pending = queue.current + 1;
+            let first_pending = queue.current.map_or(0, |c| c + 1);
             for (i, m) in queue.items.iter().enumerate().take(MAX_ROWS) {
-                let pending = i > queue.current;
+                let pending = i >= first_pending;
                 ui.horizontal(|ui| {
-                    if i == queue.current {
+                    if Some(i) == queue.current {
                         ui.colored_label(egui::Color32::from_rgb(140, 220, 140), "▶");
                     } else {
                         ui.weak(format!("{:>3}", i + 1));

@@ -90,7 +90,8 @@ struct Args {
     populate: Option<usize>,
     screens: ScreenSel,
     hwdec: String,
-    audio: bool,
+    /// --audio / --no-audio: overrides the saved setting when given.
+    audio: Option<bool>,
     audio_device: Option<String>,
     ui_scale: Option<f32>,
     cache_mb: Option<u32>,
@@ -112,7 +113,7 @@ fn parse_args() -> Result<Args, String> {
         populate: None,
         screens: ScreenSel::Windowed(DEFAULT_WINDOW.0, DEFAULT_WINDOW.1),
         hwdec: platform::DEFAULT_HWDEC.into(),
-        audio: false,
+        audio: None,
         audio_device: None,
         ui_scale: None,
         cache_mb: None,
@@ -155,7 +156,8 @@ fn parse_args() -> Result<Args, String> {
             "--jellyfin" => args.jellyfin = true,
             "--plex-library" => args.plex_library = Some(value()?),
             "--jellyfin-library" => args.jellyfin_library = Some(value()?),
-            "--audio" => args.audio = true,
+            "--audio" => args.audio = Some(true),
+            "--no-audio" => args.audio = Some(false),
             "--audio-device" => args.audio_device = Some(value()?),
             "--ui-scale" => args.ui_scale = Some(value()?.parse().map_err(|_| "bad --ui-scale")?),
             "--cache-mb" => args.cache_mb = Some(value()?.parse().map_err(|_| "bad --cache-mb")?),
@@ -203,7 +205,9 @@ OPTIONS:
                      windows: the '+' button in the status bar; W toggles
                      any one window between windowed and fullscreen
   --advance          Advance to the next queue item on end (default: loop)
-  --audio            Enable audio (default muted)
+  --no-audio         Disable audio entirely (default: on — the first tile is
+                     heard, tiles added beside it start muted). --audio turns
+                     it back on if the config tab saved it off
   --audio-device DEV mpv audio device, e.g. pulse/alsa_output.pci-...hdmi-stereo
                      (default: system default; check `pactl list sinks short`)
   --ui-scale F       Overlay UI scale, 0.75-3.0 (default 1.0; also in settings)
@@ -212,15 +216,6 @@ OPTIONS:
   --max-streams N    Budget: max concurrent streams (default 128; also in settings)
   --ceiling N        Budget: 1080p30-equivalent decode ceiling (default 96)
   --status-interval S  Seconds between status prints (default 5)
-
-SECOND LAUNCH:
-  Running tessera again does not start a second app: it hands its files to
-  the instance already running, brings that window to the front and exits.
-  One process owns one queue and one decode budget, so a second would
-  double-count the GPU and both would overwrite each other's settings.
-  The instance is keyed on the config directory, so a different HOME is a
-  different instance. Set TESSERA_ALLOW_MULTI=1 to force a second process
-  against the same config (development only — it reinstates both hazards).
   --overlay          Start with the overlay UI pinned on (Tab toggles pinning;
                      otherwise the UI shows on input and hides after 5s idle)
   --plex             Add the Plex server from ~/.config/opentessera/sources.conf
@@ -230,6 +225,15 @@ SECOND LAUNCH:
   --plex-library N         Only list this Plex library (by title)
   --jellyfin-library N     Only list this Jellyfin library (by name)
 
+SECOND LAUNCH:
+  Running tessera again does not start a second app: it hands its files to
+  the instance already running, brings that window to the front and exits.
+  One process owns one queue and one decode budget, so a second would
+  double-count the GPU and both would overwrite each other's settings.
+  The instance is keyed on the config directory, so a different HOME is a
+  different instance. Set TESSERA_ALLOW_MULTI=1 to force a second process
+  against the same config (development only — it reinstates both hazards).
+
 CONTROLS:
   Esc                Quit
   Tab                Pin/unpin the overlay UI (auto-hides after 5s idle)
@@ -237,7 +241,7 @@ CONTROLS:
   Left click         Pause/resume the clicked tile
   Drag               Rearrange: drop on another tile to swap, or onto another
                      screen to move the tile there (Esc cancels)
-  Right click        Mute/unmute the clicked tile (needs --audio)
+  Right click        Mute/unmute the clicked tile
   Up/Down arrows     Volume +/-5 on unmuted tiles of the focused screen
   Wheel              Volume +/-5 on the tile under the cursor
   Left/Right arrows  Seek -/+10s on the tile under the cursor
@@ -317,8 +321,8 @@ fn main() {
     // Settings first: sources configured in the gear panel (persisted in
     // settings.conf) feed the wall alongside any CLI paths/flags.
     let mut settings = load_settings();
-    if args.audio {
-        settings.audio = true;
+    if let Some(audio) = args.audio {
+        settings.audio = audio;
     }
     if let Some(c) = args.cache_mb {
         settings.cache_mb = c.clamp(64, 8192);
@@ -584,6 +588,13 @@ fn main() {
     // Set once the wall has been torn down, by whichever path got there
     // first — Esc, closing the last window, or the OS quitting us.
     let mut shut_down = false;
+    // The first tile is the app's, not the user's, to make. A launch with
+    // nothing queued opens an empty wall, and making a queue in the
+    // browser shouldn't then need a "+" before anything plays — so until
+    // the first tile exists, whatever lands in the queue starts one.
+    // Cleared for good once a tile has existed: closing them all later is
+    // a choice, and the wall must not refill behind the user's back.
+    let mut awaiting_first_tile = true;
     // Files that arrived while running — handed off, opened by the OS or
     // dropped — being listed off-thread (see `list_off_thread`).
     let (listed_tx, listed_rx) = std::sync::mpsc::channel::<Listed>();
@@ -795,6 +806,28 @@ fn main() {
                                 wm_settle_at: &mut wm_settle_at,
                             };
                             handle_overlay_action(&mut wall, action, screen_idx);
+                        }
+                    }
+                    if awaiting_first_tile {
+                        if screens.iter().any(|s| !s.tiles.is_empty()) {
+                            awaiting_first_tile = false;
+                        } else if !queue.is_empty() {
+                            if let Some(si) = screens.iter().position(|s| s.role == ScreenRole::Wall) {
+                                awaiting_first_tile = false;
+                                let mut wall = Wall {
+                                    screens: &mut screens,
+                                    budget: &mut budget,
+                                    queue: &mut queue,
+                                    sources: &sources,
+                                    overlay: &mut overlay,
+                                    mpv_lib: &mpv_lib,
+                                    tile_opts: &tile_opts,
+                                    next_tile_id: &mut next_tile_id,
+                                    max_tiles: args.tiles,
+                                    wm_settle_at: &mut wm_settle_at,
+                                };
+                                add_tile_action(&mut wall, si);
+                            }
                         }
                     }
                     for (role, tab) in std::mem::take(&mut new_windows) {
@@ -1477,8 +1510,8 @@ fn populate_startup(
         let monitor_index = screens[screen_idx].monitor_index;
         let mut created = 0;
         while created < target_tiles {
-            let item = match queue.current() {
-                Some(m) => m.clone(),
+            let item = match queue.upcoming(1).first() {
+                Some(m) => (*m).clone(),
                 None => break,
             };
             match request_admission(screens, budget, *next_tile_id, &tessera_core::StreamSpec::placeholder()) {
@@ -1497,7 +1530,8 @@ fn populate_startup(
                 }
             }
             screens[screen_idx].context.make_current(&screens[screen_idx].surface).ok();
-            match Tile::new(mpv_lib, *next_tile_id, &item, tile_opts, None) {
+            let muted = screens.iter().any(|s| !s.tiles.is_empty());
+            match Tile::new(mpv_lib, *next_tile_id, &item, tile_opts, None, muted) {
                 Ok(tile) => {
                     screens[screen_idx].add_tile(tile);
                     *next_tile_id += 1;
@@ -1943,7 +1977,7 @@ fn move_tile_cross_screen(
     }
     // Tile creation happens on the target screen's GL context.
     screens[dst].context.make_current(&screens[dst].surface).ok();
-    match Tile::new(mpv_lib, tile_id, &item, tile_opts, Some(&resume)) {
+    match Tile::new(mpv_lib, tile_id, &item, tile_opts, Some(&resume), true) {
         Ok(tile) => {
             screens[dst].add_tile(tile);
             println!(
@@ -2079,7 +2113,10 @@ fn add_tile_action(wall: &mut Wall, screen_idx: usize) {
             return;
         }
     };
-    spawn_tile(wall, screen_idx, item);
+    if spawn_tile(wall, screen_idx, item) {
+        // Only now: the item is really playing somewhere.
+        wall.queue.advance();
+    }
 }
 
 /// Whether this screen can take another tile, explaining (as a toast) why
@@ -2102,27 +2139,31 @@ fn can_add_tile(wall: &mut Wall, screen_idx: usize) -> bool {
 }
 
 /// Starts a tile playing `item` on a screen, through the decode budget.
-fn spawn_tile(wall: &mut Wall, screen_idx: usize, item: tessera_core::MediaItem) {
+/// Returns whether it did. It leaves the queue alone: an item taken from
+/// the queue is the caller's to advance past, and one that was never in it
+/// (play now, an opened file) must not consume someone else's place.
+fn spawn_tile(wall: &mut Wall, screen_idx: usize, item: tessera_core::MediaItem) -> bool {
     let monitor_index = wall.screens[screen_idx].monitor_index;
     let id = *wall.next_tile_id;
     match request_admission(wall.screens, wall.budget, id, &tessera_core::StreamSpec::placeholder()) {
         Admission::Admitted | Admission::AdmittedEvicting { .. } => {
             wall.screens[screen_idx].context.make_current(&wall.screens[screen_idx].surface).ok();
-            match Tile::new(wall.mpv_lib, id, &item, wall.tile_opts, None) {
+            let muted = wall.screens.iter().any(|s| !s.tiles.is_empty());
+            match Tile::new(wall.mpv_lib, id, &item, wall.tile_opts, None, muted) {
                 Ok(tile) => {
                     wall.screens[screen_idx].add_tile(tile);
                     *wall.next_tile_id += 1;
-                    // Only now: the item is really playing somewhere.
-                    wall.queue.advance();
                     println!(
                         "screen {monitor_index}: added tile {id} \"{}\" ({} tiles)",
                         item.title,
                         wall.screens[screen_idx].tiles.len()
                     );
+                    true
                 }
                 Err(e) => {
                     wall.budget.release(id);
                     notify(wall.overlay, format!("not adding: tile creation failed: {e}"));
+                    false
                 }
             }
         }
@@ -2135,9 +2176,11 @@ fn spawn_tile(wall: &mut Wall, screen_idx: usize, item: tessera_core::MediaItem)
                     ceiling / tessera_core::budget::MACROBLOCKS_1080P30
                 ),
             );
+            false
         }
         Admission::RejectedMaxStreams { max } => {
             notify(wall.overlay, format!("not adding: max concurrent streams ({max}) — raise it in config (C)"));
+            false
         }
     }
 }
@@ -2431,7 +2474,16 @@ fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx: usi
                         }
                     }
                 }
-                None => notify(wall.overlay, "no wall tile to play on — open a window first".into()),
+                // An empty wall window gets a tile rather than an error —
+                // the item is not queued, so the queue is not advanced.
+                None => match wall.screens.iter().position(|s| s.role == ScreenRole::Wall) {
+                    Some(si) => {
+                        if can_add_tile(wall, si) {
+                            spawn_tile(wall, si, item);
+                        }
+                    }
+                    None => notify(wall.overlay, "no wall window to play on — open one with + first".into()),
+                },
             }
         }
         // Intercepted by the event loop before they get here: opening a
@@ -2613,23 +2665,28 @@ fn open_listed(wall: &mut Wall, target: OpenTarget, items: Vec<tessera_core::Med
     };
 
     let mut items = items;
+    if let Some(Spot::Spawn(si)) = spot {
+        // A new tile for the first, the extras queued — the same split as
+        // replacing one, below. If the tile can't be made (budget, --tiles)
+        // the file goes to the head of the queue instead of being lost.
+        let first = items.remove(0);
+        wall.queue.append_items(items);
+        if !(can_add_tile(wall, si) && spawn_tile(wall, si, first.clone())) {
+            let first_idx = wall.queue.len();
+            wall.queue.append_items(vec![first]);
+            wall.queue.move_pending_to_front(first_idx);
+        }
+        wall.screens[si].window.focus_window();
+        return false;
+    }
     let Some(Spot::Replace(si, tile_id)) = spot else {
-        // No tile to take over, so the file goes in the queue — at the head
-        // of the pending tail, which is what a new tile pulls from (and what
-        // `spawn_tile` marks as played), so the tile about to be made comes
-        // up on the file that was asked for rather than on whatever was
-        // next.
-        let first = items[0].clone();
+        // No wall window at all, so the file goes in the queue — at the
+        // head of the pending tail, which is what the new window's first
+        // tile pulls from, so it comes up on the file that was asked for
+        // rather than on whatever was next.
         let first_idx = wall.queue.len();
         wall.queue.append_items(items);
         wall.queue.move_pending_to_front(first_idx);
-        if let Some(Spot::Spawn(si)) = spot {
-            if can_add_tile(wall, si) {
-                spawn_tile(wall, si, first);
-            }
-            wall.screens[si].window.focus_window();
-            return false;
-        }
         println!("opened: {count} file(s) — no wall window yet, opening one");
         return true;
     };

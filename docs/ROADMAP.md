@@ -163,7 +163,7 @@ just work; zoom (F) takes precedence while active.
 
 Solo (🎤 chip button): unmute that tile, mute every other stream on every
 screen (audio focus). Solo highlight clears on any manual mute change.
-Needs --audio; toast explains otherwise.
+Needs audio enabled (the default; off with --no-audio); toast explains otherwise.
 
 **Effort**: S–M
 
@@ -1177,6 +1177,37 @@ opened beside it.
 
 - Only files are accepted. A dropped URL (`text/uri-list` pointing at
   http) would be a reasonable thing to feed mpv directly.
+
+---
+
+## 22. Audio on by default, and a wall that starts ready
+
+Status: **implemented** (2026-10-08)
+
+- **Audio is on unless asked off.** `--audio` used to be needed for any
+  sound at all; now `--no-audio` (or the config tab) turns it off, and
+  `--audio` remains to override a saved "off".
+- **The first tile is heard; the ones beside it are not.** Opening one
+  video should just play it, sound included, but a wall of N streams is
+  noise. The rule is decided at tile creation: a tile starts unmuted only
+  if no other tile exists anywhere. Moving a tile between windows keeps
+  its own mute state.
+- **No "+" before the first video.** A launch with nothing queued opens an
+  empty wall; the first thing queued from the browser now starts a tile on
+  it. Only until the first tile exists — closing every tile later is a
+  choice, and the wall does not refill behind the user. "Play now" on an
+  empty wall starts a tile too, instead of a toast.
+
+Found on the way: the queue read a fresh cursor (`None`) two ways.
+`advance`/`upcoming` treated it as already on item 0, so the first tile
+added by "+" played item 1; startup filled from `current()` and left the
+cursor on an item nothing had played, so "+" after it skipped one. `None`
+now means nothing has started and item 0 is next, everywhere; startup fills
+through `upcoming` like everything else, and `restore` puts the cursor just
+before the saved item so a restored queue still resumes on it.
+`spawn_tile` no longer advances the queue — callers taking from it do — so
+an item that was never queued (play now, an opened file) can't consume
+someone else's place.
 
 ---
 

@@ -227,11 +227,11 @@ all tiles on the focused screen · `F` fullscreen the tile under the cursor ·
 the jump accumulates and is applied in batches rather than stuttering
 through one seek per key repeat ·
 click a tile to pause/resume it · hover a tile to show its queue strip
-(click a thumbnail to play it there) · with `--audio`: right-click a tile
-to unmute/mute it
-(all tiles start muted — a wall of simultaneous streams should be
-selectively audible, not a cacophony), `Up`/`Down` adjust volume of unmuted
-tiles on the focused screen.
+(click a thumbnail to play it there) · right-click a tile to unmute/mute it
+(the first tile is heard and every tile added beside it starts muted — one
+video should just play, but a wall of simultaneous streams should be
+selectively audible, not a cacophony; `--no-audio` turns audio off
+entirely), `Up`/`Down` adjust volume of unmuted tiles on the focused screen.
 
 Seeks and file loads are issued asynchronously (mpv's async command API), and
 quit tears down all mpv instances in parallel. Known limitation: a seek

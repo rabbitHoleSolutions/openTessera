@@ -162,6 +162,7 @@ impl Tile {
         item: &MediaItem,
         opts: &TileOptions,
         resume: Option<&ResumeState>,
+        muted: bool,
     ) -> Result<Tile, tessera_mpv::Error> {
         // A live feed and a film want genuinely different players. mpv
         // options were one global set applied identically to every tile,
@@ -190,10 +191,13 @@ impl Tile {
         }
         if opts.audio {
             // Don't pin `ao`: let mpv auto-negotiate (pulse via PipeWire on
-            // Linux, coreaudio on macOS). Every tile starts muted — a video
-            // wall with N simultaneous streams is noise; right-click unmutes
-            // an individual tile, mirroring the Quest app's per-tile mute.
-            options.push(("mute", "yes"));
+            // Linux, coreaudio on macOS). The caller decides `muted`: the
+            // first tile is heard — one video should just play — and every
+            // tile added beside it starts muted, since a wall of N
+            // simultaneous streams is noise; right-click unmutes one,
+            // mirroring the Quest app's per-tile mute. A resume overrides
+            // this with the tile's own state, below.
+            options.push(("mute", if muted { "yes" } else { "no" }));
             if let Some(dev) = &opts.audio_device {
                 options.push(("audio-device", dev));
             }
@@ -418,8 +422,9 @@ impl Tile {
     }
 
     /// Toggles this tile's audio. Returns the new muted state.
-    /// Only meaningful when the app was started with --audio; otherwise the
-    /// whole audio pipeline is disabled per-tile.
+    /// Only meaningful while audio is enabled (the default; --no-audio or
+    /// the config tab turn it off); otherwise the whole audio pipeline is
+    /// disabled per-tile.
     /// Sets mute directly (solo applies this to every tile at once).
     pub fn set_muted(&self, muted: bool) {
         if let Err(e) = self.mpv.command(&["set", "mute", if muted { "yes" } else { "no" }]) {

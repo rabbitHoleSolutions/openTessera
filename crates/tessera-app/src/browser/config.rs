@@ -37,7 +37,7 @@ pub fn draw(ctx: &egui::Context, settings: &mut UiSettings) {
                     ui.end_row();
 
                     ui.label("audio");
-                    ui.checkbox(&mut settings.audio, "enabled (tiles still start muted)")
+                    ui.checkbox(&mut settings.audio, "enabled (tiles after the first start muted)")
                         .on_hover_text("without this the audio pipeline is off entirely and the mute buttons do nothing");
                     ui.end_row();
                 });

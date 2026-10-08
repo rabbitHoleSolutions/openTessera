@@ -10,6 +10,13 @@ pub enum QueueOrder {
 
 /// Cursor-based wrapping playback queue. Played history before the cursor is
 /// preserved; the pending tail after the cursor can be re-ordered or shuffled.
+///
+/// The cursor is the item most recently started, so `None` means nothing has
+/// been — the whole queue is pending and item 0 is next. That used to be
+/// read two ways: `advance`/`upcoming` treated a fresh queue as already on
+/// item 0 (so the first tile added played item 1), while startup filled
+/// from `current()` and left the cursor on an item nothing had played (so
+/// "+" afterwards skipped one).
 pub struct PlaybackQueue {
     items: Vec<MediaItem>,
     cursor: Option<usize>,
@@ -68,24 +75,27 @@ impl PlaybackQueue {
         self.items.iter().any(|i| i.id == id)
     }
 
+    /// The item most recently started; None until something has been.
     pub fn current(&self) -> Option<&MediaItem> {
-        self.items.get(self.cursor.unwrap_or(0))
+        self.cursor.and_then(|c| self.items.get(c))
     }
 
-    pub fn current_index(&self) -> usize {
-        self.cursor.unwrap_or(0)
+    pub fn current_index(&self) -> Option<usize> {
+        self.cursor
     }
 
-    /// Advances the cursor, wrapping to the start. Returns the new current item.
-    /// A never-advanced queue treats index 0 as current.
+    /// Index of the first pending item — what loads next, before wrapping.
+    fn next_index(&self) -> usize {
+        self.cursor.map_or(0, |c| c + 1)
+    }
+
+    /// Advances the cursor, wrapping to the start. Returns the new current
+    /// item — on a fresh queue, item 0.
     pub fn advance(&mut self) -> Option<&MediaItem> {
         if self.items.is_empty() {
             return None;
         }
-        let next = match self.cursor {
-            Some(c) => (c + 1) % self.items.len(),
-            None => 1 % self.items.len(),
-        };
+        let next = self.next_index() % self.items.len();
         self.cursor = Some(next);
         self.items.get(next)
     }
@@ -104,41 +114,35 @@ impl PlaybackQueue {
     }
 
     /// Next n items after the cursor, wrapping, for an "up next" strip.
+    /// The first is what the next `advance` yields.
     pub fn upcoming(&self, n: usize) -> Vec<&MediaItem> {
-        let mut out = Vec::new();
-        if self.items.is_empty() {
-            return out;
-        }
-        let cur = self.cursor.unwrap_or(0);
-        for i in 1..=n.min(self.items.len()) {
-            out.push(&self.items[(cur + i) % self.items.len()]);
-        }
-        out
+        let len = self.items.len();
+        let start = self.next_index();
+        (0..n.min(len)).map(|i| &self.items[(start + i) % len]).collect()
     }
 
     /// The pending tail: items after the cursor in load order, NO wrapping
     /// (what will actually load next). Returns (index, item) pairs so the
     /// caller can reference entries in management operations.
     pub fn pending(&self, n: usize) -> Vec<(usize, &MediaItem)> {
-        let cur = self.current_index();
-        let end = (cur + 1 + n).min(self.items.len());
-        (cur + 1..end).map(|i| (i, &self.items[i])).collect()
+        let start = self.next_index();
+        let end = (start + n).min(self.items.len());
+        (start..end).map(|i| (i, &self.items[i])).collect()
     }
 
     /// Moves a pending item to the front of the pending tail: it loads next.
     pub fn move_pending_to_front(&mut self, index: usize) {
-        let cur = self.current_index();
-        if index > cur && index < self.items.len() {
+        let front = self.next_index();
+        if index > front && index < self.items.len() {
             let item = self.items.remove(index);
-            self.items.insert(cur + 1, item);
+            self.items.insert(front, item);
         }
     }
 
     /// Removes a pending item from the queue. History and the current item
     /// (index <= cursor) are refused — tiles hold clones of those.
     pub fn remove_pending(&mut self, index: usize) {
-        let cur = self.current_index();
-        if index > cur && index < self.items.len() {
+        if index >= self.next_index() && index < self.items.len() {
             self.items.remove(index);
         }
     }
@@ -149,15 +153,14 @@ impl PlaybackQueue {
     pub fn remove_item(&mut self, id: &str) -> Option<MediaItem> {
         let idx = self.items.iter().position(|m| m.id == id)?;
         let item = self.items.remove(idx);
-        if let Some(c) = self.cursor.as_mut() {
-            if *c > idx {
-                *c -= 1;
-            } else if *c == idx {
-                // Point at the item before the removed one so the next
-                // advance lands on the item that followed it.
-                *c = if idx == 0 { self.items.len().saturating_sub(1) } else { idx - 1 };
-            }
-        }
+        self.cursor = match self.cursor {
+            Some(c) if c > idx => Some(c - 1),
+            // Point at the item before the removed one so the next advance
+            // lands on the item that followed it — or at nothing, if it
+            // was first.
+            Some(c) if c == idx => idx.checked_sub(1),
+            other => other,
+        };
         Some(item)
     }
 
@@ -170,8 +173,8 @@ impl PlaybackQueue {
     /// not `from + 1`: inserting before the item that already follows you
     /// is where you started (see the adjacent-no-op test below).
     pub fn move_pending(&mut self, from: usize, to: usize) {
-        let cur = self.current_index();
-        if from > cur && from < self.items.len() && to > cur && to <= self.items.len() && from != to {
+        let front = self.next_index();
+        if from >= front && from < self.items.len() && to >= front && to <= self.items.len() && from != to {
             let item = self.items.remove(from);
             // After removal, positions above `from` shift down by one;
             // "insert before original `to`" accounts for that.
@@ -180,15 +183,18 @@ impl PlaybackQueue {
         }
     }
 
-    /// A snapshot for persistence: the items and where the cursor sits.
+    /// A snapshot for persistence: the items and where to resume — the
+    /// item that was current, which a restored queue plays first.
     pub fn snapshot(&self) -> (Vec<MediaItem>, usize) {
-        (self.items.clone(), self.current_index())
+        (self.items.clone(), self.cursor.unwrap_or(0))
     }
 
     /// Restores a snapshot verbatim — no re-sorting, or a saved shuffle
-    /// would come back in a different order than it was left.
-    pub fn restore(&mut self, items: Vec<MediaItem>, cursor: usize) {
-        self.cursor = (!items.is_empty()).then(|| cursor.min(items.len() - 1));
+    /// would come back in a different order than it was left. The cursor
+    /// lands just before `resume_at`, so the next item to load is the one
+    /// that was playing when the snapshot was taken.
+    pub fn restore(&mut self, items: Vec<MediaItem>, resume_at: usize) {
+        self.cursor = resume_at.min(items.len().saturating_sub(1)).checked_sub(1);
         self.items = items;
     }
 
@@ -264,7 +270,7 @@ mod tests {
     fn appending_never_disturbs_what_is_already_playing() {
         let mut q = PlaybackQueue::new(QueueOrder::Name);
         q.add_items(vec![item("b"), item("c"), item("d")]);
-        q.advance(); // cursor on "c"
+        q.advance(); // cursor on "b"
         let playing = q.current().unwrap().title.clone();
         q.add_items(vec![item("a")]);
         // "a" sorts first, but only the pending tail moves — the cursor
@@ -281,13 +287,16 @@ mod tests {
         q.advance();
         q.advance();
         let want = q.current().unwrap().title.clone();
+        let order: Vec<String> = q.items().iter().map(|m| m.title.clone()).collect();
         let (items, cursor) = q.snapshot();
 
         let mut back = PlaybackQueue::new(QueueOrder::Name);
         back.restore(items, cursor);
         // Restored verbatim: a saved shuffle must not be re-sorted by the
         // order the new queue happens to have been built with.
-        assert_eq!(back.current().unwrap().title, want);
+        assert_eq!(back.items().iter().map(|m| m.title.clone()).collect::<Vec<_>>(), order);
+        // And it resumes on the item that was playing.
+        assert_eq!(back.advance().unwrap().title, want);
         assert_eq!(back.len(), 4);
     }
 
@@ -295,7 +304,7 @@ mod tests {
     fn restoring_a_bad_cursor_or_an_empty_list_is_safe() {
         let mut q = PlaybackQueue::new(QueueOrder::Name);
         q.restore(vec![item("a")], 99);
-        assert_eq!(q.current().unwrap().title, "a");
+        assert_eq!(q.upcoming(1)[0].title, "a");
         q.restore(Vec::new(), 5);
         assert!(q.is_empty());
         assert!(q.current().is_none());
@@ -313,7 +322,8 @@ mod tests {
         assert!(q.advance().is_none());
         // Refilling starts clean rather than resuming an old cursor.
         q.add_items(vec![item("z")]);
-        assert_eq!(q.current().unwrap().title, "z");
+        assert!(q.current().is_none());
+        assert_eq!(q.upcoming(1)[0].title, "z");
     }
 
     #[test]
@@ -338,6 +348,8 @@ mod tests {
     fn advance_wraps() {
         let mut q = PlaybackQueue::new(QueueOrder::Name);
         q.add_items(vec![item("a"), item("b"), item("c")]);
+        assert!(q.current().is_none());
+        q.advance();
         assert_eq!(q.current().unwrap().title, "a");
         q.advance();
         assert_eq!(q.current().unwrap().title, "b");
@@ -353,6 +365,7 @@ mod tests {
     fn upcoming_wraps() {
         let mut q = PlaybackQueue::new(QueueOrder::Name);
         q.add_items(vec![item("a"), item("b")]);
+        q.advance(); // on "a"
         let up = q.upcoming(3);
         assert_eq!(up.len(), 2);
         assert_eq!(up[0].title, "b");
@@ -365,9 +378,10 @@ mod tests {
         q.add_items(vec![item("c"), item("a"), item("b")]);
         // all three were pending; sorted by name
         assert_eq!(q.items().iter().map(|i| i.title.as_str()).collect::<Vec<_>>(), vec!["a", "b", "c"]);
-        assert_eq!(q.current().unwrap().title, "a");
         q.advance();
-        // now "a" is history; adding "aa" should keep history intact
+        q.advance();
+        // now "a" is history and "b" current; adding "aa" must not move
+        // either
         q.add_items(vec![item("aa")]);
         assert_eq!(q.current().unwrap().title, "b");
         assert_eq!(q.items()[0].title, "a");
@@ -376,8 +390,46 @@ mod tests {
     fn filled() -> PlaybackQueue {
         let mut q = PlaybackQueue::new(QueueOrder::Name);
         q.add_items(vec![item("a"), item("b"), item("c"), item("d"), item("e")]);
+        q.advance(); // "a" started
         q.advance(); // cursor -> 1 ("b")
         q
+    }
+
+    #[test]
+    fn a_fresh_queue_starts_at_its_first_item() {
+        // Nothing started: the first tile plays item 0, and everything is
+        // pending — the off-by-one this replaced played item 1 first, or
+        // skipped one after startup filled the wall.
+        let mut q = PlaybackQueue::new(QueueOrder::Name);
+        q.add_items(vec![item("a"), item("b"), item("c"), item("d")]);
+        assert!(q.current().is_none());
+        assert_eq!(q.upcoming(1)[0].title, "a");
+        assert_eq!(q.pending(10).len(), 4);
+        // Fill two tiles the way the wall does, then add one more: a, b, c.
+        let mut played = Vec::new();
+        for _ in 0..3 {
+            let next = q.upcoming(1)[0].title.clone();
+            assert_eq!(q.advance().unwrap().title, next);
+            played.push(next);
+        }
+        assert_eq!(played, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_fresh_queue_can_be_managed_from_its_first_item() {
+        let mut q = PlaybackQueue::new(QueueOrder::Name);
+        q.add_items(vec![item("a"), item("b"), item("c")]);
+        q.move_pending_to_front(2);
+        assert_eq!(q.items().iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), vec!["c", "a", "b"]);
+        q.remove_pending(0);
+        assert_eq!(q.items().iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        q.move_pending(1, 0);
+        assert_eq!(q.items().iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), vec!["b", "a"]);
+        // Removing the only started item leaves nothing started.
+        q.advance();
+        q.remove_item(&"local|/tmp/b.mp4".to_string());
+        assert!(q.current().is_none());
+        assert_eq!(q.advance().unwrap().title, "a");
     }
 
     #[test]

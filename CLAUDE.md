@@ -11,7 +11,7 @@ ideas, no shared code. See `README.md` for the user-facing feature list and
 cargo build --release          # binary: target/release/tessera
 ./packaging/install.sh         # user-local install (bin + icon + .desktop)
 cargo check --workspace        # fast loop while editing
-cargo test --workspace         # 93 tests, mostly tessera-core (layout, budget, queue, sources)
+cargo test --workspace         # 95 tests, mostly tessera-core (layout, budget, queue, sources)
 cargo clippy --workspace       # 7 pre-existing warnings; don't let the count grow
 ```
 
@@ -215,6 +215,13 @@ is tested, and how a sandboxed run coexists with the real app. Connect
 died, whereas a dead instance refuses connections. Handed-off paths arrive
 on a channel drained in the event loop (blocking work stays off the render
 thread, as ever). `TESSERA_ALLOW_MULTI=1` opts out, for development only.
+
+**The queue cursor is the item most recently started; `None` means nothing
+has.** Then item 0 is next and the whole queue is pending. Take the next
+item with `upcoming(1)` and `advance()` only once a tile really plays it
+(`spawn_tile` doesn't advance — its callers do, since an item played from
+outside the queue must not consume a place). Reading a fresh queue as
+"already on item 0" made the first "+" play item 1.
 
 **One `PlaybackQueue`, shared by every window** — owned by `main` and passed
 `&mut` alongside `budget`. A tile is a slot fed from it; windows opened at

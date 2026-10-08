@@ -147,7 +147,7 @@ impl Default for UiSettings {
             monitor_scale: std::collections::BTreeMap::new(),
             cache_mb: 512,
             max_streams: tessera_core::budget::DEFAULT_MAX_STREAMS as u32,
-            audio: false,
+            audio: true,
             retain_queue: true,
             sources: Vec::new(),
         }
@@ -205,7 +205,7 @@ pub enum OverlayAction {
     /// untouched).
     RemovePanel { tile_id: usize },
     /// Mute button on a tile chip: toggles mute, or explains why audio is
-    /// unavailable (started without --audio).
+    /// unavailable (audio turned off: --no-audio, or the config tab).
     MuteButton { tile_id: usize },
     /// Solo button on a tile chip: unmute this tile, mute every other
     /// stream.
