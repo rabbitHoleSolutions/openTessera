@@ -185,6 +185,11 @@ tessera --max --tiles 4 /path/to/videos/
 # a window of a particular size
 tessera --windowed 1600x900 /path/to/file.mkv
 
+# a window on monitor 1 (the numbers tessera prints at startup), or
+# fullscreen there from the start
+tessera --monitor 1 /path/to/file.mkv
+tessera --monitor 1 --fullscreen /path/to/file.mkv
+
 # only monitor 2, fullscreen, advance through a directory instead of looping
 tessera --screens 2 --advance /path/to/videos/
 

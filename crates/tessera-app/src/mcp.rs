@@ -180,6 +180,26 @@ impl Server {
             "tessera_subtitles" => self.subtitles(a),
             "tessera_frame" => self.frame(a),
             "tessera_queue" => self.queue(a),
+            "tessera_window" => {
+                let action = str_arg(a, "action").unwrap_or("list");
+                let mut params = a.clone();
+                params["action"] = json!(action);
+                let v = self.rpc("window", params, Duration::from_secs(5))?;
+                Ok(text(match action {
+                    "list" => windows_text(&v),
+                    "new" => format!(
+                        "opening a new wall window{}{} — it fills from the queue",
+                        v["monitor"].as_u64().map(|m| format!(" on monitor {m}")).unwrap_or_default(),
+                        if v["fullscreen"] == json!(true) { ", fullscreen" } else { "" }
+                    ),
+                    _ => format!(
+                        "window {}: {} on monitor {}",
+                        v["window"],
+                        if v["fullscreen"] == json!(true) { "fullscreen" } else { "windowed" },
+                        v["monitor"]
+                    ),
+                }))
+            }
             "tessera_sources" => {
                 let action = str_arg(a, "action").unwrap_or("list");
                 let mut params = a.clone();
@@ -735,8 +755,13 @@ fn tile_line(t: &Value) -> String {
     if let Some(v) = t["view"].as_str() {
         parts.push(v.to_string());
     }
+    if t["monitor_count"].as_u64().unwrap_or(1) > 1 {
+        if let Some(m) = t["monitor"].as_u64() {
+            parts.push(format!("on monitor {m}"));
+        }
+    }
     let mut flags = Vec::new();
-    for (k, label) in [("focused", "focused"), ("pinned", "pinned"), ("fullscreen", "fullscreen")] {
+    for (k, label) in [("focused", "focused"), ("pinned", "pinned"), ("fullscreen", "fills its window")] {
         if t[k] == json!(true) {
             flags.push(label);
         }
@@ -755,6 +780,41 @@ fn open_reply(v: &Value) -> String {
         return format!("{}{queued}", tile_line(&v["tile"]));
     }
     format!("{} item(s) queued — {}", v["queued"], v["note"].as_str().unwrap_or(""))
+}
+
+/// Monitors, then windows, one line each.
+fn windows_text(v: &Value) -> String {
+    let mut out = Vec::new();
+    for m in v["monitors"].as_array().into_iter().flatten() {
+        let on: Vec<String> = m["windows"].as_array().into_iter().flatten().map(|w| w.to_string()).collect();
+        out.push(format!(
+            "monitor {}: {}x{}{}{}",
+            m["index"],
+            m["size"][0],
+            m["size"][1],
+            m["name"].as_str().map(|n| format!(" ({n})")).unwrap_or_default(),
+            if on.is_empty() { String::new() } else { format!(" — window {}", on.join(", ")) }
+        ));
+    }
+    for w in v["windows"].as_array().into_iter().flatten() {
+        let tiles: Vec<String> = w["tiles"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|t| format!("{} {}", t["id"], t["title"].as_str().unwrap_or("?")))
+            .collect();
+        out.push(format!(
+            "window {} ({}): {} on monitor {}, {}x{}{}",
+            w["index"],
+            w["role"].as_str().unwrap_or("?"),
+            if w["fullscreen"] == json!(true) { "fullscreen" } else { "windowed" },
+            w["monitor"],
+            w["size"][0],
+            w["size"][1],
+            if tiles.is_empty() { String::new() } else { format!(" — tiles: {}", tiles.join("; ")) }
+        ));
+    }
+    out.join("\n")
 }
 
 fn track_name(t: &Value) -> String {
@@ -1022,8 +1082,9 @@ fn player_tools() -> Vec<Value> {
             "Open videos",
             "Play video files, folders or URLs. Starts tessera if it isn't running. The first item plays now — replacing \
              what the focused tile shows, or in `tile`, or in a new tile with new_tile=true — and the rest join the queue. \
-             Local paths must be inside the user's media folders (~/Videos or a configured source). \
-             Example: {\"paths\": [\"~/Videos/Heat (1995).mkv\"], \"unmuted\": true}.",
+             Local paths must be inside the user's media folders (~/Videos or a configured source). `monitor` picks the \
+             physical screen and `fullscreen` makes the window fill it. \
+             Example: {\"paths\": [\"~/Videos/Heat (1995).mkv\"], \"monitor\": 1, \"fullscreen\": true}.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1031,6 +1092,8 @@ fn player_tools() -> Vec<Value> {
                     "tile": tile_prop(),
                     "new_tile": { "type": "boolean", "description": "Play in a new tile beside the others instead of replacing one." },
                     "unmuted": { "type": "boolean", "description": "Make sure it plays with sound." },
+                    "monitor": { "type": "integer", "description": "Play on this monitor (number from tessera_window action=list): in the window already there, or a new one." },
+                    "fullscreen": { "type": "boolean", "description": "true: make that window fill its monitor; false: make it an ordinary window." },
                 },
                 "required": ["paths"],
             }),
@@ -1047,7 +1110,9 @@ fn player_tools() -> Vec<Value> {
              crops them out so the film fills the screen (use this for \"get rid of the black bars\"); `fill` crops to fill \
              the tile; an aspect (`2.39:1`, `21:9`); edges as `top,bottom` or `top,bottom,left,right` percents; `off`. \
              `value` for zoom: a factor (1.5), relative (+0.25, -0.25), `in`, `out`, or `off`; it magnifies the centre of \
-             what the crop leaves. Crop and zoom stay with the video until changed. Example: {\"action\": \"crop\", \"value\": \"auto\"}.",
+             what the crop leaves. Crop and zoom stay with the video until changed. `fullscreen` toggles the tile filling \
+             its window (F); to make the window fill its monitor use tessera_window. `pin` toggles the tile taking most of \
+             its window with the others in a strip (P). Example: {\"action\": \"crop\", \"value\": \"auto\"}.",
             json!({
                 "type": "object",
                 "properties": {
@@ -1115,6 +1180,28 @@ fn player_tools() -> Vec<Value> {
                     "paths": { "type": "array", "items": { "type": "string" } },
                     "limit": { "type": "integer" },
                     "tile": tile_prop(),
+                },
+                "required": ["action"],
+            }),
+            false,
+            false,
+        ),
+        tool(
+            "tessera_window",
+            "Windows and monitors",
+            "Which monitors there are and which tessera windows are on them, and putting a window where it is wanted. \
+             action=list: monitors (number, size, name) and windows (monitor, fullscreen or not, tiles). action=fullscreen: \
+             the window fills its monitor (or `monitor`); action=windowed: back to an ordinary window; action=move: to \
+             `monitor`, keeping its mode; action=new: open another wall window (on `monitor`, `fullscreen` optional), which \
+             fills from the queue. `window` defaults to the one showing the focused tile. To play something on a given \
+             monitor, tessera_open with `monitor` is simpler. Example: {\"action\": \"fullscreen\", \"monitor\": 1}.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "fullscreen", "windowed", "move", "new"] },
+                    "monitor": { "type": "integer", "description": "Monitor number from action=list." },
+                    "window": { "type": "integer", "description": "Window number from action=list (default: the focused tile's)." },
+                    "fullscreen": { "type": "boolean", "description": "new: open it fullscreen." },
                 },
                 "required": ["action"],
             }),

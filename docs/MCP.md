@@ -34,12 +34,13 @@ back in every argument.
 | tool | does | read-only |
 |---|---|---|
 | `tessera_status` | per tile: parsed title (show/season/episode or film/year), position, duration, chapter, paused/muted/volume, file, focused/pinned/fullscreen; queue summary | yes |
-| `tessera_open` | play files, folders or URLs; first plays (focused tile, `tile`, or `new_tile`), rest queue; `unmuted`; starts tessera if needed | no |
+| `tessera_open` | play files, folders or URLs; first plays (focused tile, `tile`, or `new_tile`), rest queue; `unmuted`; `monitor` (the window there, or a new one) and `fullscreen`; starts tessera if needed | no |
 | `tessera_control` | play, pause, toggle, seek, volume, mute, unmute, crop, zoom, next, previous, pin, fullscreen — returns the new state | no |
 | `tessera_subtitles` | `now` (last 60s + next 10s, `-- now --` marked), `search` (timestamps to seek to), `tracks`, `select` | yes |
 | `tessera_frame` | the tile's current frame, or one `at` another time, as a ~768px JPEG; `save` writes to `~/Pictures/Tessera` | no |
 | `tessera_queue` | `list`, `add` (same path rules as open), `next`, `previous` | no |
 | `tessera_close` | remove a tile (the file is untouched) | no |
+| `tessera_window` | `list` monitors (number, size, connector) and windows (monitor, fullscreen, tiles); `fullscreen` / `windowed` (the W toggle, optionally onto `monitor`); `move` to a monitor; `new` window | no |
 | `tessera_sources` | `list` the configured sources; `add` a folder (subfolders included) — servers and cameras need a sign-in, so they stay in the sources tab | no |
 
 Seek takes seconds (`90`), `HH:MM:SS`, relative (`+30`, `-10`), `next

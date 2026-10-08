@@ -106,9 +106,23 @@ struct Args {
     jellyfin: bool,
     plex_library: Option<String>,
     jellyfin_library: Option<String>,
+    /// --monitor N: which monitor the (single) window starts on.
+    monitor: Option<usize>,
+}
+
+/// Where a window opened at runtime should go. None of these means "near
+/// the pointer, as a window" — the "+" button's behaviour.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Placement {
+    /// Index into `available_monitors()`, as `--monitor` and the startup
+    /// "monitor N:" lines number them.
+    pub monitor: Option<usize>,
+    /// Start as a fullscreen wall (what W does) rather than a window.
+    pub fullscreen: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
+    let mut fullscreen = false;
     let mut args = Args {
         files: Vec::new(),
         tiles: 12,
@@ -128,6 +142,7 @@ fn parse_args() -> Result<Args, String> {
         jellyfin: false,
         plex_library: None,
         jellyfin_library: None,
+        monitor: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -136,6 +151,8 @@ fn parse_args() -> Result<Args, String> {
             "--tiles" => args.tiles = value()?.parse().map_err(|_| "bad --tiles")?,
             "--populate" => args.populate = Some(value()?.parse().map_err(|_| "bad --populate")?),
             "--max" => args.screens = ScreenSel::All,
+            "--monitor" => args.monitor = Some(value()?.parse().map_err(|_| "bad --monitor (a monitor number)")?),
+            "--fullscreen" => fullscreen = true,
             "--screens" => match value()?.as_str() {
                 "all" => args.screens = ScreenSel::All,
                 n => args.screens = ScreenSel::Indices(
@@ -185,6 +202,18 @@ fn parse_args() -> Result<Args, String> {
     if args.populate == Some(0) {
         return Err("--populate must be >= 1".into());
     }
+    // --monitor and --fullscreen describe one window; --screens and --max
+    // already pick their own monitors.
+    let windowed = matches!(args.screens, ScreenSel::Windowed(_, _));
+    if args.monitor.is_some() && !windowed {
+        return Err("--monitor picks the one window's monitor; --screens/--max already choose theirs".into());
+    }
+    if fullscreen {
+        if !windowed {
+            return Err("--fullscreen is for the one window; --screens/--max are already fullscreen".into());
+        }
+        args.screens = ScreenSel::Indices(vec![args.monitor.unwrap_or(0)]);
+    }
     Ok(args)
 }
 
@@ -203,6 +232,9 @@ OPTIONS:
                      (the video-wall mode; without it you get one window)
   --screens SPEC     Monitors to use fullscreen: 'all' or comma-separated
                      indices, e.g. '1' or '0,2'
+  --monitor N        Start the window on monitor N (the numbers printed at
+                     startup as monitor N: ...; 0 by default)
+  --fullscreen       Start the window fullscreen on that monitor (as W does)
   --windowed WxH     Size of the initial window (default 1600x900). Extra
                      windows: the '+' button in the status bar; W toggles
                      any one window between windowed and fullscreen
@@ -466,7 +498,14 @@ fn main() {
             }
             list.clone()
         }
-        ScreenSel::Windowed(_, _) => vec![0],
+        ScreenSel::Windowed(_, _) => {
+            let m = args.monitor.unwrap_or(0);
+            if m >= monitors.len() {
+                eprintln!("error: monitor {m} not found (have {})", monitors.len());
+                std::process::exit(2);
+            }
+            vec![m]
+        }
     };
 
     let (first_window, gl_config) = {
@@ -692,7 +731,7 @@ fn main() {
                     let settings_before = settings.clone();
                     // Deferred: a new window has to be created after the
                     // per-screen loop, which is iterating `screens` by index.
-                    let mut new_windows: Vec<(ScreenRole, browser::Tab)> = Vec::new();
+                    let mut new_windows: Vec<(ScreenRole, browser::Tab, Placement)> = Vec::new();
                     // Files that arrived from outside: handed over by a
                     // later launch (see instance.rs), opened by the OS
                     // while running, or dragged onto a window. All three
@@ -737,7 +776,7 @@ fn main() {
                             wm_settle_at: &mut wm_settle_at,
                         };
                         if open_listed(&mut wall, target, items) {
-                            new_windows.push((ScreenRole::Wall, browser::Tab::Library));
+                            new_windows.push((ScreenRole::Wall, browser::Tab::Library, Placement::default()));
                         }
                     }
                     // API calls (rpc.rs) — `tessera mcp`, and the dev tools.
@@ -757,8 +796,8 @@ fn main() {
                         };
                         rpc::handle(call, &mut wall, &mut settings, cursor_over, &mut fx);
                     }
-                    if fx.new_wall_window {
-                        new_windows.push((ScreenRole::Wall, browser::Tab::Library));
+                    if let Some(place) = fx.new_wall_window {
+                        new_windows.push((ScreenRole::Wall, browser::Tab::Library, place));
                     }
                     if fx.quit {
                         // LoopExiting runs the same teardown as Esc.
@@ -813,7 +852,7 @@ fn main() {
                         for action in std::mem::take(&mut overlay.actions) {
                             match action {
                                 OverlayAction::NewWindow => {
-                                    new_windows.push((ScreenRole::Wall, browser::Tab::Library));
+                                    new_windows.push((ScreenRole::Wall, browser::Tab::Library, Placement::default()));
                                     continue;
                                 }
                                 OverlayAction::NewLibraryWindow { tab } => {
@@ -828,7 +867,7 @@ fn main() {
                                             b.window.focus_window();
                                             println!("browser window focused ({tab:?} tab)");
                                         }
-                                        None => new_windows.push((ScreenRole::Browser, tab)),
+                                        None => new_windows.push((ScreenRole::Browser, tab, Placement::default())),
                                     }
                                     continue;
                                 }
@@ -871,14 +910,17 @@ fn main() {
                             }
                         }
                     }
-                    for (role, tab) in std::mem::take(&mut new_windows) {
-                        // Place it on the monitor the cursor is on, else the
-                        // one the last window is on.
-                        let near = cursor_over
-                            .and_then(|w| screens.iter().find(|s| s.window.id() == w))
-                            .or_else(|| screens.last())
-                            .and_then(|s| monitor_under_window(&s.window))
-                            .map(|(_, m)| m);
+                    for (role, tab, place) in std::mem::take(&mut new_windows) {
+                        // On the monitor asked for, else the one the cursor
+                        // is on, else the one the last window is on.
+                        let wanted = place.monitor.and_then(|i| target.available_monitors().nth(i).map(|m| (i, m)));
+                        let near = wanted.as_ref().map(|(_, m)| m.clone()).or_else(|| {
+                            cursor_over
+                                .and_then(|w| screens.iter().find(|s| s.window.id() == w))
+                                .or_else(|| screens.last())
+                                .and_then(|s| monitor_under_window(&s.window))
+                                .map(|(_, m)| m)
+                        });
                         let size = match args.screens {
                             ScreenSel::Windowed(w, h) => (w, h),
                             _ => DEFAULT_WINDOW,
@@ -888,17 +930,33 @@ fn main() {
                             notify(&mut overlay, "could not open a new window".into());
                             break;
                         };
-                        let monitor_index =
-                            monitor_under_window(&window).map(|(i, _)| i).unwrap_or(0);
+                        let monitor_index = wanted
+                            .as_ref()
+                            .map(|(i, _)| *i)
+                            .or_else(|| monitor_under_window(&window).map(|(i, _)| i))
+                            .unwrap_or(0);
                         let Some(mut screen) =
                             create_screen(target, &display, &gl_config, window, monitor_index)
                         else {
                             notify(&mut overlay, "could not open a new window (GL init)".into());
                             break;
                         };
-                        screen.intended_monitor = monitor_under_window(&screen.window).map(|(_, m)| m);
-                        // A new window starts as a window; W makes it a wall.
-                        screen.should_fullscreen = false;
+                        screen.intended_monitor = wanted
+                            .as_ref()
+                            .map(|(_, m)| m.clone())
+                            .or_else(|| monitor_under_window(&screen.window).map(|(_, m)| m));
+                        // A new window starts as a window (W makes it a
+                        // wall) unless it was asked for fullscreen. The WM
+                        // may grab a fresh window onto another monitor
+                        // before honouring that; the settle timer puts it
+                        // back on the intended one, as at startup.
+                        screen.should_fullscreen = place.fullscreen;
+                        if place.fullscreen {
+                            platform::enter_fullscreen(&screen.window, screen.intended_monitor.clone());
+                            if platform::WM_SETTLE {
+                                wm_settle_at = Some((Instant::now() + Duration::from_millis(800), 5));
+                            }
+                        }
                         screen.ui_scale = seed_scale(
                             &settings,
                             screen.intended_monitor.as_ref(),
@@ -2611,8 +2669,8 @@ enum OpenTarget {
     /// play on.
     Window { window: winit::window::WindowId, tile: Option<usize> },
     /// A tile of its own beside whatever is playing (MCP `new_tile`), on
-    /// the first wall window.
-    NewTile,
+    /// this window, else the first wall window.
+    NewTile(Option<winit::window::WindowId>),
 }
 
 /// Files on their way to the wall, being listed off the render thread.
@@ -2688,11 +2746,14 @@ fn open_listed(wall: &mut Wall, target: OpenTarget, items: Vec<tessera_core::Med
             .iter()
             .position(|s| s.window.id() == window && s.role == ScreenRole::Wall)
             .map(|si| (si, tile)),
-        OpenTarget::Anywhere | OpenTarget::NewTile => None,
+        OpenTarget::Anywhere | OpenTarget::NewTile(_) => None,
     };
     let spot = match dropped_on {
-        _ if target == OpenTarget::NewTile => {
-            wall.screens.iter().position(|s| s.role == ScreenRole::Wall).map(Spot::Spawn)
+        _ if matches!(target, OpenTarget::NewTile(_)) => {
+            let OpenTarget::NewTile(on) = target else { unreachable!() };
+            on.and_then(|id| wall.screens.iter().position(|s| s.window.id() == id && s.role == ScreenRole::Wall))
+                .or_else(|| wall.screens.iter().position(|s| s.role == ScreenRole::Wall))
+                .map(Spot::Spawn)
         }
         Some((si, tile)) => Some(match wall.screens[si].tiles.first() {
             // The tile under the pointer was read when the drop arrived;
@@ -3478,9 +3539,24 @@ fn create_screen<T>(
 fn window_builder(args: &Args, monitors: &[winit::monitor::MonitorHandle], index: usize) -> WindowBuilder {
     let monitor = &monitors[index];
     match &args.screens {
-        ScreenSel::Windowed(w, h) => app_window()
-            .with_title("Tessera")
-            .with_inner_size(winit::dpi::PhysicalSize::new(*w, *h)),
+        ScreenSel::Windowed(w, h) => {
+            let wb = app_window().with_title("Tessera");
+            // Asked for a monitor: centre the window on it. Without one the
+            // window manager places it, as before.
+            match args.monitor {
+                Some(_) => {
+                    let (mp, ms) = (monitor.position(), monitor.size());
+                    let (w, h) = ((*w).min(ms.width), (*h).min(ms.height));
+                    wb.with_inner_size(winit::dpi::PhysicalSize::new(w, h)).with_position(
+                        winit::dpi::PhysicalPosition::new(
+                            mp.x + (ms.width - w) as i32 / 2,
+                            mp.y + (ms.height - h) as i32 / 2,
+                        ),
+                    )
+                }
+                None => wb.with_inner_size(winit::dpi::PhysicalSize::new(*w, *h)),
+            }
+        }
         _ => platform::fullscreen_window_builder(
             app_window().with_title(format!("Tessera — screen {index}")),
             monitor,

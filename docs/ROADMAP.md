@@ -1224,6 +1224,15 @@ launch/quit/log, on-demand screenshots, a UI state dump, and synthetic
 pointer input through the real event path — which replace the
 `TESSERA_DUMP_DIR` + xdotool routine for checking a change.
 
+Monitors (2026-10-08): `--monitor N` / `--fullscreen` on the command
+line, `tessera_window` (list monitors and windows; fullscreen, windowed,
+move, new), and `monitor`/`fullscreen` on `tessera_open` — which opens a
+window on that monitor when none is there, with the file at the head of
+the queue so it is what that window plays. Status reports each tile's
+monitor, read from where the window actually is (it can be dragged).
+Runtime windows take a `Placement`; a fullscreen one is re-asserted by the
+WM settle timer, as at startup. Pin was already `tessera_control pin`.
+
 Crop and zoom (`tessera_control` crop/zoom, 2026-10-08): a per-tile
 `View` in core, drawn by the compositor as a UV sub-rectangle fitted at the
 cropped aspect — which is what makes cropping a letterbox fill a 21:9

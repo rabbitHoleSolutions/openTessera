@@ -22,7 +22,10 @@ use tessera_core::MediaItem;
 
 use crate::overlay::{OverlayAction, UiSettings};
 use crate::screen::{Capture, CaptureWhat, RawImage, ScreenRole};
-use crate::{handle_overlay_action, open_listed, pause_and_release, remove_tile_action, resume_tile, tile_next, toggle_pin, OpenTarget, Wall};
+use crate::{
+    handle_overlay_action, monitor_under_window, open_listed, pause_and_release, remove_tile_action, resume_tile, tile_next,
+    toggle_pin, toggle_window_mode, OpenTarget, Placement, Wall,
+};
 
 /// How long a connection waits for the event loop. A frame is ~16ms; this
 /// is for a loop stalled behind something slow, which should surface as an
@@ -48,7 +51,8 @@ pub enum Reply {
 /// What a call needs from the event loop beyond the [`Wall`].
 #[derive(Default)]
 pub struct Effects {
-    pub new_wall_window: bool,
+    /// Open a wall window, placed as given.
+    pub new_wall_window: Option<crate::Placement>,
     pub quit: bool,
 }
 
@@ -458,6 +462,43 @@ fn dispatch(
             Ok(ok(json!({ "roots": roots })))
         }
         "status" => Ok(ok(status(wall, settings, cursor_over))),
+        "window" => {
+            let action = s("action").unwrap_or("list");
+            let monitor = p.get("monitor").and_then(Value::as_u64).map(|n| n as usize);
+            if let Some(n) = monitor {
+                check_monitor(wall, n)?;
+            }
+            match action {
+                "list" => Ok(ok(windows_json(wall))),
+                "new" => {
+                    let fullscreen = p.get("fullscreen").and_then(Value::as_bool) == Some(true);
+                    fx.new_wall_window = Some(Placement { monitor, fullscreen });
+                    Ok(ok(json!({ "opening": true, "monitor": monitor, "fullscreen": fullscreen })))
+                }
+                "fullscreen" | "windowed" | "move" => {
+                    if action == "move" && monitor.is_none() {
+                        return Err("move needs \"monitor\" — see action=list for the monitors".into());
+                    }
+                    let wi = match p.get("window").and_then(Value::as_u64) {
+                        Some(w) => window_index(wall, p).map_err(|_| format!("no window {w}"))?,
+                        // The window holding the focused tile, else the
+                        // first wall window.
+                        None => focused_tile(wall, cursor_over)
+                            .and_then(|id| locate(wall, id).map(|(si, _)| si))
+                            .or_else(|| wall.screens.iter().position(|s| s.role == ScreenRole::Wall))
+                            .ok_or("there is no wall window — open something with tessera_open first")?,
+                    };
+                    let fs = match action {
+                        "fullscreen" => Some(true),
+                        "windowed" => Some(false),
+                        _ => None,
+                    };
+                    place_window(wall, wi, monitor, fs)?;
+                    Ok(ok(json!({ "window": wi, "monitor": monitor.or(monitor_of(&wall.screens[wi])), "fullscreen": fs.unwrap_or_else(|| crate::platform::is_fullscreen(&wall.screens[wi].window)) })))
+                }
+                other => Err(format!("unknown window action {other:?} — use list, fullscreen, windowed, move or new")),
+            }
+        }
         "sources" => match s("action").unwrap_or("list") {
             "list" => {
                 let list: Vec<Value> = settings
@@ -510,17 +551,53 @@ fn dispatch(
         "open" => {
             let first_uri = items.first().map(|m| m.uri.clone()).ok_or("nothing to open")?;
             let count = items.len();
-            let target = match p.get("tile").and_then(Value::as_u64) {
-                Some(tid) => {
+            let fullscreen = p.get("fullscreen").and_then(Value::as_bool);
+            let new_tile = p.get("new_tile").and_then(Value::as_bool) == Some(true);
+            // A monitor asked for: a wall window already there, or a new
+            // one opened there — with the file at the head of the queue, so
+            // its first tile is this file.
+            let on_monitor = match p.get("monitor").and_then(Value::as_u64) {
+                Some(n) => {
+                    let n = n as usize;
+                    check_monitor(wall, n)?;
+                    let here = |want_tiles: bool| {
+                        wall.screens.iter().position(|s| {
+                            s.role == ScreenRole::Wall && monitor_of(s) == Some(n) && (!want_tiles || !s.tiles.is_empty())
+                        })
+                    };
+                    match here(true).or_else(|| here(false)) {
+                        Some(wi) => Some(wi),
+                        None => {
+                            let first_idx = wall.queue.len();
+                            wall.queue.append_items(items);
+                            wall.queue.move_pending_to_front(first_idx);
+                            fx.new_wall_window = Some(Placement { monitor: Some(n), fullscreen: fullscreen == Some(true) });
+                            return Ok(ok(json!({ "opening": format!("a new window on monitor {n}"), "items": count })));
+                        }
+                    }
+                }
+                None => None,
+            };
+            let target = match (p.get("tile").and_then(Value::as_u64), on_monitor) {
+                (Some(tid), _) => {
                     let (si, id) = resolve_tile(wall, &json!({ "tile": tid }), cursor_over)?;
                     OpenTarget::Window { window: wall.screens[si].window.id(), tile: Some(id) }
                 }
-                None if p.get("new_tile").and_then(Value::as_bool) == Some(true) => OpenTarget::NewTile,
-                None => OpenTarget::Anywhere,
+                (None, Some(wi)) if new_tile => OpenTarget::NewTile(Some(wall.screens[wi].window.id())),
+                (None, Some(wi)) => OpenTarget::Window { window: wall.screens[wi].window.id(), tile: None },
+                (None, None) if new_tile => OpenTarget::NewTile(None),
+                (None, None) => OpenTarget::Anywhere,
             };
             if open_listed(wall, target, items) {
-                fx.new_wall_window = true;
+                fx.new_wall_window = Some(Placement { monitor: None, fullscreen: fullscreen == Some(true) });
                 return Ok(ok(json!({ "opening": "a new wall window", "items": count })));
+            }
+            // Fullscreen the window it landed in (W), if asked.
+            if let Some(want) = fullscreen {
+                let landed = wall.screens.iter().position(|s| s.tiles.iter().any(|t| t.item.uri == first_uri));
+                if let Some(wi) = landed {
+                    place_window(wall, wi, None, Some(want))?;
+                }
             }
             let unmuted = p.get("unmuted").and_then(Value::as_bool) == Some(true);
             let found = wall
@@ -855,6 +932,8 @@ fn tile_json(wall: &Wall, si: usize, id: usize, focused: Option<usize>) -> Value
         "muted": !t.audio_enabled() || t.is_muted(),
         "volume": t.volume(),
         "window": si,
+        "monitor": monitor_of(s),
+        "monitor_count": s.window.available_monitors().count(),
         "pinned": s.pinned == Some(t.id),
         "fullscreen": s.zoomed == Some(t.id),
         "focused": focused == Some(t.id),
@@ -879,6 +958,109 @@ fn status(wall: &Wall, settings: &UiSettings, cursor_over: Option<winit::window:
         "audio": settings.audio,
         "queue": { "pending": wall.queue.pending(usize::MAX).len(), "next": next },
     })
+}
+
+/// The monitor a window is on now — by where it actually is, since a
+/// window can be dragged — falling back to the one it was put on.
+fn monitor_of(s: &crate::screen::Screen) -> Option<usize> {
+    monitor_under_window(&s.window).map(|(i, _)| i).or(Some(s.monitor_index))
+}
+
+fn check_monitor(wall: &Wall, n: usize) -> Result<(), String> {
+    let count = wall.screens.first().map_or(0, |s| s.window.available_monitors().count());
+    if n < count {
+        Ok(())
+    } else {
+        Err(format!("there is no monitor {n} — monitors are 0 to {} (see tessera_window action=list)", count.saturating_sub(1)))
+    }
+}
+
+/// Monitors (with which windows are on each) and windows.
+fn windows_json(wall: &Wall) -> Value {
+    let Some(first) = wall.screens.first() else { return json!({ "monitors": [], "windows": [] }) };
+    let monitors: Vec<Value> = first
+        .window
+        .available_monitors()
+        .enumerate()
+        .map(|(i, m)| {
+            let (pos, size) = (m.position(), m.size());
+            let on: Vec<usize> = wall.screens.iter().enumerate().filter(|(_, s)| monitor_of(s) == Some(i)).map(|(wi, _)| wi).collect();
+            json!({ "index": i, "name": m.name(), "size": [size.width, size.height], "position": [pos.x, pos.y], "windows": on })
+        })
+        .collect();
+    let windows: Vec<Value> = wall
+        .screens
+        .iter()
+        .enumerate()
+        .map(|(wi, s)| {
+            let size = s.window.inner_size();
+            json!({
+                "index": wi,
+                "role": role_name(s.role),
+                "monitor": monitor_of(s),
+                "fullscreen": crate::platform::is_fullscreen(&s.window),
+                "size": [size.width, size.height],
+                "tiles": s.tiles.iter().map(|t| json!({ "id": t.id, "title": display_title(&t.item) })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    json!({ "monitors": monitors, "windows": windows })
+}
+
+/// Puts window `wi` on `monitor` and/or into or out of fullscreen (the W
+/// toggle). Fullscreen is borderless on the monitor; windowed is centred
+/// on it at its current size.
+fn place_window(wall: &mut Wall, wi: usize, monitor: Option<usize>, fullscreen: Option<bool>) -> Result<(), String> {
+    let window = wall.screens[wi].window.clone();
+    let target = match monitor {
+        Some(n) => Some((n, window.available_monitors().nth(n).ok_or(format!("there is no monitor {n}"))?)),
+        None => None,
+    };
+    let is_fs = crate::platform::is_fullscreen(&window);
+    let want_fs = fullscreen.unwrap_or(is_fs);
+    let mut settle = false;
+    if want_fs {
+        let s = &mut wall.screens[wi];
+        if !is_fs && s.windowed_restore.is_none() {
+            if let Ok(pos) = window.outer_position() {
+                s.windowed_restore = Some((pos, window.inner_size()));
+            }
+        }
+        // Aim at the monitor asked for, else the one it is on now (as W does).
+        let m = match target {
+            Some((n, m)) => Some((n, m)),
+            None => monitor_under_window(&window),
+        };
+        if let Some((n, m)) = &m {
+            s.monitor_index = *n;
+            s.intended_monitor = Some(m.clone());
+        }
+        s.should_fullscreen = true;
+        crate::platform::enter_fullscreen(&window, m.map(|(_, m)| m).or_else(|| s.intended_monitor.clone()));
+        settle = true;
+    } else {
+        if is_fs {
+            settle = toggle_window_mode(wall.screens, wi);
+        }
+        if let Some((n, m)) = target {
+            let (mp, ms) = (m.position(), m.size());
+            let size = window.outer_size();
+            let (w, h) = (size.width.min(ms.width), size.height.min(ms.height));
+            window.set_outer_position(winit::dpi::PhysicalPosition::new(
+                mp.x + (ms.width - w) as i32 / 2,
+                mp.y + (ms.height - h) as i32 / 2,
+            ));
+            let s = &mut wall.screens[wi];
+            s.monitor_index = n;
+            s.intended_monitor = Some(m);
+            // Remembered as where W returns it to, too.
+            s.windowed_restore = None;
+        }
+    }
+    if settle && crate::platform::WM_SETTLE {
+        *wall.wm_settle_at = Some((std::time::Instant::now() + Duration::from_millis(600), 4));
+    }
+    Ok(())
 }
 
 fn role_name(r: ScreenRole) -> &'static str {
@@ -924,7 +1106,8 @@ fn dev_state(wall: &Wall, settings: &UiSettings, cursor_over: Option<winit::wind
                 "index": wi,
                 "role": role_name(s.role),
                 "size": [size.width, size.height],
-                "monitor": s.monitor_index,
+                "monitor": monitor_of(s),
+                "position": s.window.outer_position().ok().map(|p| [p.x, p.y]),
                 "fullscreen": crate::platform::is_fullscreen(&s.window),
                 "ui_scale": s.ui_scale,
                 "cursor": s.cursor.map(|(x, y)| [x, y]),
