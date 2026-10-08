@@ -170,6 +170,31 @@ impl Server {
             "tessera_subtitles" => self.subtitles(a),
             "tessera_frame" => self.frame(a),
             "tessera_queue" => self.queue(a),
+            "tessera_sources" => {
+                let action = str_arg(a, "action").unwrap_or("list");
+                let mut params = a.clone();
+                params["action"] = json!(action);
+                // An add walks the whole folder to count it; a NAS can be slow.
+                let v = self.rpc("sources", params, Duration::from_secs(120))?;
+                Ok(text(match action {
+                    "add" => format!(
+                        "added {} — {} video(s) found; they appear in the library, and tessera_open can now play from it",
+                        v["added"].as_str().unwrap_or("?"),
+                        v["videos"]
+                    ),
+                    _ => {
+                        let list: Vec<String> = v["sources"]
+                            .as_array()
+                            .map(|a| a.iter().map(|s| format!("- {}", s["label"].as_str().unwrap_or("?"))).collect())
+                            .unwrap_or_default();
+                        if list.is_empty() {
+                            "no sources configured".to_string()
+                        } else {
+                            format!("{} source(s):\n{}", list.len(), list.join("\n"))
+                        }
+                    }
+                }))
+            }
             "tessera_close" => {
                 let v = self.rpc("close", a.clone(), Duration::from_secs(8))?;
                 Ok(text(format!(
@@ -1017,6 +1042,25 @@ fn player_tools() -> Vec<Value> {
                     "paths": { "type": "array", "items": { "type": "string" } },
                     "limit": { "type": "integer" },
                     "tile": tile_prop(),
+                },
+                "required": ["action"],
+            }),
+            false,
+            false,
+        ),
+        tool(
+            "tessera_sources",
+            "Video sources",
+            "Where tessera finds videos. action=list shows the configured sources (folders, Plex/Jellyfin servers, \
+             cameras). action=add adds a folder as a source: its videos, subfolders included, appear in tessera's library, \
+             and tessera_open can play files inside it. The folder must exist and contain videos. Plex, Jellyfin and \
+             cameras need a sign-in, so they are added in tessera's own sources tab instead. \
+             Example: {\"action\": \"add\", \"path\": \"/mnt/storage/video\"}.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "add"] },
+                    "path": { "type": "string", "description": "add: the folder." },
                 },
                 "required": ["action"],
             }),

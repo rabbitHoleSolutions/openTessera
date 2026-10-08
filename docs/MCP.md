@@ -25,7 +25,7 @@ Check it with the MCP Inspector:
 
 ## Tools
 
-All take an optional `tile`; leaving it out means the **focused tile**: the
+All the player tools take an optional `tile`; leaving it out means the **focused tile**: the
 only tile, else the one filling a window (F), else the only one with sound,
 else the one under the pointer. When that is still ambiguous the error lists
 the tiles to choose from. Times are `HH:MM:SS` in every reply and accepted
@@ -40,6 +40,7 @@ back in every argument.
 | `tessera_frame` | the tile's current frame, or one `at` another time, as a ~768px JPEG; `save` writes to `~/Pictures/Tessera` | no |
 | `tessera_queue` | `list`, `add` (same path rules as open), `next`, `previous` | no |
 | `tessera_close` | remove a tile (the file is untouched) | no |
+| `tessera_sources` | `list` the configured sources; `add` a folder (subfolders included) — servers and cameras need a sign-in, so they stay in the sources tab | no |
 
 Seek takes seconds (`90`), `HH:MM:SS`, relative (`+30`, `-10`), `next
 chapter` / `previous chapter`, `chapter 3`, or part of a chapter title.
@@ -53,8 +54,12 @@ speaks them.
 - Every tool is `destructiveHint: false`. None deletes or moves a file; the
   delete in tessera's own UI is not exposed.
 - Local paths must resolve (after symlinks and `..`) inside a configured
-  folder source or `~/Videos`; anything else is refused with a message that
-  says how to allow it. URLs are limited to http(s) and streaming schemes.
+  folder source or `~/Videos`, and a single file must have a video
+  extension; anything else is refused with a message that says how to allow
+  it. URLs are limited to http(s) and streaming schemes.
+- Because a folder source is also an opening root, `tessera_sources add`
+  refuses `/` and system trees (`/etc`, `/usr`, `/proc`, ...) and any folder
+  with no videos in it.
 - Status redacts query strings from paths: a Plex/Jellyfin direct-play URL
   carries its access token there.
 - Frames are saved with `create_new`, so a grab never overwrites anything.

@@ -251,7 +251,7 @@ status interval (add `TESSERA_DUMP_OVERLAY=1` to include the overlay UI).
 
 `tessera mcp` is an MCP server on stdio for the running app — what's
 playing, open, play/pause/seek/volume, read and search subtitles, grab a
-frame, manage the queue. Any MCP client connects with
+frame, manage the queue, add folder sources. Any MCP client connects with
 `{ "command": "tessera", "args": ["mcp"] }`; no port, no token. `tessera mcp
 --dev` adds tools for developing tessera itself (a sandboxed instance,
 screenshots, UI state, synthetic input). See [docs/MCP.md](docs/MCP.md).

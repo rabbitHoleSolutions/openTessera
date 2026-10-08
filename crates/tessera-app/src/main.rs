@@ -755,7 +755,7 @@ fn main() {
                             max_tiles: args.tiles,
                             wm_settle_at: &mut wm_settle_at,
                         };
-                        rpc::handle(call, &mut wall, &settings, cursor_over, &mut fx);
+                        rpc::handle(call, &mut wall, &mut settings, cursor_over, &mut fx);
                     }
                     if fx.new_wall_window {
                         new_windows.push((ScreenRole::Wall, browser::Tab::Library));

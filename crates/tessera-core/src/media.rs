@@ -144,26 +144,26 @@ pub fn is_video_file(path: &Path) -> bool {
     matches!(
         ext.as_str(),
         "mp4" | "mkv" | "webm" | "avi" | "mov" | "ts" | "m2ts" | "mts" | "flv" | "wmv" | "mpg" | "mpeg" | "m4v" | "ogv"
+            | "m2v" | "vob" | "3gp"
     )
 }
 
+/// The video files under `paths`. A file is taken as given; a folder is
+/// walked **recursively** — a library is `Movies/`, `Shows/<show>/<season>/`,
+/// and a folder source that only read its top level found nothing in one.
+///
+/// Skipped: hidden entries (`.DS_Store`, and macOS `._name.mkv` AppleDouble
+/// files, which carry a video extension and are not videos), NAS trash and
+/// thumbnail folders (`#recycle`, `@eaDir`), and anything past `MAX_DEPTH`.
+/// Symlinks are followed, with each real directory visited once, so a link
+/// back up the tree is not an infinite walk. Within a folder, files come
+/// before subfolders, each sorted by name.
 pub fn collect_items(paths: &[std::path::PathBuf]) -> Vec<MediaItem> {
     let mut items = Vec::new();
+    let mut visited = std::collections::HashSet::new();
     for p in paths {
         if p.is_dir() {
-            let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(p) {
-                Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).collect(),
-                Err(err) => {
-                    eprintln!("cannot read dir {}: {err}", p.display());
-                    continue;
-                }
-            };
-            entries.sort();
-            for e in entries {
-                if e.is_file() && is_video_file(&e) {
-                    items.push(MediaItem::from_path(&e));
-                }
-            }
+            walk(p, 0, &mut visited, &mut items);
         } else if p.is_file() {
             items.push(MediaItem::from_path(p));
         } else {
@@ -173,9 +173,86 @@ pub fn collect_items(paths: &[std::path::PathBuf]) -> Vec<MediaItem> {
     items
 }
 
+/// Deeper than any real library; a guard against pathological trees.
+const MAX_DEPTH: usize = 16;
+
+fn walk(
+    dir: &Path,
+    depth: usize,
+    visited: &mut std::collections::HashSet<std::path::PathBuf>,
+    items: &mut Vec<MediaItem>,
+) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let Ok(real) = std::fs::canonicalize(dir) else { return };
+    if !visited.insert(real) {
+        return;
+    }
+    let mut entries: Vec<std::path::PathBuf> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| !skipped_name(n)))
+            .collect(),
+        Err(err) => {
+            eprintln!("cannot read dir {}: {err}", dir.display());
+            return;
+        }
+    };
+    entries.sort();
+    let (dirs, files): (Vec<_>, Vec<_>) = entries.into_iter().partition(|p| p.is_dir());
+    for f in files {
+        if f.is_file() && is_video_file(&f) {
+            items.push(MediaItem::from_path(&f));
+        }
+    }
+    for d in dirs {
+        walk(&d, depth + 1, visited, items);
+    }
+}
+
+fn skipped_name(name: &str) -> bool {
+    name.starts_with('.')
+        || name.starts_with('#')
+        || name.starts_with('@')
+        || name.eq_ignore_ascii_case("lost+found")
+        || name.eq_ignore_ascii_case("$RECYCLE.BIN")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folders_are_walked_recursively_skipping_junk() {
+        let root = std::env::temp_dir().join(format!("tessera-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mk = |rel: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"x").unwrap();
+        };
+        mk("top.mkv");
+        mk("notes.txt");
+        mk("Shows/Show/Season 1/S01E01.mkv");
+        mk("Shows/Show/Season 1/._S01E01.mkv"); // AppleDouble junk
+        mk("Movies/Heat (1995).avi");
+        mk("Movies/clip.M2V");
+        mk("#recycle/deleted.mp4");
+        mk("@eaDir/thumb.mp4");
+        mk(".hidden/secret.mp4");
+        // A link back up the tree must not loop forever.
+        std::os::unix::fs::symlink(&root, root.join("Movies/loop")).unwrap();
+
+        let titles: Vec<String> = collect_items(&[root.clone()]).into_iter().map(|m| m.title).collect();
+        // Files before subfolders, each by name; the linked-back root is
+        // already visited, so nothing appears twice.
+        assert_eq!(titles, ["top", "Heat (1995)", "clip", "S01E01"]);
+        // A file is taken as given.
+        assert_eq!(collect_items(&[root.join("notes.txt")]).len(), 1);
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn urls_become_items_by_scheme() {

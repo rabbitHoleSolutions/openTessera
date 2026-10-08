@@ -1224,6 +1224,14 @@ launch/quit/log, on-demand screenshots, a UI state dump, and synthetic
 pointer input through the real event path — which replace the
 `TESSERA_DUMP_DIR` + xdotool routine for checking a change.
 
+`tessera_sources` (list; add a folder) followed on 2026-10-08, and with it
+a fix to folder sources themselves: listing only read the folder's top
+level, so a library laid out as `Movies/`, `Shows/<show>/...` showed
+nothing. `collect_items` now walks recursively, skipping hidden entries
+(macOS `._x.mkv` AppleDouble files carry a video extension), NAS trash and
+thumbnail folders, and symlink loops; `m2v`, `vob` and `3gp` were added to
+the recognised extensions.
+
 Built on the way: `SourceKind::Url` (http(s) opened directly; not
 deletable), `audio-client-name=Tessera`, on-demand GL captures on `Screen`,
 and core modules for title parsing, subtitle cues and time notation, all

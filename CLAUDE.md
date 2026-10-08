@@ -11,7 +11,7 @@ ideas, no shared code. See `README.md` for the user-facing feature list and
 cargo build --release          # binary: target/release/tessera
 ./packaging/install.sh         # user-local install (bin + icon + .desktop)
 cargo check --workspace        # fast loop while editing
-cargo test --workspace         # 104 tests, mostly tessera-core (layout, budget, queue, sources)
+cargo test --workspace         # 105 tests, mostly tessera-core (layout, budget, queue, sources)
 cargo clippy --workspace       # 7 pre-existing warnings; don't let the count grow
 ```
 

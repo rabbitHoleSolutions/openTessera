@@ -120,6 +120,14 @@ fn serve_inner(req: &Value, calls: &mpsc::Sender<Call>, injector: &Injector) -> 
             let items = list_requested(&params, calls)?;
             ask_json(calls, method, params, items)
         }
+        "sources" if params.get("action").and_then(Value::as_str) == Some("add") => {
+            let path = params.get("path").and_then(Value::as_str).ok_or("add needs \"path\": the folder to add")?;
+            let (dir, found) = check_source_folder(path)?;
+            let mut params = params.clone();
+            params["path"] = json!(dir.to_string_lossy());
+            params["videos"] = json!(found);
+            ask_json(calls, method, params, Vec::new())
+        }
         "frame" => {
             let long_side = params.get("long_side").and_then(Value::as_u64).unwrap_or(768).clamp(64, 4096) as u32;
             let (img, mut meta) = ask_capture(calls, method, params)?;
@@ -191,6 +199,9 @@ fn list_requested(params: &Value, calls: &mpsc::Sender<Call>) -> Result<Vec<Medi
             continue;
         }
         let path = check_path(p, &roots)?;
+        if path.is_file() && !tessera_core::media::is_video_file(&path) {
+            return Err(format!("{p} isn't a video file tessera recognises"));
+        }
         let found = tessera_core::media::collect_items(&[path]);
         if found.is_empty() {
             return Err(format!("nothing playable in {p} — it has no video files tessera recognises"));
@@ -217,6 +228,34 @@ pub fn check_path(p: &str, roots: &[PathBuf]) -> Result<PathBuf, String> {
         "{p} is outside the media folders ({}). Ask the user to add its folder as a source in tessera (the browser's sources tab, S)",
         if shown.is_empty() { "none configured".to_string() } else { shown.join(", ") }
     ))
+}
+
+/// Checks a folder offered as a new source: real, a directory, not the
+/// root or a system tree, and with videos in it somewhere. Returns the
+/// canonical path and how many videos it holds. Runs on the connection
+/// thread — the count is a full walk, which on a NAS can take a while.
+///
+/// The checks matter beyond tidiness: a folder source is also a root that
+/// `tessera_open` may play from, so this is what keeps an assistant from
+/// widening that to the whole disk.
+fn check_source_folder(p: &str) -> Result<(PathBuf, usize), String> {
+    let expanded = match p.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME").map(|h| PathBuf::from(h).join(rest)).unwrap_or_else(|| PathBuf::from(p)),
+        None => PathBuf::from(p),
+    };
+    let dir = std::fs::canonicalize(&expanded).map_err(|_| format!("{p} doesn't exist"))?;
+    if !dir.is_dir() {
+        return Err(format!("{p} is a file — a source is a folder"));
+    }
+    const SYSTEM: &[&str] = &["/proc", "/sys", "/dev", "/etc", "/boot", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/var", "/run", "/root", "/snap", "/tmp"];
+    if dir == Path::new("/") || SYSTEM.iter().any(|s| dir.starts_with(s)) {
+        return Err(format!("{} is a system folder — pick the folder the videos are in", dir.display()));
+    }
+    let found = tessera_core::media::collect_items(std::slice::from_ref(&dir)).len();
+    if found == 0 {
+        return Err(format!("no videos found in {} (subfolders included)", dir.display()));
+    }
+    Ok((dir, found))
 }
 
 /// Where opening is allowed: every folder source, plus the user's videos
@@ -386,7 +425,7 @@ fn dev_input(params: &Value, calls: &mpsc::Sender<Call>, injector: &Injector) ->
 pub fn handle(
     call: Call,
     wall: &mut Wall,
-    settings: &UiSettings,
+    settings: &mut UiSettings,
     cursor_over: Option<winit::window::WindowId>,
     fx: &mut Effects,
 ) {
@@ -408,7 +447,7 @@ fn dispatch(
     p: &Value,
     items: Vec<MediaItem>,
     wall: &mut Wall,
-    settings: &UiSettings,
+    settings: &mut UiSettings,
     cursor_over: Option<winit::window::WindowId>,
     fx: &mut Effects,
 ) -> Result<Reply, String> {
@@ -419,6 +458,46 @@ fn dispatch(
             Ok(ok(json!({ "roots": roots })))
         }
         "status" => Ok(ok(status(wall, settings, cursor_over))),
+        "sources" => match s("action").unwrap_or("list") {
+            "list" => {
+                let list: Vec<Value> = settings
+                    .sources
+                    .iter()
+                    .map(|src| {
+                        let kind = match src {
+                            tessera_core::sources::Source::Folder { .. } => "folder",
+                            tessera_core::sources::Source::Plex { .. } => "plex",
+                            tessera_core::sources::Source::Jellyfin { .. } => "jellyfin",
+                            tessera_core::sources::Source::Cameras { .. } => "cameras",
+                        };
+                        // The label never carries a token (see Source::label).
+                        json!({ "kind": kind, "label": src.label() })
+                    })
+                    .collect();
+                Ok(ok(json!({ "sources": list })))
+            }
+            "add" => {
+                let path = s("path").ok_or("add needs \"path\"")?.to_string();
+                // Compare as real paths: "/x/video/" and "/x/video" are one
+                // source.
+                let same = settings.sources.iter().any(|src| match src {
+                    tessera_core::sources::Source::Folder { path: have } => {
+                        std::fs::canonicalize(have).map(|h| h == Path::new(&path)).unwrap_or(false)
+                    }
+                    _ => false,
+                });
+                if same {
+                    return Err(format!("{path} is already a source"));
+                }
+                let src = tessera_core::sources::Source::Folder { path: path.clone() };
+                println!("settings: added source \"{}\" (over the API)", src.label());
+                let label = src.label();
+                // Persisted by the frame's settings diff, like the sources tab.
+                settings.sources.push(src);
+                Ok(ok(json!({ "added": label, "videos": p.get("videos") })))
+            }
+            other => Err(format!("unknown sources action {other:?} — use list or add")),
+        },
         "control" => {
             let (si, id) = resolve_tile(wall, p, cursor_over)?;
             let action = s("action").ok_or("give \"action\"")?;
