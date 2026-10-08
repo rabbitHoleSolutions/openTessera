@@ -3,11 +3,13 @@ mod browser;
 mod catalog;
 mod compositor;
 mod instance;
+mod mcp;
 mod overlay;
 mod platform;
 mod poster;
 mod thumbs;
 mod png_util;
+mod rpc;
 mod screen;
 mod tile;
 
@@ -21,7 +23,7 @@ use glutin_winit::DisplayBuilder;
 use raw_window_handle::HasRawWindowHandle;
 use tessera_core::{Admission, DecodeBudget, PlaybackQueue, QueueOrder};
 use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::event_loop::{ControlFlow, EventLoopBuilder};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::WindowBuilder;
 
@@ -282,6 +284,11 @@ fn install_fatal_handler() {
 }
 
 fn main() {
+    // `tessera mcp`: an MCP server on stdio for the running app — no window,
+    // no GL, no instance of its own (see mcp.rs).
+    if std::env::args().nth(1).as_deref() == Some("mcp") {
+        std::process::exit(mcp::run(std::env::args().skip(2).collect()));
+    }
     install_fatal_handler();
     platform::raise_fd_limit();
     let args = match parse_args() {
@@ -425,7 +432,11 @@ fn main() {
         }
     };
 
-    let event_loop = EventLoop::new().unwrap();
+    // User events carry synthetic input from the dev API (rpc::Synth).
+    let event_loop = EventLoopBuilder::<rpc::Injected>::with_user_event().build().unwrap();
+    if let Ok(mut slot) = opens.injector.lock() {
+        *slot = Some(event_loop.create_proxy());
+    }
     // Between creating the event loop and running it: the file that
     // launched us from Finder is delivered as soon as it runs.
     platform::install_open_handler();
@@ -626,6 +637,12 @@ fn main() {
 
     event_loop
         .run(move |event, target| {
+            // Synthetic input becomes the event a real device would send,
+            // so everything below treats it identically.
+            let event = match event {
+                Event::UserEvent(injected) => rpc::synthesize(injected),
+                other => other,
+            };
             target.set_control_flow(ControlFlow::WaitUntil(next_frame_at));
             let is_init = matches!(event, Event::NewEvents(StartCause::Init));
             match event {
@@ -722,6 +739,30 @@ fn main() {
                         if open_listed(&mut wall, target, items) {
                             new_windows.push((ScreenRole::Wall, browser::Tab::Library));
                         }
+                    }
+                    // API calls (rpc.rs) — `tessera mcp`, and the dev tools.
+                    let mut fx = rpc::Effects::default();
+                    for call in opens.poll_calls() {
+                        let mut wall = Wall {
+                            screens: &mut screens,
+                            budget: &mut budget,
+                            queue: &mut queue,
+                            sources: &sources,
+                            overlay: &mut overlay,
+                            mpv_lib: &mpv_lib,
+                            tile_opts: &tile_opts,
+                            next_tile_id: &mut next_tile_id,
+                            max_tiles: args.tiles,
+                            wm_settle_at: &mut wm_settle_at,
+                        };
+                        rpc::handle(call, &mut wall, &settings, cursor_over, &mut fx);
+                    }
+                    if fx.new_wall_window {
+                        new_windows.push((ScreenRole::Wall, browser::Tab::Library));
+                    }
+                    if fx.quit {
+                        // LoopExiting runs the same teardown as Esc.
+                        target.exit();
                     }
                     // Snapshot every wall tile for the queue tab: a Screen
                     // can't see its siblings, so this has to be gathered
@@ -2569,6 +2610,9 @@ enum OpenTarget {
     /// on one. A browser window queues instead, since it has no tiles to
     /// play on.
     Window { window: winit::window::WindowId, tile: Option<usize> },
+    /// A tile of its own beside whatever is playing (MCP `new_tile`), on
+    /// the first wall window.
+    NewTile,
 }
 
 /// Files on their way to the wall, being listed off the render thread.
@@ -2644,9 +2688,12 @@ fn open_listed(wall: &mut Wall, target: OpenTarget, items: Vec<tessera_core::Med
             .iter()
             .position(|s| s.window.id() == window && s.role == ScreenRole::Wall)
             .map(|si| (si, tile)),
-        OpenTarget::Anywhere => None,
+        OpenTarget::Anywhere | OpenTarget::NewTile => None,
     };
     let spot = match dropped_on {
+        _ if target == OpenTarget::NewTile => {
+            wall.screens.iter().position(|s| s.role == ScreenRole::Wall).map(Spot::Spawn)
+        }
         Some((si, tile)) => Some(match wall.screens[si].tiles.first() {
             // The tile under the pointer was read when the drop arrived;
             // it may have closed while the listing ran.

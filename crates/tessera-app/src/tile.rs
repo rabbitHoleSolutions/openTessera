@@ -66,6 +66,11 @@ pub struct TrackInfo {
     pub codec: Option<String>,
     pub default: bool,
     pub selected: bool,
+    /// The stream's index in the container, as ffmpeg numbers it — what
+    /// the MCP side needs to extract an embedded subtitle track.
+    pub ff_index: Option<i64>,
+    /// Set for a track mpv loaded from a separate file.
+    pub external_filename: Option<String>,
 }
 
 impl TrackInfo {
@@ -198,6 +203,14 @@ impl Tile {
             // mirroring the Quest app's per-tile mute. A resume overrides
             // this with the tile's own state, below.
             options.push(("mute", if muted { "yes" } else { "no" }));
+            // What the sound server calls the stream. mpv's default is
+            // "mpv", which tells a mixer — or an assistant ducking audio
+            // under its own voice — nothing about where it came from.
+            options.push(("audio-client-name", "Tessera"));
+            // The stream's media.name comes from mpv's `title`, which
+            // defaults to "<file> - mpv"; a now-playing display wants just
+            // the title.
+            options.push(("title", "${media-title}"));
             if let Some(dev) = &opts.audio_device {
                 options.push(("audio-device", dev));
             }
@@ -412,6 +425,37 @@ impl Tile {
         self.mpv.get_f64("time-pos").unwrap_or(-1.0)
     }
 
+    /// Length in seconds, if known (not for a live stream).
+    pub fn duration(&self) -> Option<f64> {
+        self.mpv.get_f64("duration").filter(|d| *d > 0.0)
+    }
+
+    /// The chapters as (start seconds, title), in order. Empty if none.
+    pub fn chapters(&self) -> Vec<(f64, String)> {
+        let n = self.mpv.get_i64("chapter-list/count").unwrap_or(0);
+        (0..n)
+            .map(|i| {
+                let time = self.mpv.get_f64(&format!("chapter-list/{i}/time")).unwrap_or(0.0);
+                let title = self
+                    .mpv
+                    .get_string(&format!("chapter-list/{i}/title"))
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| format!("chapter {}", i + 1));
+                (time, title)
+            })
+            .collect()
+    }
+
+    /// Index into `chapters()` of the current chapter.
+    pub fn chapter(&self) -> Option<usize> {
+        self.mpv.get_i64("chapter").filter(|c| *c >= 0).map(|c| c as usize)
+    }
+
+    /// The subtitle line on screen right now, if any.
+    pub fn sub_text(&self) -> Option<String> {
+        self.mpv.get_string("sub-text").filter(|t| !t.trim().is_empty())
+    }
+
     pub fn is_paused(&self) -> bool {
         self.mpv.get_string("pause").map(|v| v == "yes").unwrap_or(false)
     }
@@ -479,6 +523,8 @@ impl Tile {
                 codec: t.get("codec").and_then(|v| v.as_str()).map(str::to_owned),
                 default: t.get("default").and_then(|v| v.as_bool()).unwrap_or(false),
                 selected: t.get("selected").and_then(|v| v.as_bool()).unwrap_or(false),
+                ff_index: t.get("ff-index").and_then(|v| v.as_i64()),
+                external_filename: t.get("external-filename").and_then(|v| v.as_str()).map(str::to_owned),
             };
             match kind {
                 Some("audio") => self.audio_tracks.push(info),
@@ -849,17 +895,26 @@ impl Tile {
 
     /// Dumps this tile's current FBO content to a PNG. Diagnostic aid.
     pub fn dump_fbo(&self, gl: &glow::Context, path: &std::path::Path) -> std::io::Result<()> {
-        let Some(fbo) = self.fbo else { return Ok(()) };
-        let w = self.tex_w;
-        let h = self.tex_h;
-        let mut buf = vec![0u8; (w as usize) * (h as usize) * 3];
+        let Some(img) = self.read_fbo(gl) else { return Ok(()) };
+        crate::png_util::write_png_rgb(path, img.w as i32, img.h as i32, &img.rgb)
+    }
+
+    /// This tile's current frame, read back from its FBO (bottom row
+    /// first). None before the first frame has been rendered.
+    pub fn read_fbo(&self, gl: &glow::Context) -> Option<crate::screen::RawImage> {
+        let fbo = self.fbo?;
+        let (w, h) = (self.tex_w, self.tex_h);
+        if w <= 0 || h <= 0 {
+            return None;
+        }
+        let mut rgb = vec![0u8; (w as usize) * (h as usize) * 3];
         unsafe {
             gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
-            gl.read_pixels(0, 0, w, h, glow::RGB, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(&mut buf));
+            gl.read_pixels(0, 0, w, h, glow::RGB, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(&mut rgb));
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
-        crate::png_util::write_png_rgb(path, w, h, &buf)
+        Some(crate::screen::RawImage { w: w as u32, h: h as u32, rgb })
     }
 }
 

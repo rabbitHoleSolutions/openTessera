@@ -247,13 +247,22 @@ was observed with vsync on occluded windows), `TESSERA_MPV_LIB` path to libmpv,
 `TESSERA_MPV_LOG=v` verbose mpv logs, `TESSERA_DUMP_DIR` screenshot dumps each
 status interval (add `TESSERA_DUMP_OVERLAY=1` to include the overlay UI).
 
+## MCP (assistants)
+
+`tessera mcp` is an MCP server on stdio for the running app — what's
+playing, open, play/pause/seek/volume, read and search subtitles, grab a
+frame, manage the queue. Any MCP client connects with
+`{ "command": "tessera", "args": ["mcp"] }`; no port, no token. `tessera mcp
+--dev` adds tools for developing tessera itself (a sandboxed instance,
+screenshots, UI state, synthetic input). See [docs/MCP.md](docs/MCP.md).
+
 ## Workspace layout
 
 | Crate | Responsibility |
 |---|---|
 | `tessera-mpv` | libmpv render API wrapper (dlopen, hand-declared C ABI) |
-| `tessera-core` | MediaItem/SourceKind model, PlaybackQueue, layout solver, decode budget |
-| `tessera-app` | Binary: screens/windows, GL compositor, tiles, CLI |
+| `tessera-core` | MediaItem/SourceKind model, PlaybackQueue, layout solver, decode budget, title/subtitle/timecode parsing |
+| `tessera-app` | Binary: screens/windows, GL compositor, tiles, CLI, the MCP server and the API behind it |
 
 ## Roadmap
 

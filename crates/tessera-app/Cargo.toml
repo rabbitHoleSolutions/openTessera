@@ -24,6 +24,7 @@ serde_json = { workspace = true }
 libc = { workspace = true }
 image = { version = "0.24", default-features = false, features = ["jpeg", "png"] }
 png = "0.17"
+base64 = "0.22"
 raw-window-handle = { workspace = true }
 
 # Cocoa calls winit 0.29 doesn't wrap (Finder open events, menu bar/Dock

@@ -126,7 +126,9 @@ impl PlaybackQueue {
     /// caller can reference entries in management operations.
     pub fn pending(&self, n: usize) -> Vec<(usize, &MediaItem)> {
         let start = self.next_index();
-        let end = (start + n).min(self.items.len());
+        // Saturating: "all of them" is spelled `usize::MAX`, which would
+        // wrap to an empty range (release builds don't trap overflow).
+        let end = start.saturating_add(n).min(self.items.len());
         (start..end).map(|i| (i, &self.items[i])).collect()
     }
 
@@ -438,6 +440,7 @@ mod tests {
         let titles: Vec<&str> = q.pending(10).iter().map(|(_, m)| m.title.as_str()).collect();
         assert_eq!(titles, vec!["c", "d", "e"]);
         assert!(q.pending(0).is_empty());
+        assert_eq!(q.pending(usize::MAX).len(), 3);
     }
 
     #[test]

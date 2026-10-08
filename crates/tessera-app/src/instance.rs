@@ -25,13 +25,21 @@
 //! settings.conf) then coexists with the real app rather than fighting it
 //! for the socket — which is also how this module gets tested.
 //!
+//! **The same socket serves the app's API** (`rpc.rs`): a line carrying
+//! `{"rpc": ...}` is a request answered with one JSON line, which is how
+//! `tessera mcp` talks to the running app. Each connection gets its own
+//! thread, so a slow request (a frame grab) never holds up a hand-off.
+//!
 //! [`PlaybackQueue`]: tessera_core::PlaybackQueue
 //! [`DecodeBudget`]: tessera_core::DecodeBudget
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
+
+use crate::rpc::{Call, Injector};
 
 /// Set to run a second instance against the same config anyway. Only for
 /// development — it reinstates every hazard above, including the settings
@@ -53,18 +61,35 @@ pub enum Acquired {
 /// "bring the window to the front".
 pub type Open = Vec<PathBuf>;
 
-/// Receives hand-offs from later launches.
+/// Receives hand-offs from later launches, and API calls.
 pub struct Opens {
     rx: mpsc::Receiver<Open>,
+    calls: mpsc::Receiver<Call>,
+    /// Filled in once the event loop exists; synthetic input needs it.
+    pub injector: Injector,
     socket: PathBuf,
 }
 
 impl Opens {
+    fn inert() -> Opens {
+        Opens {
+            rx: mpsc::channel().1, // nothing will ever arrive on it
+            calls: mpsc::channel().1,
+            injector: Arc::new(Mutex::new(None)),
+            socket: PathBuf::new(),
+        }
+    }
+
     /// Everything received since the last call. Never blocks — the accept
     /// loop lives on its own thread, the same rule every other blocking
     /// thing in this app follows.
     pub fn poll(&mut self) -> Vec<Open> {
         self.rx.try_iter().collect()
+    }
+
+    /// API calls waiting for the event loop.
+    pub fn poll_calls(&mut self) -> Vec<Call> {
+        self.calls.try_iter().collect()
     }
 }
 
@@ -84,10 +109,7 @@ impl Drop for Opens {
 pub fn acquire(config_dir: &Path, paths: &[PathBuf]) -> Acquired {
     if std::env::var_os(ALLOW_MULTI).is_some() {
         println!("instance: {ALLOW_MULTI} set — not claiming single-instance ownership");
-        return Acquired::Primary(Opens {
-            rx: mpsc::channel().1, // nothing will ever arrive on it
-            socket: PathBuf::new(),
-        });
+        return Acquired::Primary(Opens::inert());
     }
     let socket = socket_path(config_dir);
     let absolute = absolutize(paths);
@@ -112,41 +134,75 @@ pub fn acquire(config_dir: &Path, paths: &[PathBuf]) -> Acquired {
                 return Acquired::HandedOff;
             }
             eprintln!("warning: cannot listen on {}: {e} — running without single-instance ownership", socket.display());
-            return Acquired::Primary(Opens { rx: mpsc::channel().1, socket: PathBuf::new() });
+            return Acquired::Primary(Opens::inert());
         }
     };
 
     let (tx, rx) = mpsc::channel::<Open>();
+    let (calls_tx, calls) = mpsc::channel::<Call>();
+    let injector: Injector = Arc::new(Mutex::new(None));
+    let inj = injector.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { continue };
-            if serve(stream, &tx).is_err() {
-                break; // the app is gone
-            }
+            let (tx, calls_tx, inj) = (tx.clone(), calls_tx.clone(), inj.clone());
+            std::thread::spawn(move || serve(stream, &tx, &calls_tx, &inj));
         }
     });
-    Acquired::Primary(Opens { rx, socket })
+    Acquired::Primary(Opens { rx, calls, injector, socket })
 }
 
-/// Reads one request and acknowledges it. Errors only when the receiving
-/// end has gone away, which ends the accept loop.
-fn serve(stream: UnixStream, tx: &mpsc::Sender<Open>) -> Result<(), mpsc::SendError<Open>> {
+/// Reads one request and answers it: an API call with its result, a
+/// hand-off with an ack.
+fn serve(stream: UnixStream, tx: &mpsc::Sender<Open>, calls: &mpsc::Sender<Call>, injector: &Injector) {
     let mut line = String::new();
     let mut reader = BufReader::new(match stream.try_clone() {
         Ok(s) => s,
-        Err(_) => return Ok(()),
+        Err(_) => return,
     });
     if reader.read_line(&mut line).is_err() {
-        return Ok(());
+        return;
+    }
+    let mut stream = stream;
+    if let Some(req) = serde_json::from_str::<serde_json::Value>(&line).ok().and_then(|v| v.get("rpc").cloned()) {
+        let mut out = crate::rpc::serve(&req, calls, injector).to_string();
+        out.push('\n');
+        let _ = stream.write_all(out.as_bytes());
+        let _ = stream.flush();
+        return;
     }
     let paths = parse_request(&line);
     // Acknowledged before the app has acted on it: the sender only needs to
     // know it reached a live instance, and making it wait for a tile to
     // load would hold up its exit for no reason.
-    let mut stream = stream;
     let _ = stream.write_all(b"ok\n");
     let _ = stream.flush();
-    tx.send(paths)
+    let _ = tx.send(paths);
+}
+
+/// Why an API call got no answer.
+#[derive(Debug)]
+pub enum CallError {
+    /// Nothing is listening for this config directory.
+    NotRunning,
+    /// Connected, but the exchange failed or timed out.
+    Failed(String),
+}
+
+/// Sends one API call to the instance for `config_dir` and waits up to
+/// `timeout` for its reply.
+pub fn call(config_dir: &Path, req: &serde_json::Value, timeout: Duration) -> Result<serde_json::Value, CallError> {
+    let mut stream = UnixStream::connect(socket_path(config_dir)).map_err(|_| CallError::NotRunning)?;
+    stream.set_read_timeout(Some(timeout)).map_err(|e| CallError::Failed(e.to_string()))?;
+    let mut line = serde_json::json!({ "rpc": req }).to_string();
+    line.push('\n');
+    stream.write_all(line.as_bytes()).map_err(|e| CallError::Failed(e.to_string()))?;
+    stream.flush().map_err(|e| CallError::Failed(e.to_string()))?;
+    let mut reply = String::new();
+    BufReader::new(&stream)
+        .read_line(&mut reply)
+        .map_err(|e| CallError::Failed(format!("no reply from tessera: {e}")))?;
+    serde_json::from_str(&reply).map_err(|e| CallError::Failed(format!("bad reply from tessera: {e}")))
 }
 
 /// Sends `paths` to a running instance. `None` if there isn't one.
@@ -294,9 +350,11 @@ mod tests {
         let _ = std::fs::remove_file(&sock);
         let listener = UnixListener::bind(&sock).unwrap();
         let (tx, rx) = mpsc::channel::<Open>();
+        let (calls, _calls_rx) = mpsc::channel::<Call>();
+        let inj: Injector = Arc::new(Mutex::new(None));
         std::thread::spawn(move || {
             for stream in listener.incoming().take(1) {
-                let _ = serve(stream.unwrap(), &tx);
+                serve(stream.unwrap(), &tx, &calls, &inj);
             }
         });
         let want = vec![PathBuf::from("/media/x.mkv")];

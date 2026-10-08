@@ -657,6 +657,7 @@ pub fn delete_item(item: &MediaItem, configured: &[Source]) -> Result<(), String
             agent().delete(&url).call().map(|_| ()).map_err(|e| e.to_string())
         }
         SourceKind::Smb => Err("smb delete not supported (mount it locally instead)".into()),
+        SourceKind::Url => Err("nothing to delete: this was opened by URL".into()),
         // There is no file to remove, and the trash sits right there on the
         // transport next to a live feed.
         SourceKind::Camera => Err("a camera feed is live — there is nothing to delete".into()),

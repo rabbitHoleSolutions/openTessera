@@ -1496,7 +1496,7 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                                 ("wheel on tile", "that tile's volume +/-5 (Up/Down = all unmuted tiles)"),
                                 ("A / S buttons", "audio / subtitle track row (expands below the transport)"),
                                 ("🎤 / 📌 buttons", "solo audio (mute all others) / pin this tile big"),
-                                ("right-click tile", "mute/unmute audio (needs --audio)"),
+                                ("right-click tile", "mute/unmute audio"),
                                 ("hover tile", "show the queue strip at its bottom"),
                                 ("click thumb", "play that item on the hovered tile"),
                                 ("right-click thumb", "remove it from the queue"),

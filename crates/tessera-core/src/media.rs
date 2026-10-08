@@ -11,6 +11,9 @@ pub enum SourceKind {
     /// queued, tiled, pinned, dragged between screens — except that it
     /// never ends, which is what [`SourceKind::is_live`] exists to say.
     Camera,
+    /// A recorded stream opened by URL (http/https) — seekable, but there
+    /// is no file to delete. Live protocols open as `Camera` instead.
+    Url,
 }
 
 impl SourceKind {
@@ -21,6 +24,7 @@ impl SourceKind {
             SourceKind::Jellyfin => "jellyfin",
             SourceKind::Plex => "plex",
             SourceKind::Camera => "camera",
+            SourceKind::Url => "url",
         }
     }
 
@@ -84,6 +88,40 @@ impl MediaItem {
         }
     }
 
+    /// An item for a URL handed over directly (the MCP `tessera_open`).
+    /// None for anything that isn't a scheme mpv streams: `file://` and
+    /// friends go through `from_path`, which knows what is on disk.
+    pub fn from_url(url: &str) -> Option<MediaItem> {
+        let (scheme, rest) = url.split_once("://")?;
+        let kind = match scheme.to_ascii_lowercase().as_str() {
+            "http" | "https" => SourceKind::Url,
+            "rtsp" | "rtsps" | "rtmp" | "rtmps" | "srt" | "udp" | "rtp" => SourceKind::Camera,
+            _ => return None,
+        };
+        let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+        // The file name if there is one (extension dropped), else the host.
+        let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let title = match path.rsplit('/').find(|s| !s.is_empty()) {
+            Some(file) => file.rsplit_once('.').filter(|(stem, _)| !stem.is_empty()).map_or(file, |(stem, _)| stem),
+            None => host,
+        }
+        .to_string();
+        Some(MediaItem {
+            id: format!("url|{url}"),
+            title,
+            uri: url.to_string(),
+            kind,
+            width: None,
+            height: None,
+            fps: None,
+            codec: None,
+            size: None,
+            modified: None,
+            thumb_url: None,
+            source: None,
+        })
+    }
+
     /// True for an item that plays forever (see [`SourceKind::is_live`]).
     pub fn is_live(&self) -> bool {
         self.kind.is_live()
@@ -133,4 +171,24 @@ pub fn collect_items(paths: &[std::path::PathBuf]) -> Vec<MediaItem> {
         }
     }
     items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn urls_become_items_by_scheme() {
+        let m = MediaItem::from_url("https://example.org/films/Heat.1995.mkv?token=x").unwrap();
+        assert_eq!((m.kind, m.title.as_str()), (SourceKind::Url, "Heat.1995"));
+        assert!(!m.is_live());
+        let m = MediaItem::from_url("rtsp://10.0.0.5:554/stream1").unwrap();
+        assert_eq!((m.kind, m.title.as_str()), (SourceKind::Camera, "stream1"));
+        assert!(m.is_live());
+        // Bare host: still has a name.
+        assert_eq!(MediaItem::from_url("http://cam.local").unwrap().title, "cam.local");
+        // Not a streaming scheme, or not a URL at all.
+        assert!(MediaItem::from_url("file:///etc/passwd").is_none());
+        assert!(MediaItem::from_url("/home/x/a.mkv").is_none());
+    }
 }

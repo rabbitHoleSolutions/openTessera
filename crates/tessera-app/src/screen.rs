@@ -89,6 +89,29 @@ pub struct Screen {
     pub frames_drawn: u64,
     pub thumbs: ThumbCache,
     pending_screenshot: Option<(std::path::PathBuf, String)>,
+    /// Frame grabs asked for over the instance socket (MCP), served at the
+    /// next tick — the only point where the right GL state exists.
+    pub captures: Vec<Capture>,
+}
+
+/// An RGB8 readback in glReadPixels order: bottom row first.
+pub struct RawImage {
+    pub w: u32,
+    pub h: u32,
+    pub rgb: Vec<u8>,
+}
+
+pub enum CaptureWhat {
+    /// The whole window, before or after the overlay is drawn.
+    Window { overlay: bool },
+    /// One tile's video, at the resolution it is decoded to.
+    Tile(usize),
+}
+
+pub struct Capture {
+    pub what: CaptureWhat,
+    /// None if the tile is gone or has no frame yet.
+    pub reply: std::sync::mpsc::Sender<Option<RawImage>>,
 }
 
 impl Screen {
@@ -127,6 +150,7 @@ impl Screen {
             frames_drawn: 0,
             thumbs: ThumbCache::new(),
             pending_screenshot: None,
+            captures: Vec::new(),
         }
         .with_layout(size.width as i32, size.height as i32)
     }
@@ -327,6 +351,7 @@ impl Screen {
         if !dump_overlay {
             self.take_screenshot();
         }
+        self.serve_captures(false);
         // Overlay (egui). A full pass runs every frame — with an empty UI when
         // hidden — so egui input state stays fresh and stale widgets can't
         // swallow clicks. Painted after the screenshot read so dumps stay
@@ -539,8 +564,46 @@ impl Screen {
         if dump_overlay {
             self.take_screenshot();
         }
+        self.serve_captures(true);
         self.surface.swap_buffers(&self.context).ok();
         self.frames_drawn += 1;
+    }
+
+    /// Answers the captures that can be taken at this point of the frame:
+    /// before the overlay, a bare window and any tile; after it, a window
+    /// with the overlay.
+    fn serve_captures(&mut self, overlay_drawn: bool) {
+        let mut keep = Vec::new();
+        for c in std::mem::take(&mut self.captures) {
+            let image = match c.what {
+                CaptureWhat::Window { overlay } if overlay == overlay_drawn => Some(self.read_window()),
+                CaptureWhat::Tile(id) if !overlay_drawn => {
+                    Some(self.tiles.iter().find(|t| t.id == id).and_then(|t| t.read_fbo(&self.gl)))
+                }
+                _ => None,
+            };
+            match image {
+                Some(img) => {
+                    let _ = c.reply.send(img);
+                }
+                None => keep.push(c),
+            }
+        }
+        self.captures = keep;
+    }
+
+    fn read_window(&self) -> Option<RawImage> {
+        let size = self.window.inner_size();
+        let (w, h) = (size.width, size.height);
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let mut rgb = vec![0u8; (w as usize) * (h as usize) * 3];
+        unsafe {
+            self.gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+            self.gl.read_pixels(0, 0, w as i32, h as i32, glow::RGB, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(&mut rgb));
+        }
+        Some(RawImage { w, h, rgb })
     }
 
     /// Reads back the composite frame (plus per-tile FBOs) if a screenshot

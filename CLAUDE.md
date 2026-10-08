@@ -11,13 +11,24 @@ ideas, no shared code. See `README.md` for the user-facing feature list and
 cargo build --release          # binary: target/release/tessera
 ./packaging/install.sh         # user-local install (bin + icon + .desktop)
 cargo check --workspace        # fast loop while editing
-cargo test --workspace         # 95 tests, mostly tessera-core (layout, budget, queue, sources)
+cargo test --workspace         # 104 tests, mostly tessera-core (layout, budget, queue, sources)
 cargo clippy --workspace       # 7 pre-existing warnings; don't let the count grow
 ```
 
-Running it needs a display, libmpv, and media. Launching it **windowed** for
-verification is fine and useful — never bare (it grabs every monitor
-fullscreen):
+Running it needs a display, libmpv, and media. **The first choice for
+checking a change is the `tessera-dev` MCP server** (`.mcp.json`; build
+first, since it runs `target/release/tessera mcp --dev`). Its tools drive a
+sandboxed instance with its own HOME, so the user's settings are safe:
+`tessera_dev_launch` (files, flags, a settings.conf, `fresh`),
+`tessera_dev_screenshot` (any window, overlay included, on demand),
+`tessera_dev_state` (windows, tile rects, overlay flags, budget, queue),
+`tessera_dev_input` (click/drag/scroll through the real event path — no
+xdotool focus games), `tessera_dev_log`, `tessera_dev_quit` — plus the seven
+player tools, aimed at the sandbox. It can't press keys; use `xdotool key`
+for hotkeys. See `docs/MCP.md`.
+
+Without it, launching **windowed** by hand is fine — never bare (it grabs
+every monitor fullscreen):
 
 ```
 TESSERA_DUMP_DIR=<scratch> TESSERA_DUMP_OVERLAY=1 \
@@ -67,8 +78,8 @@ Useful at runtime: `--windowed 1600x900` (one ordinary window),
 | Crate | Responsibility |
 |---|---|
 | `tessera-mpv` | libmpv render-API wrapper: `dlopen` + hand-declared C ABI (no dev headers). `MpvLib` / `Mpv` / `RenderContext`. |
-| `tessera-core` | Pure logic, no I/O of its own beyond HTTP sources: `MediaItem`/`SourceKind`, `PlaybackQueue`, `solve_grid`, `DecodeBudget`. **This is where tests live** — put new logic here if it can be tested headlessly. |
-| `tessera-app` | The binary. `main.rs` (CLI + event loop + all the cross-screen actions), `platform/` (everything OS-specific: `linux.rs`, `macos.rs`, same items in both), `screen.rs` (one window + GL context per `Screen`, wall or library), `tile.rs` (one mpv instance + FBO), `compositor.rs`, `overlay.rs` (wall egui), `browser/` (the browser window's egui: `mod.rs` tab bar + shared state, then one file per tab — `library.rs`, `queue.rs`, `sources.rs`, `config.rs`), `catalog.rs` (background source listing), `thumbs.rs`, `png_util.rs`. |
+| `tessera-core` | Pure logic, no I/O of its own beyond HTTP sources: `MediaItem`/`SourceKind`, `PlaybackQueue`, `solve_grid`, `DecodeBudget`, `title` (file name → show/season/episode/year), `subs` (SRT cues, search), `timecode` (`HH:MM:SS`, seek targets incl. chapters). **This is where tests live** — put new logic here if it can be tested headlessly. |
+| `tessera-app` | The binary. `main.rs` (CLI + event loop + all the cross-screen actions), `platform/` (everything OS-specific: `linux.rs`, `macos.rs`, same items in both), `screen.rs` (one window + GL context per `Screen`, wall or library), `tile.rs` (one mpv instance + FBO), `compositor.rs`, `overlay.rs` (wall egui), `browser/` (the browser window's egui: `mod.rs` tab bar + shared state, then one file per tab — `library.rs`, `queue.rs`, `sources.rs`, `config.rs`), `catalog.rs` (background source listing), `thumbs.rs`, `png_util.rs`, `instance.rs` (the single-instance socket, which also carries the API), `rpc.rs` (the API: what each request does, on which thread), `mcp.rs` (`tessera mcp`: the stdio MCP server over that API). |
 
 ## Architecture invariants
 
@@ -222,6 +233,26 @@ item with `upcoming(1)` and `advance()` only once a tile really plays it
 (`spawn_tile` doesn't advance — its callers do, since an item played from
 outside the queue must not consume a place). Reading a fresh queue as
 "already on item 0" made the first "+" play item 1.
+
+**The API (`rpc.rs`) answers on the event loop; slow work stays on the
+connection thread.** A socket request is parsed on its own connection
+thread. Anything touching tiles, the queue or GL becomes a `Call` drained
+once a frame (next to the hand-offs) and answered there — through
+`handle_overlay_action` where an action exists, so the decode budget sees
+an API pause exactly as it sees a click. Listing folders, encoding JPEGs and
+pacing synthetic input happen on the connection thread before or after;
+ffmpeg runs in the `tessera mcp` shim, never in the app. A GL readback is a
+`Capture` queued on the `Screen` and served inside its `tick`, the only
+point where the right context and framebuffer are current.
+
+**What the API returns is read by a language model.** Errors say what to
+do next ("several tiles are playing — say which with `tile`: 0 (...), 1
+(...)"). Paths are redacted to before `?` — a Plex/Jellyfin direct-play URI
+*is* its token; `subtitle_info` carries the real URI for the shim's ffmpeg
+and the shim never prints it. Opening is limited to folder sources and
+`~/Videos` (canonicalised, so `..` and symlinks can't escape), and no tool
+deletes anything. Synthetic input is honoured only by an instance started
+with `TESSERA_DEV_INPUT=1`.
 
 **One `PlaybackQueue`, shared by every window** — owned by `main` and passed
 `&mut` alongside `budget`. A tile is a slot fed from it; windows opened at

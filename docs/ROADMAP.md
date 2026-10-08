@@ -1211,6 +1211,38 @@ someone else's place.
 
 ---
 
+## 23. MCP interface (`tessera mcp`)
+
+Status: **implemented** (2026-10-08) — see `docs/MCP.md`
+
+Asked for by Tia (`docs/MCP_NOTES_FROM_TIA.md`). A stdio shim over the
+single-instance socket, so a client needs one line of config and no port or
+token. Seven player tools (status, open, control, subtitles, frame, queue,
+close), coarse and defaulting to the focused tile, replying in short
+speakable text. `--dev` adds six more aimed at a sandboxed instance —
+launch/quit/log, on-demand screenshots, a UI state dump, and synthetic
+pointer input through the real event path — which replace the
+`TESSERA_DUMP_DIR` + xdotool routine for checking a change.
+
+Built on the way: `SourceKind::Url` (http(s) opened directly; not
+deletable), `audio-client-name=Tessera`, on-demand GL captures on `Screen`,
+and core modules for title parsing, subtitle cues and time notation, all
+tested headlessly. Testing it found `PlaybackQueue::pending(usize::MAX)`
+wrapping to an empty range in release builds.
+
+### Next
+
+- **Events**: a streaming socket request the shim turns into MCP
+  notifications (playback ended, now playing, paused, tile closed).
+- **Subtitles for Plex/Jellyfin items** via the servers' own subtitle
+  endpoints; today only the line on screen is available for streamed items.
+- **Keys in dev input**: winit's `KeyEvent` can't be built outside winit, so
+  this needs the hotkey handler factored out of the event match first.
+
+**Effort**: S each
+
+---
+
 ## Implemented features (for context)
 
 - Phase 2 budget: eviction (OLDEST_STARTED), adaptive ceiling, single-stream rule

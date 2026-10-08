@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "tessera-dev": {
+      "command": "target/release/tessera",
+      "args": ["mcp", "--dev"]
+    }
+  }
+}
