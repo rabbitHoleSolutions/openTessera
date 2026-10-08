@@ -576,15 +576,17 @@ What differs, and why:
   `application:openURLs:` is added to its delegate class at runtime. At launch
   the file means what a command-line path means — it replaces the queue — so
   startup tiles wait for the first tick, when the event has landed. While
-  running, "play now" on the first wall tile, and queued.
+  running, it is the same request as a hand-off from a second launch (#17)
+  and goes through the same `open_listed`: plays on the first wall tile,
+  extras queued. (It used to also queue the file it was playing, so next
+  played it again.)
 - **Drag-and-drop** onto a window (implemented 2026-09-21). winit registers
   every window for `NSFilenamesPboardType` and accepts the drag, so the
   cursor already promised a drop that nothing handled — `DroppedFile` was
-  never matched. It now plays on the window it was dropped on (a drop names
-  its window, unlike a Finder open), falling back to the first wall window
-  with a tile. winit sends one event per file with no end-of-drop marker, so
-  the paths accumulate and flush once a frame; listing runs off-thread,
-  since a dropped folder is a directory walk.
+  never matched. Built on both platforms at once; the merged version is #21,
+  which plays on the tile under the pointer. Listing runs off-thread, since a
+  dropped folder is a directory walk — this side's contribution, now shared
+  by every way a file can arrive.
 - **Keys**: Cmd chords are never read as hotkeys. Cmd+W closes the window
   (the last one quits), Ctrl+Cmd+F toggles fullscreen like W, Cmd+Q comes
   through winit's menu — and the OS quit now gets the same teardown and
@@ -662,9 +664,9 @@ the file that was just asked for, not on whatever the cursor pointed at.
 
 ### Next: where new videos go
 
-The policy lives in exactly one place, `open_handed_off`, which already has
+The policy lives in exactly one place, `open_listed`, which already has
 both outcomes wired: play on an existing tile, or open a wall window for it
-(today the second only fires when there is no tile to use). A setting to
+(today the second only fires when there is no wall window to use). A setting to
 choose between them — "play in an existing stream" vs. "give it its own
 window", the VLC/Celluloid distinction — is a branch at that call site plus
 a `UiSettings` field, not new machinery.
@@ -1160,10 +1162,19 @@ dropping onto a wall with a three-item queue then pressing next four times
 walks the original queue and the dropped file never reappears; a
 three-file drop plays the first and queues exactly two.
 
+### One path for every arrival (2026-10-08)
+
+A hand-off from a later launch, a macOS Finder open while running, and a
+drop are the same request with a different target, and now take one path:
+the paths are listed on a worker by `list_off_thread` (any of them can be a
+folder, and a directory walk stalls a frame), then `open_listed` acts. The
+tile under the pointer is read when the drop arrives, not when the listing
+lands. A wall window with no tiles gets a new tile — the window dropped on,
+or for a hand-off the first wall window — rather than a second window being
+opened beside it.
+
 ### Known gaps
 
-- Dropping onto a wall window with no tiles opens one, rather than adding a
-  tile to the window that was dropped on.
 - Only files are accepted. A dropped URL (`text/uri-list` pointing at
   http) would be a reasonable thing to feed mpv directly.
 

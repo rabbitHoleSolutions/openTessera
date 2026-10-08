@@ -584,9 +584,9 @@ fn main() {
     // Set once the wall has been torn down, by whichever path got there
     // first — Esc, closing the last window, or the OS quitting us.
     let mut shut_down = false;
-    // Files opened from the OS while running, being listed off-thread.
-    // (Drag-and-drop has its own path: see `dropped` and `open_handed_off`.)
-    let (opened_tx, opened_rx) = std::sync::mpsc::channel::<Vec<tessera_core::MediaItem>>();
+    // Files that arrived while running — handed off, opened by the OS or
+    // dropped — being listed off-thread (see `list_off_thread`).
+    let (listed_tx, listed_rx) = std::sync::mpsc::channel::<Listed>();
 
     // Startup population. --max is the video-wall mode: fill every
     // screen to the --tiles cap. A plain window starts at
@@ -645,31 +645,6 @@ fn main() {
                         }
                         populate_startup(&mut screens, &mut budget, &mut queue, &mpv_lib, &tile_opts, &mut next_tile_id, populate_limit);
                     }
-                    // Files opened while running: listed off the render
-                    // thread (a folder is a directory walk), played when
-                    // the listing lands.
-                    let opened = platform::take_opened_paths();
-                    if !opened.is_empty() {
-                        let tx = opened_tx.clone();
-                        std::thread::spawn(move || {
-                            let _ = tx.send(list_paths(&opened).1);
-                        });
-                    }
-                    while let Ok(items) = opened_rx.try_recv() {
-                        let mut wall = Wall {
-                            screens: &mut screens,
-                            budget: &mut budget,
-                            queue: &mut queue,
-                            sources: &sources,
-                            overlay: &mut overlay,
-                            mpv_lib: &mpv_lib,
-                            tile_opts: &tile_opts,
-                            next_tile_id: &mut next_tile_id,
-                            max_tiles: args.tiles,
-                            wm_settle_at: &mut wm_settle_at,
-                        };
-                        play_opened(&mut wall, items);
-                    }
                     sync_fullscreen_chrome(&screens);
                     // Overlay auto-hide: visible while pinned or while user
                     // input arrived within the last 5 seconds.
@@ -690,24 +665,50 @@ fn main() {
                     // Deferred: a new window has to be created after the
                     // per-screen loop, which is iterating `screens` by index.
                     let mut new_windows: Vec<(ScreenRole, browser::Tab)> = Vec::new();
-                    // Files handed over by a later launch (see instance.rs).
+                    // Files that arrived from outside: handed over by a
+                    // later launch (see instance.rs), opened by the OS
+                    // while running, or dragged onto a window. All three
+                    // are listed off the render thread — any of them can be
+                    // a folder, which is a directory walk — and acted on
+                    // below once the listing lands.
                     for paths in opens.poll() {
-                        if open_handed_off(&mut screens, &mut queue, &mut overlay, &paths, OpenTarget::Anywhere) {
-                            new_windows.push((ScreenRole::Wall, browser::Tab::Library));
+                        raise_front(&screens);
+                        if !paths.is_empty() {
+                            list_off_thread(&listed_tx, OpenTarget::Anywhere, paths);
                         }
                     }
-                    // Files dragged onto a window. winit reports one event
-                    // per file with no position, so they are collected as
-                    // they arrive and acted on together here — a multi-file
-                    // drop is one gesture and should behave like one.
-                    for (window_id, paths) in std::mem::take(&mut dropped) {
-                        if open_handed_off(
-                            &mut screens,
-                            &mut queue,
-                            &mut overlay,
-                            &paths,
-                            OpenTarget::Window(window_id),
-                        ) {
+                    let opened = platform::take_opened_paths();
+                    if !opened.is_empty() {
+                        raise_front(&screens);
+                        list_off_thread(&listed_tx, OpenTarget::Anywhere, opened);
+                    }
+                    // winit reports one DroppedFile per file with no
+                    // position, so a drop is collected as it arrives and
+                    // listed here as one batch — a multi-file drop is one
+                    // gesture and should behave like one. The tile under
+                    // the pointer is read now, not when the listing lands,
+                    // by which time the pointer has moved on.
+                    for (window, paths) in std::mem::take(&mut dropped) {
+                        let tile = screens
+                            .iter()
+                            .find(|s| s.window.id() == window)
+                            .and_then(|s| s.cursor.and_then(|(x, y)| s.tile_at(x, y)));
+                        list_off_thread(&listed_tx, OpenTarget::Window { window, tile }, paths);
+                    }
+                    while let Ok((target, items)) = listed_rx.try_recv() {
+                        let mut wall = Wall {
+                            screens: &mut screens,
+                            budget: &mut budget,
+                            queue: &mut queue,
+                            sources: &sources,
+                            overlay: &mut overlay,
+                            mpv_lib: &mpv_lib,
+                            tile_opts: &tile_opts,
+                            next_tile_id: &mut next_tile_id,
+                            max_tiles: args.tiles,
+                            wm_settle_at: &mut wm_settle_at,
+                        };
+                        if open_listed(&mut wall, target, items) {
                             new_windows.push((ScreenRole::Wall, browser::Tab::Library));
                         }
                     }
@@ -1543,35 +1544,6 @@ fn list_paths(paths: &[PathBuf]) -> (Vec<tessera_core::sources::Source>, Vec<tes
         }
     }
     (sources, items)
-}
-
-/// Plays files the OS opened while the wall was running ("Open With" on a
-/// running Tessera): the first plays now on the first wall window with a
-/// tile — on a new tile, if no wall window has one — and all of them join
-/// the end of the queue. Drag-and-drop goes through `open_handed_off`.
-fn play_opened(wall: &mut Wall, items: Vec<tessera_core::MediaItem>) {
-    let Some(first) = items.first().cloned() else {
-        notify(wall.overlay, "nothing playable in what was opened".into());
-        return;
-    };
-    let n = items.len();
-    wall.queue.append_items(items);
-    println!("opened: {n} item(s) added to the queue ({} total)", wall.queue.len());
-    let with_tile = wall.screens.iter().position(|s| s.role == ScreenRole::Wall && !s.tiles.is_empty());
-    let any_wall = wall.screens.iter().position(|s| s.role == ScreenRole::Wall);
-    let Some(idx) = with_tile.or(any_wall) else {
-        notify(wall.overlay, "no wall window to play on — open one with + first".into());
-        return;
-    };
-    if wall.screens[idx].tiles.is_empty() {
-        if !can_add_tile(wall, idx) {
-            return;
-        }
-        spawn_tile(wall, idx, first);
-    } else {
-        handle_overlay_action(wall, OverlayAction::PlayNow { item: first }, idx);
-    }
-    wall.screens[idx].window.focus_window();
 }
 
 /// The smooth-scroll half of the wheel: accumulates pixel travel and hands
@@ -2537,16 +2509,47 @@ fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx: usi
 /// Where a batch of files should land.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OpenTarget {
-    /// No window in particular — a hand-off from another launch. Plays on
-    /// the first wall window that has a tile.
+    /// No window in particular — a hand-off from another launch, or an OS
+    /// open ("Open With" on macOS) while running. Plays on the first wall
+    /// window that has a tile.
     Anywhere,
-    /// Dropped onto this window: play there, on the tile under the pointer
-    /// if the drop landed on one. A browser window queues instead, since it
-    /// has no tiles to play on.
-    Window(winit::window::WindowId),
+    /// Dropped onto this window: play there, on `tile` if the drop landed
+    /// on one. A browser window queues instead, since it has no tiles to
+    /// play on.
+    Window { window: winit::window::WindowId, tile: Option<usize> },
 }
 
-/// Acts on files handed over by a later launch.
+/// Files on their way to the wall, being listed off the render thread.
+type Listed = (OpenTarget, Vec<tessera_core::MediaItem>);
+
+/// Lists `paths` on a worker and sends the result to `open_listed`'s
+/// channel: a dropped or handed-off folder is a directory walk, which must
+/// not stall a frame.
+fn list_off_thread(tx: &std::sync::mpsc::Sender<Listed>, target: OpenTarget, paths: Vec<PathBuf>) {
+    let tx = tx.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send((target, tessera_core::media::collect_items(&paths)));
+    });
+}
+
+/// A request aimed at the app rather than at a window means "come to the
+/// front" — that is what a second click on the dock icon is asking for, so
+/// even a bare re-launch does this. Raised on arrival, not once listed: a
+/// folder that takes a while to walk should not leave the user wondering
+/// whether anything heard them.
+fn raise_front(screens: &[Screen]) {
+    let front = screens
+        .iter()
+        .position(|s| s.role == ScreenRole::Wall)
+        .or(if screens.is_empty() { None } else { Some(0) });
+    if let Some(i) = front {
+        screens[i].window.focus_window();
+    }
+}
+
+/// Acts on files that arrived while running — handed over by a later
+/// launch, opened by the OS, or dropped onto a window — once
+/// `list_off_thread` has listed them.
 ///
 /// "Play that file" rather than "quietly append it" is the same rule the
 /// command line already follows — see the positional-paths note in `main`.
@@ -2556,77 +2559,78 @@ enum OpenTarget {
 /// Returns true when there was nowhere to play it and the caller should
 /// open a wall window; the file is left at the head of the pending queue,
 /// so the tile that window opens with is the one just asked for.
-fn open_handed_off(
-    screens: &mut [Screen],
-    queue: &mut PlaybackQueue,
-    overlay: &mut OverlayState,
-    paths: &[PathBuf],
-    target: OpenTarget,
-) -> bool {
-    // Even a bare re-launch means "come to the front" — that is what a
-    // second click on the dock icon is asking for. A drop already happened
-    // in the window the user was looking at, so it needs no raising.
-    if target == OpenTarget::Anywhere {
-        let front = screens
-            .iter()
-            .position(|s| s.role == ScreenRole::Wall)
-            .or(if screens.is_empty() { None } else { Some(0) });
-        if let Some(i) = front {
-            screens[i].window.focus_window();
-        }
-    }
-    if paths.is_empty() {
-        return false;
-    }
-    let items = tessera_core::media::collect_items(paths);
+fn open_listed(wall: &mut Wall, target: OpenTarget, items: Vec<tessera_core::MediaItem>) -> bool {
     if items.is_empty() {
-        notify(overlay, "nothing playable in what was dropped".into());
+        notify(wall.overlay, "nothing playable in what was opened".into());
         return false;
     }
     let count = items.len();
 
     // Dropping on the browser window means "add these", not "play these" —
     // it has no tiles, and the queue tab is the thing you were looking at.
-    if let OpenTarget::Window(id) = target {
-        if screens.iter().any(|s| s.window.id() == id && s.role == ScreenRole::Browser) {
-            queue.append_items(items);
-            notify(overlay, format!("added {count} item(s) to the queue"));
+    if let OpenTarget::Window { window, .. } = target {
+        if wall.screens.iter().any(|s| s.window.id() == window && s.role == ScreenRole::Browser) {
+            wall.queue.append_items(items);
+            notify(wall.overlay, format!("added {count} item(s) to the queue"));
             return false;
         }
     }
 
     // Where it will play is decided BEFORE the queue is touched, because
     // that is what decides whether the file belongs in the queue at all.
-    // The tile to take over: the one under the pointer when the drop landed
-    // on a specific window, else that window's first, else any wall tile.
-    let spot = match target {
-        OpenTarget::Window(id) => screens
-            .iter()
-            .position(|s| s.window.id() == id && s.role == ScreenRole::Wall && !s.tiles.is_empty())
-            .map(|si| {
-                let under = screens[si].cursor.and_then(|(x, y)| screens[si].tile_at(x, y));
-                (si, under.unwrap_or(screens[si].tiles[0].id))
-            }),
-        OpenTarget::Anywhere => None,
+    // A drop plays on the window it landed on — on the tile under the
+    // pointer, else its first, else a new tile if it has none. Anything
+    // else takes the first wall tile, else a new tile on an empty wall
+    // window, else a new window.
+    enum Spot {
+        Replace(usize, usize),
+        Spawn(usize),
     }
-    .or_else(|| {
-        screens
+    let dropped_on = match target {
+        OpenTarget::Window { window, tile } => wall
+            .screens
+            .iter()
+            .position(|s| s.window.id() == window && s.role == ScreenRole::Wall)
+            .map(|si| (si, tile)),
+        OpenTarget::Anywhere => None,
+    };
+    let spot = match dropped_on {
+        Some((si, tile)) => Some(match wall.screens[si].tiles.first() {
+            // The tile under the pointer was read when the drop arrived;
+            // it may have closed while the listing ran.
+            Some(t0) => Spot::Replace(
+                si,
+                tile.filter(|id| wall.screens[si].tiles.iter().any(|t| t.id == *id)).unwrap_or(t0.id),
+            ),
+            None => Spot::Spawn(si),
+        }),
+        None => wall
+            .screens
             .iter()
             .position(|s| s.role == ScreenRole::Wall && !s.tiles.is_empty())
-            .map(|si| (si, screens[si].tiles[0].id))
-    });
+            .map(|si| Spot::Replace(si, wall.screens[si].tiles[0].id))
+            .or_else(|| wall.screens.iter().position(|s| s.role == ScreenRole::Wall).map(Spot::Spawn)),
+    };
 
-    let Some((si, tile_id)) = spot else {
-        // Nowhere to play it, so the queue is the only place it can go. The
-        // first one is moved to the head of the pending tail so the window
-        // about to be opened comes up on the file that was asked for,
-        // rather than wherever the cursor happened to be.
-        let first_id = items[0].id.clone();
-        queue.append_items(items);
-        if let Some(idx) = queue.items().iter().position(|m| m.id == first_id) {
-            queue.move_pending_to_front(idx);
+    let mut items = items;
+    let Some(Spot::Replace(si, tile_id)) = spot else {
+        // No tile to take over, so the file goes in the queue — at the head
+        // of the pending tail, which is what a new tile pulls from (and what
+        // `spawn_tile` marks as played), so the tile about to be made comes
+        // up on the file that was asked for rather than on whatever was
+        // next.
+        let first = items[0].clone();
+        let first_idx = wall.queue.len();
+        wall.queue.append_items(items);
+        wall.queue.move_pending_to_front(first_idx);
+        if let Some(Spot::Spawn(si)) = spot {
+            if can_add_tile(wall, si) {
+                spawn_tile(wall, si, first);
+            }
+            wall.screens[si].window.focus_window();
+            return false;
         }
-        println!("opened: {count} file(s) — no wall tile yet, opening a window");
+        println!("opened: {count} file(s) — no wall window yet, opening one");
         return true;
     };
 
@@ -2636,13 +2640,12 @@ fn open_handed_off(
     // This is the split `OverlayAction::PlayNow` already draws: the tile
     // owns the item it is playing, and the queue holds what is still to
     // come. Only the extras from a multi-file drop are queued.
-    let mut items = items;
     let first = items.remove(0);
     let queued = items.len();
-    queue.append_items(items);
+    wall.queue.append_items(items);
 
-    let monitor_index = screens[si].monitor_index;
-    if let Some(tile) = screens[si].tiles.iter_mut().find(|t| t.id == tile_id) {
+    let monitor_index = wall.screens[si].monitor_index;
+    if let Some(tile) = wall.screens[si].tiles.iter_mut().find(|t| t.id == tile_id) {
         tile.item = first.clone();
         if let Err(e) = tile.load(&first) {
             eprintln!("screen {monitor_index} tile {tile_id}: load failed: {e}");
@@ -2654,7 +2657,7 @@ fn open_handed_off(
             );
         }
     }
-    screens[si].window.focus_window();
+    wall.screens[si].window.focus_window();
     false
 }
 
