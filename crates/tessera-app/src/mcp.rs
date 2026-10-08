@@ -162,10 +162,20 @@ impl Server {
             "tessera_status" => self.status(),
             "tessera_open" => self.open(a),
             "tessera_control" => {
+                let action = str_arg(a, "action").ok_or("give \"action\"")?;
                 let mut params = a.clone();
-                params["action"] = json!(str_arg(a, "action").ok_or("give \"action\"")?);
+                params["action"] = json!(action);
+                let mut note = String::new();
+                if action == "crop" && str_arg(a, "value").is_some_and(|v| v.eq_ignore_ascii_case("auto")) {
+                    let crop = self.detect_letterbox(a.get("tile"))?;
+                    if !crop.is_significant() {
+                        return Ok(text("no letterbox found — the picture already fills its frame, so there is nothing to crop"));
+                    }
+                    params["value"] = json!(format!("{:.4},{:.4},{:.4},{:.4}", crop.top, crop.bottom, crop.left, crop.right));
+                    note = "letterbox detected and cropped\n".into();
+                }
                 let v = self.rpc("control", params, Duration::from_secs(8))?;
-                Ok(text(tile_line(&v["tile"])))
+                Ok(text(format!("{note}{}", tile_line(&v["tile"]))))
             }
             "tessera_subtitles" => self.subtitles(a),
             "tessera_frame" => self.frame(a),
@@ -478,6 +488,53 @@ impl Server {
         self.cues(info, want)
     }
 
+    /// Finds the letterbox (or pillarbox) burned into a tile's video with
+    /// ffmpeg's cropdetect, sampled at three points so one dark scene can't
+    /// pass for a bar: the union of what each saw — the least aggressive
+    /// crop — is the answer.
+    fn detect_letterbox(&self, tile: Option<&Value>) -> Result<tessera_core::view::Crop, String> {
+        let info = self.rpc("subtitle_info", json!({ "tile": tile }), Duration::from_secs(5))?;
+        if info["live"] == json!(true) {
+            return Err("auto-crop needs a recorded video — for a live stream give the crop as an aspect (2.39:1) or edges (12%,12%)".into());
+        }
+        let uri = info["uri"].as_str().unwrap_or("").to_string();
+        let mut probe = Command::new("ffprobe");
+        probe.args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", &uri]);
+        let dims = String::from_utf8_lossy(&run_with_timeout(probe, Duration::from_secs(15))?).trim().to_string();
+        let (fw, fh) = dims
+            .split_once(',')
+            .and_then(|(w, h)| Some((w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?)))
+            .ok_or_else(|| format!("couldn't read the video's size from ffprobe ({dims:?})"))?;
+        let times: Vec<f64> = match info["duration"].as_f64() {
+            Some(d) if d > 60.0 => vec![d * 0.2, d * 0.45, d * 0.7],
+            _ => {
+                let p = info["position"].as_f64().unwrap_or(0.0);
+                vec![p, p + 20.0, p + 40.0]
+            }
+        };
+        let runs: Vec<_> = times
+            .into_iter()
+            .map(|t| {
+                let uri = uri.clone();
+                std::thread::spawn(move || {
+                    let mut cmd = Command::new("ffmpeg");
+                    cmd.args(["-nostdin", "-hide_banner", "-ss", &format!("{t:.1}"), "-i", &uri, "-t", "2"])
+                        .args(["-vf", "cropdetect=limit=24:round=2:reset=0", "-an", "-sn", "-f", "null", "-"]);
+                    run_capture(cmd, Duration::from_secs(30)).ok().and_then(|(_, log, _)| tessera_core::view::parse_cropdetect(&log))
+                })
+            })
+            .collect();
+        let boxes: Vec<(u32, u32, u32, u32)> = runs.into_iter().filter_map(|h| h.join().ok().flatten()).collect();
+        if boxes.is_empty() {
+            return Err("couldn't measure the picture (ffmpeg's cropdetect found nothing) — give the crop as an aspect (2.39:1) instead".into());
+        }
+        let x0 = boxes.iter().map(|b| b.2).min().unwrap_or(0);
+        let y0 = boxes.iter().map(|b| b.3).min().unwrap_or(0);
+        let x1 = boxes.iter().map(|b| b.2 + b.0).max().unwrap_or(fw).min(fw);
+        let y1 = boxes.iter().map(|b| b.3 + b.1).max().unwrap_or(fh).min(fh);
+        Ok(tessera_core::view::Crop::from_box(fw, fh, x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0)))
+    }
+
     // ---- frames ----
 
     fn frame(&self, a: &Value) -> ToolResult {
@@ -666,9 +723,18 @@ fn tile_line(t: &Value) -> String {
         _ => format!("{state}, loading"),
     });
     if let Some(c) = t["chapter"].as_object() {
-        parts.push(format!("chapter {} of {} \"{}\"", c["number"], c["of"], c["title"].as_str().unwrap_or("")));
+        let mut s = format!("chapter {} of {}", c["number"], c["of"]);
+        let title = c["title"].as_str().unwrap_or("");
+        // An unnamed chapter's title is just "chapter N" again.
+        if !title.is_empty() && !title.eq_ignore_ascii_case(&format!("chapter {}", c["number"])) {
+            s.push_str(&format!(" \"{title}\""));
+        }
+        parts.push(s);
     }
     parts.push(if t["muted"] == json!(true) { "muted".to_string() } else { format!("volume {}%", t["volume"]) });
+    if let Some(v) = t["view"].as_str() {
+        parts.push(v.to_string());
+    }
     let mut flags = Vec::new();
     for (k, label) in [("focused", "focused"), ("pinned", "pinned"), ("fullscreen", "fullscreen")] {
         if t[k] == json!(true) {
@@ -726,7 +792,16 @@ fn is_text_codec(codec: Option<&str>) -> bool {
 
 /// Runs a command with a deadline, returning stdout. A hung ffmpeg (a dead
 /// network share) becomes an error instead of a hung tool call.
-fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<Vec<u8>, String> {
+fn run_with_timeout(cmd: Command, timeout: Duration) -> Result<Vec<u8>, String> {
+    let (out, err, ok) = run_capture(cmd, timeout)?;
+    if ok && !out.is_empty() {
+        return Ok(out);
+    }
+    Err(format!("ffmpeg failed: {}", err.lines().last().unwrap_or("no output")))
+}
+
+/// Runs a command with a deadline: (stdout, stderr, exited successfully).
+fn run_capture(mut cmd: Command, timeout: Duration) -> Result<(Vec<u8>, String, bool), String> {
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -749,13 +824,7 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<Vec<u8>, Stri
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let out = out.join().unwrap_or_default();
-                let err = err.join().unwrap_or_default();
-                if status.success() && !out.is_empty() {
-                    return Ok(out);
-                }
-                let why = err.lines().last().unwrap_or("no output").to_string();
-                return Err(format!("ffmpeg failed: {why}"));
+                return Ok((out.join().unwrap_or_default(), err.join().unwrap_or_default(), status.success()));
             }
             Ok(None) if start.elapsed() > timeout => {
                 let _ = child.kill();
@@ -971,15 +1040,19 @@ fn player_tools() -> Vec<Value> {
         tool(
             "tessera_control",
             "Control playback",
-            "Play, pause, seek, change volume, mute, skip to the next/previous queue item, pin, or fullscreen a tile. \
-             Returns the tile's new state. `value` for seek: seconds (90), HH:MM:SS (01:02:03), relative (+30, -10), \
-             `next chapter`/`previous chapter`, `chapter 3`, or part of a chapter title. `value` for volume: 0-130 (percent) \
-             or relative (+10, -10). Example: {\"action\": \"seek\", \"value\": \"-30\"}.",
+            "Play, pause, seek, change volume, mute, crop or zoom the picture, skip to the next/previous queue item, pin, or \
+             fullscreen a tile. Returns the tile's new state. `value` for seek: seconds (90), HH:MM:SS (01:02:03), relative \
+             (+30, -10), `next chapter`/`previous chapter`, `chapter 3`, or part of a chapter title. `value` for volume: 0-130 \
+             (percent) or relative (+10, -10). `value` for crop: `auto` finds black letterbox/pillarbox bars in the video and \
+             crops them out so the film fills the screen (use this for \"get rid of the black bars\"); `fill` crops to fill \
+             the tile; an aspect (`2.39:1`, `21:9`); edges as `top,bottom` or `top,bottom,left,right` percents; `off`. \
+             `value` for zoom: a factor (1.5), relative (+0.25, -0.25), `in`, `out`, or `off`; it magnifies the centre of \
+             what the crop leaves. Crop and zoom stay with the video until changed. Example: {\"action\": \"crop\", \"value\": \"auto\"}.",
             json!({
                 "type": "object",
                 "properties": {
-                    "action": { "type": "string", "enum": ["play", "pause", "toggle", "seek", "volume", "mute", "unmute", "next", "previous", "pin", "fullscreen"] },
-                    "value": { "type": "string", "description": "Position for seek, percent for volume." },
+                    "action": { "type": "string", "enum": ["play", "pause", "toggle", "seek", "volume", "mute", "unmute", "crop", "zoom", "next", "previous", "pin", "fullscreen"] },
+                    "value": { "type": "string", "description": "Position for seek, percent for volume, auto/fill/aspect/edges/off for crop, factor for zoom." },
                     "tile": tile_prop(),
                 },
                 "required": ["action"],

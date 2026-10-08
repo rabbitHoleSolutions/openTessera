@@ -344,7 +344,7 @@ impl Screen {
             }
             if let Some(tex) = tile.texture() {
                 let aspect = tile.video_aspect();
-                self.compositor.draw(&self.gl, tex, cell, aspect, w, h);
+                self.compositor.draw(&self.gl, tex, cell, aspect, &tile.view(), w, h);
             }
         }
         let dump_overlay = std::env::var("TESSERA_DUMP_OVERLAY").map(|v| v != "0").unwrap_or(false);

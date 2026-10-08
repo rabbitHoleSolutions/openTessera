@@ -607,6 +607,7 @@ fn dispatch(
                 "uri": tile.item.uri,
                 "live": tile.item.is_live(),
                 "position": tile.time_pos().max(0.0),
+                "duration": tile.duration(),
                 "sub_text": tile.sub_text(),
                 "tracks": tracks,
             })))
@@ -713,11 +714,33 @@ fn control(
                 return Err("the queue is empty — add something with tessera_queue action=add".into());
             }
         }
+        "crop" | "zoom" => {
+            let value = value.ok_or_else(|| {
+                if action == "crop" {
+                    "crop needs a \"value\": auto, off, fill, an aspect (2.39:1), or edges (top,bottom in %)".to_string()
+                } else {
+                    "zoom needs a \"value\": 1.5, +0.25, -0.25, in, out or off".to_string()
+                }
+            })?;
+            let s = &mut wall.screens[si];
+            // The cell this tile is drawn in, for `fill`.
+            let pos = s.tiles.iter().position(|t| t.id == id).ok_or("internal: tile vanished")?;
+            let cell_aspect = s.effective_layout().get(pos).filter(|r| r.w > 0.0 && r.h > 0.0).map_or(16.0 / 9.0, |r| r.w / r.h);
+            let t = &mut s.tiles[pos];
+            let view = t.view();
+            let next = if action == "crop" {
+                view.with_crop(tessera_core::view::parse_crop(value, t.video_aspect(), cell_aspect)?)
+            } else {
+                tessera_core::view::View { zoom: tessera_core::view::parse_zoom(value, view.zoom)?, ..view }
+            };
+            t.set_view(next);
+            println!("screen {} tile {id}: {}", s.monitor_index, next.describe());
+        }
         "pin" => toggle_pin(wall.screens, si, id),
         "fullscreen" => handle_overlay_action(wall, OverlayAction::FullscreenToggle { tile_id: id }, si),
         other => {
             return Err(format!(
-                "unknown action {other:?} — use play, pause, toggle, seek, volume, mute, unmute, next, previous, pin or fullscreen"
+                "unknown action {other:?} — use play, pause, toggle, seek, volume, mute, unmute, crop, zoom, next, previous, pin or fullscreen"
             ))
         }
     }
@@ -835,6 +858,7 @@ fn tile_json(wall: &Wall, si: usize, id: usize, focused: Option<usize>) -> Value
         "pinned": s.pinned == Some(t.id),
         "fullscreen": s.zoomed == Some(t.id),
         "focused": focused == Some(t.id),
+        "view": (!t.view().is_full()).then(|| t.view().describe()),
     })
 }
 

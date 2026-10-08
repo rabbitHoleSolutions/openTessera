@@ -35,7 +35,7 @@ back in every argument.
 |---|---|---|
 | `tessera_status` | per tile: parsed title (show/season/episode or film/year), position, duration, chapter, paused/muted/volume, file, focused/pinned/fullscreen; queue summary | yes |
 | `tessera_open` | play files, folders or URLs; first plays (focused tile, `tile`, or `new_tile`), rest queue; `unmuted`; starts tessera if needed | no |
-| `tessera_control` | play, pause, toggle, seek, volume, mute, unmute, next, previous, pin, fullscreen — returns the new state | no |
+| `tessera_control` | play, pause, toggle, seek, volume, mute, unmute, crop, zoom, next, previous, pin, fullscreen — returns the new state | no |
 | `tessera_subtitles` | `now` (last 60s + next 10s, `-- now --` marked), `search` (timestamps to seek to), `tracks`, `select` | yes |
 | `tessera_frame` | the tile's current frame, or one `at` another time, as a ~768px JPEG; `save` writes to `~/Pictures/Tessera` | no |
 | `tessera_queue` | `list`, `add` (same path rules as open), `next`, `previous` | no |
@@ -45,6 +45,16 @@ back in every argument.
 Seek takes seconds (`90`), `HH:MM:SS`, relative (`+30`, `-10`), `next
 chapter` / `previous chapter`, `chapter 3`, or part of a chapter title.
 Volume takes 0–130 or `+10`/`-10`.
+
+Crop takes `auto` — the letterbox (or pillarbox) burned into the video is
+found with ffmpeg's `cropdetect`, sampled at 20/45/70% of the film so one
+dark scene can't pass for a bar, and cut away; the compositor then fits the
+picture at its real aspect, so a 2.39:1 film in a 16:9 file fills a 21:9
+screen — `fill` (crop to the tile's shape), an aspect (`2.39:1`, `21:9`),
+edges (`top,bottom[,left,right]` in %), or `off`. Zoom takes a factor
+(`1.5`), `+0.25`/`-0.25`, `in`/`out` or `off`, and magnifies the centre of
+what the crop leaves. Both belong to the video they were set on: the next
+queue item starts uncropped; moving the tile to another screen keeps them.
 
 Replies are short sentences and `[HH:MM:SS] line` lists, not JSON — Tia
 speaks them.

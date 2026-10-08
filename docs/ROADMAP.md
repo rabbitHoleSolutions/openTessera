@@ -1224,6 +1224,14 @@ launch/quit/log, on-demand screenshots, a UI state dump, and synthetic
 pointer input through the real event path — which replace the
 `TESSERA_DUMP_DIR` + xdotool routine for checking a change.
 
+Crop and zoom (`tessera_control` crop/zoom, 2026-10-08): a per-tile
+`View` in core, drawn by the compositor as a UV sub-rectangle fitted at the
+cropped aspect — which is what makes cropping a letterbox fill a 21:9
+screen rather than just shrink the picture. `crop auto` runs ffmpeg
+cropdetect at three points and keeps the least aggressive box. The view is
+tied to the item it was set for and travels in `ResumeState`. No on-screen
+control yet; it's an MCP feature first.
+
 `tessera_sources` (list; add a folder) followed on 2026-10-08, and with it
 a fix to folder sources themselves: listing only read the folder's top
 level, so a library laid out as `Movies/`, `Shows/<show>/...` showed

@@ -137,6 +137,11 @@ pub struct Tile {
     /// track panel opens — the overlay snapshot reads them every frame.
     pub audio_tracks: Vec<TrackInfo>,
     pub subtitle_tracks: Vec<TrackInfo>,
+    /// Crop and zoom (see `tessera_core::view`), and the item they were set
+    /// for. They belong to that picture: a letterbox crop carried onto the
+    /// next queue item would cut into a film that has no bars.
+    view: tessera_core::view::View,
+    view_for: Option<String>,
     /// The resume load set mpv's `start` option; cleared on FileLoaded so
     /// the NEXT file (queue advance) starts from its own beginning.
     pending_start_reset: bool,
@@ -158,6 +163,8 @@ pub struct ResumeState {
     pub muted: bool,
     pub aid: Option<i64>,
     pub sid: Option<i64>,
+    /// Crop/zoom, so a tile moved to another screen frames the same.
+    pub view: tessera_core::view::View,
 }
 
 impl Tile {
@@ -273,6 +280,8 @@ impl Tile {
             loop_file: opts.loop_file,
             audio_tracks: Vec::new(),
             subtitle_tracks: Vec::new(),
+            view: resume.map_or(tessera_core::view::View::FULL, |r| r.view),
+            view_for: resume.map(|_| item.id.clone()),
             pending_start_reset,
             reconnect: None,
             progress_at: std::time::Instant::now(),
@@ -290,6 +299,7 @@ impl Tile {
             muted: self.is_muted(),
             aid: self.audio_tracks.iter().find(|t| t.selected).map(|t| t.id),
             sid: self.subtitle_tracks.iter().find(|t| t.selected).map(|t| t.id),
+            view: self.view(),
         }
     }
 
@@ -425,6 +435,22 @@ impl Tile {
         self.mpv.get_f64("time-pos").unwrap_or(-1.0)
     }
 
+    /// The crop/zoom in effect: the one set for the item now playing, else
+    /// the full picture.
+    pub fn view(&self) -> tessera_core::view::View {
+        if self.view_for.as_deref() == Some(self.item.id.as_str()) {
+            self.view
+        } else {
+            tessera_core::view::View::FULL
+        }
+    }
+
+    /// Sets the crop/zoom for the item now playing.
+    pub fn set_view(&mut self, view: tessera_core::view::View) {
+        self.view = view;
+        self.view_for = Some(self.item.id.clone());
+    }
+
     /// Length in seconds, if known (not for a live stream).
     pub fn duration(&self) -> Option<f64> {
         self.mpv.get_f64("duration").filter(|d| *d > 0.0)
@@ -439,7 +465,10 @@ impl Tile {
                 let title = self
                     .mpv
                     .get_string(&format!("chapter-list/{i}/title"))
-                    .filter(|t| !t.is_empty())
+                    // Rippers often title chapters with their own start
+                    // time ("00:12:03.000"), which says nothing a reader
+                    // can use: treat those as unnamed.
+                    .filter(|t| !t.is_empty() && tessera_core::timecode::parse_time(t).is_none())
                     .unwrap_or_else(|| format!("chapter {}", i + 1));
                 (time, title)
             })

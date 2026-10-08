@@ -98,30 +98,38 @@ impl Compositor {
         }
     }
 
-    /// Draws a tile texture letterboxed into `cell` (top-left pixel origin).
+    /// Draws the part of a tile texture that `view` selects, letterboxed
+    /// into `cell` (top-left pixel origin) at that part's own aspect — so a
+    /// cropped letterbox is fitted as the film it is, not as the 16:9 frame
+    /// it came in.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &self,
         gl: &glow::Context,
         texture: <glow::Context as HasContext>::Texture,
         cell: &Rect,
         video_aspect: f32,
+        view: &tessera_core::view::View,
         screen_w: i32,
         screen_h: i32,
     ) {
-        let r = tessera_core::layout::fit_aspect(cell, video_aspect);
-        // mpv renders into the FBO texture with flip_y=1, so texture row 0 is
-        // the bottom of the video: map the top of the rect to v=1.
+        let r = tessera_core::layout::fit_aspect(cell, view.aspect(video_aspect));
         let x0 = r.x;
         let y0 = r.y;
         let x1 = r.x + r.w;
         let y1 = r.y + r.h;
+        // The picture region, y down. mpv renders into the FBO texture with
+        // flip_y=1, so texture row 0 is the bottom of the video: the top of
+        // the region is at v = 1 - top.
+        let (u0, top, u1, bottom) = view.source_rect();
+        let (v_top, v_bottom) = (1.0 - top, 1.0 - bottom);
         let vertices: [f32; 24] = [
-            x0, y0, 0.0, 1.0, //
-            x1, y0, 1.0, 1.0, //
-            x1, y1, 1.0, 0.0, //
-            x0, y0, 0.0, 1.0, //
-            x1, y1, 1.0, 0.0, //
-            x0, y1, 0.0, 0.0, //
+            x0, y0, u0, v_top, //
+            x1, y0, u1, v_top, //
+            x1, y1, u1, v_bottom, //
+            x0, y0, u0, v_top, //
+            x1, y1, u1, v_bottom, //
+            x0, y1, u0, v_bottom, //
         ];
         unsafe {
             gl.use_program(Some(self.program));
