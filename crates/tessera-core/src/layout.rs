@@ -50,7 +50,13 @@ pub fn solve_grid(count: usize, screen_w: f32, screen_h: f32, aspect: f32, gap: 
             }
         }
     }
-    let (_, rows, cols) = best.expect("at least one grid fits");
+    // No candidate had room for even one cell once the gaps were taken out
+    // — a window a few tens of pixels across, which a WM can produce mid
+    // -resize. An empty layout draws no tiles for a frame; the `expect`
+    // that used to be here took the whole wall down instead.
+    let Some((_, rows, cols)) = best else {
+        return Vec::new();
+    };
 
     let avail_w = screen_w - gap * (cols as f32 + 1.0);
     let avail_h = screen_h - gap * (rows as f32 + 1.0);
@@ -143,6 +149,17 @@ mod tests {
         for r in &rects {
             assert!(r.w > 0.0 && r.h > 0.0);
         }
+    }
+
+    #[test]
+    fn a_window_too_small_for_any_grid_yields_no_cells() {
+        // 12 tiles at gap 8 needs at least 3 columns and 4 rows, which is
+        // 32px of gap in each direction before a single cell exists.
+        assert!(solve_grid(12, 40.0, 40.0, A, 8.0).is_empty());
+        // Still zero, not a panic, at the degenerate end.
+        assert!(solve_grid(16, 1.0, 1.0, A, 8.0).is_empty());
+        // And a window with room is unaffected.
+        assert_eq!(solve_grid(12, W, H, A, 8.0).len(), 12);
     }
 
     #[test]

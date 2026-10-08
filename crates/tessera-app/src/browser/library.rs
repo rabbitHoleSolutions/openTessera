@@ -18,6 +18,70 @@ use crate::catalog::Listing;
 use crate::overlay::{OverlayAction, UiSettings};
 use crate::thumbs::ThumbCache;
 
+/// The library tab's filtered, ordered rows — indices into the source's
+/// listing — and the inputs they were derived from.
+///
+/// This exists because the derivation used to run inside the egui pass,
+/// every frame: filter the whole listing, then
+/// `sort_by_key(|m| m.title.to_lowercase())`, which allocates a `String`
+/// per comparison. A few thousand titles is tens of thousands of
+/// allocations per frame, sixty times a second, to reproduce a list that
+/// only changes when the user types in the filter box or clicks an order.
+#[derive(Default)]
+pub struct RowCache {
+    key: Option<RowKey>,
+    rows: Vec<usize>,
+}
+
+#[derive(PartialEq, Eq)]
+struct RowKey {
+    source: usize,
+    /// Catalog generation, so a re-listing invalidates the view even when
+    /// it happens to come back the same length.
+    generation: u64,
+    search: String,
+    order: QueueOrder,
+}
+
+impl RowCache {
+    /// Rebuilds the row list if any input moved; a no-op otherwise.
+    fn ensure(&mut self, key: RowKey, items: &[MediaItem]) {
+        if self.key.as_ref() == Some(&key) {
+            return;
+        }
+        let needle = key.search.trim().to_lowercase();
+        let mut rows: Vec<usize> = (0..items.len())
+            .filter(|&i| needle.is_empty() || items[i].title.to_lowercase().contains(&needle))
+            .collect();
+        match key.order {
+            // sort_by_cached_key, not sort_by_key: one lowercased title per
+            // item rather than one per comparison.
+            QueueOrder::Name | QueueOrder::Shuffle => {
+                rows.sort_by_cached_key(|&i| items[i].title.to_lowercase())
+            }
+            QueueOrder::Date => {
+                rows.sort_by_key(|&i| std::cmp::Reverse(items[i].modified.unwrap_or(0)))
+            }
+            QueueOrder::Size => {
+                rows.sort_by_key(|&i| std::cmp::Reverse(items[i].size.unwrap_or(0)))
+            }
+        }
+        self.rows = rows;
+        self.key = Some(key);
+    }
+
+    fn rows(&self) -> &[usize] {
+        &self.rows
+    }
+
+    /// Dropped when there is nothing to show, so a stale list cannot be
+    /// drawn against a listing that has gone away.
+    fn clear(&mut self) {
+        self.key = None;
+        self.rows.clear();
+    }
+}
+
 pub fn draw(
     ctx: &egui::Context,
     state: &mut BrowserState,
@@ -90,65 +154,75 @@ pub fn draw(
         });
         ui.add_space(4.0);
 
+        // Read before `get`, which borrows the catalog mutably.
+        let generation = services.catalog.generation();
         let listing = services.catalog.get(&src);
-        let (items, status): (Vec<&MediaItem>, Option<String>) = match listing {
-            Listing::Loading => (Vec::new(), Some("listing…".to_owned())),
-            Listing::Failed(e) => (Vec::new(), Some(format!("couldn't list this source: {e}"))),
-            Listing::Ready(all) => {
-                let needle = state.search.trim().to_lowercase();
-                let mut v: Vec<&MediaItem> = all
-                    .iter()
-                    .filter(|m| needle.is_empty() || m.title.to_lowercase().contains(&needle))
-                    .collect();
-                match state.order {
-                    QueueOrder::Name | QueueOrder::Shuffle => {
-                        v.sort_by_key(|m| m.title.to_lowercase())
-                    }
-                    QueueOrder::Date => v.sort_by_key(|m| std::cmp::Reverse(m.modified.unwrap_or(0))),
-                    QueueOrder::Size => v.sort_by_key(|m| std::cmp::Reverse(m.size.unwrap_or(0))),
-                }
-                (v, None)
-            }
+        let (items, status): (&[MediaItem], Option<String>) = match listing {
+            Listing::Loading => (&[], Some("listing…".to_owned())),
+            Listing::Failed(e) => (&[], Some(format!("couldn't list this source: {e}"))),
+            Listing::Ready(all) => (all.as_slice(), None),
         };
 
         if let Some(msg) = status {
+            state.rows.clear();
             ui.add_space(10.0);
             ui.weak(msg);
             return;
         }
 
+        state.rows.ensure(
+            RowKey {
+                source: state.source.unwrap_or(0),
+                generation,
+                search: state.search.clone(),
+                order: state.order,
+            },
+            items,
+        );
+
         // Bulk add — of the matches when filtering, else the whole source,
         // exactly like the Quest app's "Add N to queue".
         ui.horizontal(|ui| {
-            let n = items.len();
+            let n = state.rows.rows().len();
             let label = if state.search.trim().is_empty() {
                 format!("add all {n} to queue")
             } else {
                 format!("add {n} match{} to queue", if n == 1 { "" } else { "es" })
             };
             if ui.add_enabled(n > 0, egui::Button::new(label)).clicked() {
-                let add: Vec<MediaItem> = items.iter().map(|m| (*m).clone()).collect();
-                state.flash(format!("added {} to the queue", add.len()));
+                let add: Vec<MediaItem> =
+                    state.rows.rows().iter().map(|&i| items[i].clone()).collect();
+                let added = add.len();
                 actions.push(OverlayAction::QueueAdd { items: add });
+                state.flash(format!("added {added} to the queue"));
             }
             flash_label(ui, state);
         });
         ui.add_space(4.0);
         ui.separator();
 
-        let shown = items.len().min(MAX_ROWS);
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for m in items.iter().take(MAX_ROWS) {
-                row(ui, m, services.thumbs, queue, actions, state);
-            }
-            if items.len() > shown {
-                ui.add_space(6.0);
-                ui.weak(format!(
-                    "{} more not shown — narrow the filter",
-                    items.len() - shown
-                ));
+        let rows = state.rows.rows();
+        let total = rows.len();
+        let shown = total.min(MAX_ROWS);
+        // A row is the 36pt thumbnail plus the layout's own spacing. Passed
+        // to show_rows so egui lays out only what is on screen: drawing all
+        // 300 meant asking the thumbnail cache for 300 posters at once,
+        // which fetched and uploaded every one of them whether or not it
+        // was ever scrolled to.
+        let row_h = 36.0 + ui.spacing().item_spacing.y;
+        let mut flash: Option<String> = None;
+        egui::ScrollArea::vertical().show_rows(ui, row_h, shown, |ui, range| {
+            for &i in &rows[range] {
+                row(ui, &items[i], services.thumbs, queue, actions, &mut flash);
             }
         });
+        if total > shown {
+            ui.add_space(6.0);
+            ui.weak(format!("{} more not shown — narrow the filter", total - shown));
+        }
+        if let Some(msg) = flash {
+            state.flash(msg);
+        }
     });
 }
 
@@ -159,11 +233,13 @@ fn row(
     thumbs: &mut ThumbCache,
     queue: &QueueView,
     actions: &mut Vec<OverlayAction>,
-    state: &mut BrowserState,
+    // Set instead of calling `BrowserState::flash` directly: the row list
+    // is borrowed from the same `BrowserState` for the whole loop.
+    flash: &mut Option<String>,
 ) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(64.0, 36.0), egui::Sense::hover());
-        match thumbs.get(ui.ctx(), &m.id, m.thumb_url.as_deref()) {
+        match thumbs.get(ui.ctx(), m) {
             Some(tex) => {
                 ui.painter().image(
                     tex.id(),
@@ -184,7 +260,7 @@ fn row(
             .on_hover_text("append to the end of the queue")
             .clicked()
         {
-            state.flash(format!("queued \"{}\"", m.title));
+            *flash = Some(format!("queued \"{}\"", m.title));
             actions.push(OverlayAction::QueueAppend { item: m.clone() });
         }
         if ui

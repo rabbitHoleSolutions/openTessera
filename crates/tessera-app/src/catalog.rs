@@ -40,6 +40,10 @@ struct Response {
 /// for a hand-maintained source list.
 pub struct SourceCatalog {
     listings: HashMap<String, Listing>,
+    /// Bumped whenever any listing is replaced or dropped. The library
+    /// tab's row cache keys on it, which is what lets that cache survive
+    /// across frames without ever going stale against a re-listing.
+    generation: u64,
     tx: mpsc::Sender<Request>,
     rx: mpsc::Receiver<Response>,
 }
@@ -59,7 +63,7 @@ impl SourceCatalog {
                 }
             }
         });
-        SourceCatalog { listings: HashMap::new(), tx: tx_req, rx: rx_done }
+        SourceCatalog { listings: HashMap::new(), generation: 0, tx: tx_req, rx: rx_done }
     }
 
     /// Takes delivery of anything the worker finished. Call once per frame
@@ -71,7 +75,14 @@ impl SourceCatalog {
                 Err(e) => Listing::Failed(e),
             };
             self.listings.insert(done.key, state);
+            self.generation += 1;
         }
+    }
+
+    /// Changes whenever any listing does. Anything caching a derived view
+    /// of a listing can hold this and rebuild only when it moves.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The listing for a source, requesting it the first time it is asked
@@ -89,6 +100,7 @@ impl SourceCatalog {
     /// Drops a cached listing so the next `get` re-fetches it.
     pub fn refresh(&mut self, source: &Source) {
         self.listings.remove(&source.label());
+        self.generation += 1;
     }
 }
 

@@ -229,6 +229,41 @@ impl Screen {
             for ev in tile.tick(&self.gl) {
                 match ev {
                     TileEvent::EndOfFile => ended.push(tile.id),
+                    TileEvent::Reconnected => {
+                        println!(
+                            "screen {} tile {}: \"{}\" is back",
+                            self.monitor_index, tile.id, tile.item.title
+                        );
+                        overlay.notice = Some((
+                            format!("{}: reconnected", tile.item.title),
+                            std::time::Instant::now(),
+                        ));
+                    }
+                    TileEvent::Failed { reason } => {
+                        // Said out loud, not just logged: the tile has gone
+                        // blank and the user needs to know it is the stream
+                        // that failed, not the app. A camera whose URL is
+                        // wrong is otherwise indistinguishable from one that
+                        // is simply slow.
+                        println!(
+                            "screen {} tile {}: {reason} — \"{}\"",
+                            self.monitor_index, tile.id, tile.item.title
+                        );
+                        overlay.notice = Some((
+                            format!("{}: {reason}", tile.item.title),
+                            std::time::Instant::now(),
+                        ));
+                    }
+                    // Zero-size means mpv has not seen a frame yet (live
+                    // streams, mostly). Admitting on that would weigh the
+                    // stream at nothing, so the placeholder stands until
+                    // the real size arrives with the first frame.
+                    TileEvent::Loaded { width, height, .. } if width == 0 || height == 0 => {
+                        println!(
+                            "screen {} tile {}: opened, size not yet known — holding the budget estimate",
+                            self.monitor_index, tile.id
+                        );
+                    }
                     TileEvent::Loaded { width, height, fps, codec } => {
                         let spec = StreamSpec {
                             width,
@@ -275,8 +310,11 @@ impl Screen {
             self.gl.clear_color(0.04, 0.04, 0.05, 1.0);
             self.gl.clear(glow::COLOR_BUFFER_BIT);
         }
-        let zoom_cells = self.effective_layout();
-        for (tile, cell) in self.tiles.iter_mut().zip(zoom_cells.iter()) {
+        // Solved once and reused: the compositor, the hover hit-test and
+        // the overlay all want the same cells, and each call rebuilt (and
+        // reallocated) the Vec.
+        let cells = self.effective_layout();
+        for (tile, cell) in self.tiles.iter_mut().zip(cells.iter()) {
             if cell.w <= 0.0 || cell.h <= 0.0 {
                 continue; // hidden while another tile is zoomed
             }
@@ -293,41 +331,15 @@ impl Screen {
         // hidden — so egui input state stays fresh and stale widgets can't
         // swallow clicks. Painted after the screenshot read so dumps stay
         // pure video.
-        let tiles_ui: Vec<TileUiInfo> = self
-            .tiles
-            .iter()
-            .map(|t| TileUiInfo {
-                id: t.id,
-                pending_seek: match overlay.pending_seek {
-                    Some(ps) if ps.tile_id == t.id => ps.delta,
-                    _ => 0.0,
-                },
-                title: t.item.title.clone(),
-                paused: t.is_paused(),
-                muted: t.is_muted(),
-                audio_enabled: t.audio_enabled(),
-                volume: t.volume(),
-                time_pos: t.last_time_pos,
-                duration: t.duration,
-                audio_tracks: t.audio_tracks.clone(),
-                subtitle_tracks: t.subtitle_tracks.clone(),
-                pinned: self.pinned == Some(t.id),
-                solo: overlay.solo_id == Some(t.id),
-            })
-            .collect();
-        let cells = self.effective_layout();
         let monitor_index = self.monitor_index;
-        let queue_entries: Vec<overlay::QueueEntry> = queue
-            .pending(12)
-            .iter()
-            .map(|(i, m)| overlay::QueueEntry {
-                index: *i,
-                id: m.id.clone(),
-                title: m.title.clone(),
-                thumb_url: m.thumb_url.clone(),
-            })
-            .collect();
-        let hover = if overlay.tile_drag.map(|d| d.window_id) == Some(self.window.id()) {
+        // Everything below feeds `overlay::draw`, so it is built only when
+        // that will run: a wall window whose chrome is on screen. The
+        // overlay auto-hides after five seconds of no input, which is the
+        // steady state, and a browser window never draws any of it.
+        let draws_overlay = self.role == ScreenRole::Wall && overlay.visible;
+        let hover = if !draws_overlay
+            || overlay.tile_drag.map(|d| d.window_id) == Some(self.window.id())
+        {
             // Hide the hover queue strip while rearranging tiles on this
             // screen: it would sit right where the user is dropping.
             None
@@ -335,10 +347,56 @@ impl Screen {
             self.cursor.and_then(|(x, y)| {
                 self.tiles
                     .iter()
-                    .zip(self.effective_layout().iter())
+                    .zip(cells.iter())
                     .find(|(_, cell)| cell.contains(x, y))
                     .map(|(t, cell)| (t.id, *cell))
             })
+        };
+        // The chip — the only consumer of the track lists — is drawn for the
+        // hovered or dragged tile alone, so every other tile can carry empty
+        // Vecs instead of a deep clone of both track lists every frame.
+        let chip_tile = hover
+            .map(|(id, _)| id)
+            .or_else(|| overlay.tile_drag.filter(|d| d.window_id == self.window.id()).map(|d| d.from_tile));
+        let tiles_ui: Vec<TileUiInfo> = if !draws_overlay {
+            Vec::new()
+        } else {
+            self.tiles
+                .iter()
+                .map(|t| TileUiInfo {
+                    id: t.id,
+                    pending_seek: match overlay.pending_seek {
+                        Some(ps) if ps.tile_id == t.id => ps.delta,
+                        _ => 0.0,
+                    },
+                    title: t.item.title.clone(),
+                    paused: t.is_paused(),
+                    muted: t.is_muted(),
+                    audio_enabled: t.audio_enabled(),
+                    volume: t.volume(),
+                    time_pos: t.last_time_pos,
+                    duration: t.duration,
+                    audio_tracks: if chip_tile == Some(t.id) { t.audio_tracks.clone() } else { Vec::new() },
+                    subtitle_tracks: if chip_tile == Some(t.id) { t.subtitle_tracks.clone() } else { Vec::new() },
+                    live: t.item.is_live(),
+                    reconnecting: t.reconnecting(),
+                    // Only asked of live tiles, and only while the overlay
+                    // is drawing — an mpv property read per tile per frame
+                    // is exactly what the snapshot gating exists to avoid.
+                    behind: if t.item.is_live() { t.behind_live() } else { 0.0 },
+                    pinned: self.pinned == Some(t.id),
+                    solo: overlay.solo_id == Some(t.id),
+                })
+                .collect()
+        };
+        let queue_entries: Vec<overlay::QueueEntry> = if !draws_overlay {
+            Vec::new()
+        } else {
+            queue
+                .pending(12)
+                .iter()
+                .map(|(i, m)| overlay::QueueEntry { index: *i, item: (*m).clone() })
+                .collect()
         };
         let tile_drag = overlay.tile_drag.filter(|d| d.window_id == self.window.id());
         let budget_ui = BudgetUi {
@@ -393,6 +451,7 @@ impl Screen {
         // that opened them. Every screen used to draw its own copy against
         // the same shared state, which left several egui contexts fighting
         // over one set of widgets.
+        let drop_hint = overlay.drop_target == Some(window_id);
         let mut help_open = overlay.help_open == Some(window_id);
         let mut settings_open = overlay.settings_open == Some(window_id);
         let window_fullscreen = crate::platform::is_fullscreen(&self.window);
@@ -422,6 +481,9 @@ impl Screen {
             }
             if settings_open {
                 overlay::draw_settings(ctx, &mut ui_scale, &mut scale_drag, &mut scale_committed, &mut settings_open, &mut actions);
+            }
+            if drop_hint {
+                overlay::draw_drop_hint(ctx, role == ScreenRole::Browser);
             }
             if let Some(n) = &notice {
                 overlay::draw_notice(ctx, n);
@@ -587,7 +649,7 @@ impl Screen {
             if cell.contains(x, y) {
                 if !tile.audio_enabled() {
                     println!(
-                        "screen {} tile {}: audio disabled (start with --audio)",
+                        "screen {} tile {}: audio disabled (turn it on in the config tab, C)",
                         self.monitor_index, tile.id
                     );
                     return Some(tile.id);

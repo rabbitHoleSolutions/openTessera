@@ -76,6 +76,11 @@ pub struct OverlayState {
     pub settings_open: Option<winit::window::WindowId>,
     /// A seek being accumulated while an arrow key auto-repeats.
     pub pending_seek: Option<PendingSeek>,
+    /// A file drag is hovering over this window, so it can say it will
+    /// take the drop. Window-scoped for the usual reason: every screen
+    /// runs its own egui pass over this one struct, and a plain bool would
+    /// light up the hint on all of them.
+    pub drop_target: Option<winit::window::WindowId>,
 }
 
 /// A seek the user is still spelling out. Holding an arrow fires roughly 25
@@ -208,6 +213,8 @@ pub enum OverlayAction {
     /// Transport pin button / P key: this tile takes most of the screen,
     /// the others share a bottom strip (toggles back).
     TogglePin { tile_id: usize },
+    /// "LIVE" button on a camera's transport: rejoin the stream at its edge.
+    GoLive { tile_id: usize },
     /// Volume slider dragged on a tile chip (or wheel): set absolute volume.
     SetVolume { tile_id: usize, volume: i64 },
     /// A/S button: expand (or collapse) this tile's audio/subtitle track row.
@@ -265,6 +272,12 @@ pub struct TileUiInfo {
     pub duration: f64,
     pub audio_tracks: Vec<TrackInfo>,
     pub subtitle_tracks: Vec<TrackInfo>,
+    /// A live feed: no duration, nothing to scrub, and it can fall behind.
+    pub live: bool,
+    /// The feed dropped and is being retried.
+    pub reconnecting: bool,
+    /// Seconds behind the live edge (live tiles only).
+    pub behind: f64,
     /// This tile is pinned (takes most of the screen).
     pub pinned: bool,
     /// This tile's audio is soloed (all other streams muted).
@@ -272,11 +285,14 @@ pub struct TileUiInfo {
 }
 
 /// One pending queue entry as shown in the hover queue.
+///
+/// Carries the whole item rather than a few scraped fields: a local
+/// thumbnail is fingerprinted from the path, size and mtime, and picking
+/// those out one at a time only to reassemble them is worse than the clone.
+/// Built only when the overlay actually draws (see `Screen::tick`).
 pub struct QueueEntry {
     pub index: usize,
-    pub id: String,
-    pub title: String,
-    pub thumb_url: Option<String>,
+    pub item: tessera_core::MediaItem,
 }
 
 #[derive(Clone, Copy)]
@@ -749,6 +765,14 @@ pub fn draw(
                                     .unwrap_or(false);
                                 if !tile.muted || tile_hovered {
                                     let mut vol = tile.volume.clamp(0, 100) as f32;
+                                    // Same trap the scrub bar below documents:
+                                    // egui draws the rail at
+                                    // spacing.slider_width and ignores the
+                                    // width add_sized allocated, so this came
+                                    // out ~36pt wider than its slot and pushed
+                                    // the mute and solo buttons toward the
+                                    // chip edge.
+                                    ui.spacing_mut().slider_width = 64.0 * k;
                                     let sresp = ui.add_sized(
                                         egui::vec2(64.0, 14.0) * k,
                                         egui::Slider::new(&mut vol, 0.0..=100.0).show_value(false),
@@ -784,7 +808,7 @@ pub fn draw(
                                     actions.push(OverlayAction::MuteButton { tile_id: tile.id });
                                 }
                                 let tip = if !tile.audio_enabled {
-                                    "audio is off — start opentessera with --audio".to_string()
+                                    "audio is off — turn it on in the config tab (C)".to_string()
                                 } else if tile.muted {
                                     "muted — click to unmute (right-click video also works)".to_string()
                                 } else {
@@ -818,11 +842,16 @@ pub fn draw(
                             if b(ui, "⏮", 22.0).clicked() {
                                 actions.push(OverlayAction::Prev { tile_id: tile.id });
                             }
-                            if b(ui, "⏪", 22.0).clicked() {
-                                actions.push(OverlayAction::Skip { tile_id: tile.id, secs: -10.0 });
-                            }
-                            if b(ui, "⏩", 22.0).clicked() {
-                                actions.push(OverlayAction::Skip { tile_id: tile.id, secs: 10.0 });
+                            // Seeking a live feed is meaningless — mpv
+                            // accepts it and does nothing — so a camera
+                            // gets its transport space back instead.
+                            if !tile.live {
+                                if b(ui, "⏪", 22.0).clicked() {
+                                    actions.push(OverlayAction::Skip { tile_id: tile.id, secs: -10.0 });
+                                }
+                                if b(ui, "⏩", 22.0).clicked() {
+                                    actions.push(OverlayAction::Skip { tile_id: tile.id, secs: 10.0 });
+                                }
                             }
                             if b(ui, "⏭", 22.0).clicked() {
                                 actions.push(OverlayAction::Next { tile_id: tile.id });
@@ -844,7 +873,55 @@ pub fn draw(
                             } else {
                                 (tile.time_pos + tile.pending_seek).max(0.0)
                             };
-                            if tile.duration > 0.0 {
+                            if tile.live {
+                                // A camera has no duration and nothing to
+                                // scrub. What it has instead is a distance
+                                // from now, which is the one number worth
+                                // showing — and a way back.
+                                const AT_EDGE: f64 = 1.5;
+                                let behind = tile.behind;
+                                let at_edge = behind < AT_EDGE;
+                                // No leading "●": U+25CF is not in egui's
+                                // bundled fonts and rendered as tofu. The
+                                // colour already carries the state, and the
+                                // house rule is to check a glyph before
+                                // trusting it.
+                                let label = if tile.reconnecting {
+                                    "reconnecting…".to_owned()
+                                } else if at_edge {
+                                    "LIVE".to_owned()
+                                } else {
+                                    format!("LIVE  −{:.0}s", behind)
+                                };
+                                let mut btn = egui::Button::new(
+                                    egui::RichText::new(label).small().color(
+                                        if tile.reconnecting {
+                                            egui::Color32::from_rgb(255, 220, 220)
+                                        } else if at_edge {
+                                            egui::Color32::from_rgb(130, 220, 140)
+                                        } else {
+                                            egui::Color32::from_rgb(255, 235, 200)
+                                        },
+                                    ),
+                                );
+                                if tile.reconnecting {
+                                    btn = btn.fill(egui::Color32::from_rgb(150, 45, 45));
+                                } else if !at_edge {
+                                    btn = btn.fill(egui::Color32::from_rgb(150, 90, 30));
+                                }
+                                let resp = ui.add_sized(egui::vec2(96.0, 16.0) * k, btn);
+                                if resp.clicked() {
+                                    actions.push(OverlayAction::GoLive { tile_id: tile.id });
+                                }
+                                resp.on_hover_text(if tile.reconnecting {
+                                    "the feed dropped — retrying; click to try now"
+                                } else if at_edge {
+                                    "playing live"
+                                } else {
+                                    "behind live — click to rejoin at the current moment"
+                                });
+                                ui.add_space((scrub_w - 96.0 * k).max(0.0));
+                            } else if tile.duration > 0.0 {
                                 let mut pos = target;
                                 // egui draws a Slider's rail at
                                 // spacing.slider_width (100 by default) and
@@ -863,15 +940,17 @@ pub fn draw(
                             } else {
                                 ui.add_space(scrub_w);
                             }
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} / {}",
-                                    fmt_time(target),
-                                    fmt_time(tile.duration)
-                                ))
-                                .small()
-                                .weak(),
-                            );
+                            if !tile.live {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} / {}",
+                                        fmt_time(target),
+                                        fmt_time(tile.duration)
+                                    ))
+                                    .small()
+                                    .weak(),
+                                );
+                            }
                             // Pin this tile: it takes most of the screen, the
                             // rest share a bottom strip (P also toggles).
                             {
@@ -1067,7 +1146,7 @@ pub fn draw(
                                         if pos > 0 {
                                             ui.add_space(4.0 * k);
                                         }
-                                        let tex = thumbs.get(ui.ctx(), &entry.id, entry.thumb_url.as_deref());
+                                        let tex = thumbs.get(ui.ctx(), &entry.item);
                                         let size = match &tex {
                                             Some(t) => fit(t.size_vec2(), k),
                                             None => THUMB_PLACEHOLDER * k,
@@ -1144,7 +1223,7 @@ pub fn draw(
                                         rects.push((entry.index, rect));
                                         resp.on_hover_text(format!(
                                             "{}\nclick: play here · right-click: remove from queue · drag: reorder",
-                                            entry.title
+                                            entry.item.title
                                         ));
                                     }
                                 });
@@ -1322,6 +1401,9 @@ fn draw_empty_wall(ctx: &egui::Context, why: EmptyWall, actions: &mut Vec<Overla
                 .fill(egui::Color32::from_black_alpha(200))
                 .inner_margin(egui::Margin::symmetric(28.0, 20.0))
                 .show(ui, |ui| {
+                    // See `draw_drop_hint`: centred layouts in an Area take
+                    // the whole window unless told otherwise.
+                    ui.set_width(DROP_HINT_W);
                     ui.vertical_centered(|ui| {
                         match why {
                             EmptyWall::AddSource => {
@@ -1433,6 +1515,41 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                             *open = false;
                         }
                         ui.weak("? or / also closes");
+                    });
+                });
+        });
+}
+
+/// Width the drop banner lays out in, before window scaling.
+const DROP_HINT_W: f32 = 320.0;
+
+/// "Drop it here" banner, shown while a file drag hovers the window.
+/// Centred and unmissable, because the alternative is dropping a file and
+/// wondering whether anything caught it.
+pub fn draw_drop_hint(ctx: &egui::Context, queue_only: bool) {
+    egui::Area::new(egui::Id::new("tessera-drop-hint"))
+        .order(PANEL_ORDER)
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .show(ctx, |ui| {
+            egui::Frame::window(ui.style())
+                .fill(egui::Color32::from_black_alpha(225))
+                .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 190, 255)))
+                .inner_margin(egui::Margin::symmetric(28.0, 20.0))
+                .show(ui, |ui| {
+                    // Explicit width: `vertical_centered` claims whatever is
+                    // left, and inside an Area that is the rest of the
+                    // window — which drew this as a full-width band rather
+                    // than a panel. Same trap `with_layout` sets (see the
+                    // gear panel's trailing row).
+                    ui.set_width(DROP_HINT_W);
+                    ui.vertical_centered(|ui| {
+                        ui.heading(if queue_only { "add to the queue" } else { "drop to play" });
+                        ui.add_space(4.0);
+                        ui.weak(if queue_only {
+                            "dropped files are appended to the queue"
+                        } else {
+                            "plays here; anything extra joins the queue"
+                        });
                     });
                 });
         });

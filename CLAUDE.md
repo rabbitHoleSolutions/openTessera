@@ -11,7 +11,7 @@ ideas, no shared code. See `README.md` for the user-facing feature list and
 cargo build --release          # binary: target/release/tessera
 ./packaging/install.sh         # user-local install (bin + icon + .desktop)
 cargo check --workspace        # fast loop while editing
-cargo test --workspace         # 64 tests, mostly tessera-core (layout, budget, queue, sources)
+cargo test --workspace         # 93 tests, mostly tessera-core (layout, budget, queue, sources)
 cargo clippy --workspace       # 7 pre-existing warnings; don't let the count grow
 ```
 
@@ -183,6 +183,38 @@ HTTP round trip or an FS walk; `catalog.rs` puts it on a worker and polls
 the results each frame, the same pattern `thumbs.rs` uses for posters. If
 you reach for anything that can block inside an egui pass, it belongs in a
 worker instead.
+
+**egui_glow needs the `clipboard` feature, and it is not cosmetic.**
+`egui_glow`'s default feature set is empty and it pulls `egui-winit` with
+`default-features = false`, so without asking for `clipboard` there is no
+`arboard` in the build at all — and egui-winit silently substitutes an
+*in-app* clipboard. Copy in a browser, paste in Tessera, and you get
+whatever was last copied inside Tessera instead. It looks like a paste bug
+in the widget; it is a missing Cargo feature.
+
+**Playback options key off the item, not the app.** `TileOptions` is
+global, but what mpv is actually told is derived per item, because a live
+camera and a film want different players: a 512 MiB demuxer cache on a
+stream nobody can seek is latency, not resilience. `SourceKind::is_live()`
+is the switch — declared on the kind, never guessed from a URI scheme — and
+it also governs looping (meaningless with no EOF) and delete (nothing to
+delete). Note a live stream reports `0x0` at file-load, so the budget must
+NOT be updated from it: the placeholder stands until `ensure_texture`
+reports the first real frame size, or a wall of cameras admits itself for
+free.
+
+**One process owns the app; a second launch hands off and exits.** The
+queue and the decode budget are per-*process*, so a second instance is not
+a second window — it is a second budget admitting a second ceiling's worth
+of streams against one GPU, and a second writer of settings.conf/queue.json
+that stamps its own stale copy over the file (this ate a configured source
+in the wild). `instance.rs` claims a Unix socket, keyed on the **config
+directory** so an isolated HOME is an isolated instance — which is how it
+is tested, and how a sandboxed run coexists with the real app. Connect
+-first, never a lock file: a lock can be inherited from a process that
+died, whereas a dead instance refuses connections. Handed-off paths arrive
+on a channel drained in the event loop (blocking work stays off the render
+thread, as ever). `TESSERA_ALLOW_MULTI=1` opts out, for development only.
 
 **One `PlaybackQueue`, shared by every window** — owned by `main` and passed
 `&mut` alongside `budget`. A tile is a slot fed from it; windows opened at

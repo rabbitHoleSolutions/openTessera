@@ -42,7 +42,7 @@ pub fn draw(
                         .on_hover_text(if t.audio_enabled {
                             "mute / unmute"
                         } else {
-                            "audio is off — enable it in the config tab, then restart"
+                            "audio is off — turn it on in the config tab"
                         })
                         .clicked()
                     {
@@ -149,7 +149,12 @@ pub fn draw(
                             .on_hover_text("move down")
                             .clicked()
                         {
-                            actions.push(OverlayAction::QueueReorder { from: i, to: i + 1 });
+                            // i + 2, not i + 1: `to` names the item to land
+                            // in front of, so "before the one already after
+                            // me" is a no-op. For the second-to-last row
+                            // that index is len(), which move_pending takes
+                            // to mean the end.
+                            actions.push(OverlayAction::QueueReorder { from: i, to: i + 2 });
                         }
                         if ui
                             .add(egui::Button::new("✖").small())

@@ -89,8 +89,16 @@ pub struct BrowserState {
     /// silent action, so it takes two clicks — same pattern as the
     /// transport's delete button.
     pub clear_armed: Option<std::time::Instant>,
+    /// Source removal armed on this row index, at this instant. Same two
+    /// -click rule, and for a sharper reason: the ✖ sits against every row
+    /// of the list, one stray click discards a server's credentials, and
+    /// re-adding means signing in again.
+    pub remove_armed: Option<(usize, std::time::Instant)>,
     /// Add-source form.
     pub add: sources::AddForm,
+    /// The library tab's filtered, ordered row list, rebuilt only when its
+    /// inputs move. See [`library::RowCache`].
+    pub rows: library::RowCache,
 }
 
 impl Default for BrowserState {
@@ -102,7 +110,9 @@ impl Default for BrowserState {
             order: QueueOrder::Name,
             flash: None,
             clear_armed: None,
+            remove_armed: None,
             add: sources::AddForm::default(),
+            rows: library::RowCache::default(),
         }
     }
 }

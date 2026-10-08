@@ -38,6 +38,21 @@ pub struct DiscoveredServer {
     pub address: String,
 }
 
+/// The shared HTTP client for the sign-in calls. Same reason as
+/// [`crate::sources`]': these all run on the single auth worker, and ureq
+/// has no default read timeout, so a server that accepts the connection
+/// and then stalls would hang the worker — and with it every later
+/// sign-in request — indefinitely.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(5))
+            .timeout_read(Duration::from_secs(15))
+            .build()
+    })
+}
+
 /// Jellyfin's discovery port and probe string. Servers listen by default, so
 /// unlike Quick Connect this needs no server-side setup.
 pub const JELLYFIN_DISCOVERY_PORT: u16 = 7359;
@@ -102,6 +117,109 @@ pub fn parse_discovery_reply(body: &str) -> Option<DiscoveredServer> {
 }
 
 // ---------------------------------------------------------------------------
+// Cameras: Ubiquiti LAN discovery
+// ---------------------------------------------------------------------------
+
+/// A camera (or other Ubiquiti device) that answered the discovery probe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscoveredCamera {
+    /// The device's own name — "Front", "Carport" — which is exactly what
+    /// the user calls it, so it becomes the item title.
+    pub name: String,
+    pub address: String,
+    /// e.g. "UVC G4 Dome". Shown to tell two cameras apart.
+    pub model: String,
+}
+
+/// Ubiquiti's device-discovery port. Answers carry the device's name,
+/// model and address with **no credentials at all**, which is what makes
+/// this worth doing: the tedious half of adding cameras is knowing what is
+/// out there and what it is called.
+pub const UBIQUITI_DISCOVERY_PORT: u16 = 10001;
+/// Both protocol generations; older firmware answers only the first.
+const UBIQUITI_PROBES: [&[u8]; 2] = [&[0x01, 0x00, 0x00, 0x00], &[0x02, 0x08, 0x00, 0x00]];
+
+/// Broadcasts and collects answers for `timeout`. Blocking.
+///
+/// Everything that answers is returned, not just cameras — a controller is
+/// a useful thing to see in the list too, since on Protect it is the host
+/// the streams actually come from.
+pub fn ubiquiti_discover(timeout: Duration) -> Result<Vec<DiscoveredCamera>, SourceError> {
+    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| SourceError::Http(e.to_string()))?;
+    socket.set_broadcast(true).map_err(|e| SourceError::Http(e.to_string()))?;
+    socket
+        .set_read_timeout(Some(Duration::from_millis(300)))
+        .map_err(|e| SourceError::Http(e.to_string()))?;
+    let target: SocketAddr = format!("255.255.255.255:{UBIQUITI_DISCOVERY_PORT}")
+        .parse()
+        .map_err(|_| SourceError::Http("bad broadcast address".into()))?;
+
+    let deadline = Instant::now() + timeout;
+    let mut last_send: Option<Instant> = None;
+    let mut found: Vec<DiscoveredCamera> = Vec::new();
+    let mut buf = [0u8; 8 * 1024];
+    while Instant::now() < deadline {
+        if last_send.is_none_or(|t| t.elapsed() >= RESEND) {
+            for probe in UBIQUITI_PROBES {
+                let _ = socket.send_to(probe, target);
+            }
+            last_send = Some(Instant::now());
+        }
+        let Ok((n, addr)) = socket.recv_from(&mut buf) else {
+            continue; // read timeout: keep waiting out the window
+        };
+        if let Some(dev) = parse_ubiquiti_reply(&buf[..n], &addr.ip().to_string()) {
+            if !found.iter().any(|f| f.address == dev.address) {
+                found.push(dev);
+            }
+        }
+    }
+    found.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(found)
+}
+
+/// Parses one discovery reply.
+///
+/// The payload is a 4-byte header then type/length/value records, with
+/// big-endian lengths: 0x0b is the device name and 0x0c the model. Anything
+/// unrecognised is skipped rather than fatal — firmware versions differ in
+/// which records they send.
+///
+/// **The address comes from the packet, not the payload.** Records of type
+/// 0x02 carry a MAC and an IPv4 address, one per interface, and a gateway
+/// duly reports its WAN address among them — which showed up in testing as
+/// a public IP listed alongside the cameras as though it were another
+/// device. A device is reachable at the address it answered from, so that
+/// is the only one worth having, and using it also collapses a
+/// multi-interface device's several replies into one entry.
+pub fn parse_ubiquiti_reply(body: &[u8], from: &str) -> Option<DiscoveredCamera> {
+    let mut name = String::new();
+    let mut model = String::new();
+    let address = from.to_owned();
+    let mut i = 4usize;
+    while i + 3 <= body.len() {
+        let kind = body[i];
+        let len = u16::from_be_bytes([body[i + 1], body[i + 2]]) as usize;
+        let start = i + 3;
+        let end = start.checked_add(len)?;
+        if end > body.len() {
+            break; // truncated record: keep whatever was already read
+        }
+        let value = &body[start..end];
+        match kind {
+            0x0b => name = String::from_utf8_lossy(value).trim_end_matches('\0').to_owned(),
+            0x0c => model = String::from_utf8_lossy(value).trim_end_matches('\0').to_owned(),
+            _ => {}
+        }
+        i = end;
+    }
+    if name.is_empty() {
+        name = address.clone();
+    }
+    Some(DiscoveredCamera { name, address, model })
+}
+
+// ---------------------------------------------------------------------------
 // Jellyfin: username + password
 // ---------------------------------------------------------------------------
 
@@ -110,7 +228,8 @@ pub fn parse_discovery_reply(body: &str) -> Option<DiscoveredServer> {
 pub fn jellyfin_login(base: &str, username: &str, password: &str) -> Result<String, SourceError> {
     let base = base.trim_end_matches('/');
     let body = serde_json::json!({ "Username": username, "Pw": password });
-    let resp = ureq::post(&format!("{base}/Users/AuthenticateByName"))
+    let resp = agent()
+        .post(&format!("{base}/Users/AuthenticateByName"))
         .set("Accept", "application/json")
         .set("X-Emby-Authorization", JELLYFIN_AUTH_HEADER)
         .send_json(body)
@@ -166,7 +285,7 @@ pub struct PlexServer {
 
 /// Asks plex.tv for a linking PIN. Blocking.
 pub fn plex_create_pin(client_id: &str) -> Result<PlexPin, SourceError> {
-    let resp = plex_req(ureq::post(&format!("{PLEX_TV}/pins")), client_id)
+    let resp = plex_req(agent().post(&format!("{PLEX_TV}/pins")), client_id)
         .send_form(&[("strong", "false")])
         .map_err(|e| SourceError::Http(friendly_http(e)))?;
     let v: Value = resp
@@ -177,7 +296,7 @@ pub fn plex_create_pin(client_id: &str) -> Result<PlexPin, SourceError> {
 
 /// The account token once the user has entered the code, else None. Blocking.
 pub fn plex_check_pin(client_id: &str, pin_id: i64) -> Result<Option<String>, SourceError> {
-    let resp = plex_req(ureq::get(&format!("{PLEX_TV}/pins/{pin_id}")), client_id)
+    let resp = plex_req(agent().get(&format!("{PLEX_TV}/pins/{pin_id}")), client_id)
         .call()
         .map_err(|e| SourceError::Http(friendly_http(e)))?;
     let v: Value = resp
@@ -189,7 +308,7 @@ pub fn plex_check_pin(client_id: &str, pin_id: i64) -> Result<Option<String>, So
 /// The account's servers, owned first. Blocking.
 pub fn plex_servers(client_id: &str, account_token: &str) -> Result<Vec<PlexServer>, SourceError> {
     let resp = plex_req(
-        ureq::get(&format!("{PLEX_TV}/resources?includeHttps=1&includeRelay=0")),
+        agent().get(&format!("{PLEX_TV}/resources?includeHttps=1&includeRelay=0")),
         client_id,
     )
     .set("X-Plex-Token", account_token)
@@ -504,5 +623,73 @@ mod tests {
         assert_eq!(a, b, "plex.tv keys the PIN on this — it must not change");
         assert!(!a.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod camera_tests {
+    use super::*;
+
+    /// Builds a reply in the wire format: 4-byte header then TLV records.
+    fn tlv(records: &[(u8, Vec<u8>)]) -> Vec<u8> {
+        let mut b = vec![0x01, 0x00, 0x00, 0x00];
+        for (t, v) in records {
+            b.push(*t);
+            b.extend_from_slice(&(v.len() as u16).to_be_bytes());
+            b.extend_from_slice(v);
+        }
+        b
+    }
+
+    #[test]
+    fn a_real_camera_reply_yields_its_name_model_and_address() {
+        // Shaped after the actual answers from a UVC G4 Dome on a live LAN.
+        let body = tlv(&[
+            (0x02, vec![0x78, 0x45, 0x58, 0xc5, 0x2a, 0xc1, 192, 168, 1, 115]),
+            (0x0b, b"Front".to_vec()),
+            (0x0c, b"UVC G4 Dome".to_vec()),
+            (0x03, b"UVC.S5L.v5.4.132".to_vec()),
+        ]);
+        let d = parse_ubiquiti_reply(&body, "192.168.1.115").unwrap();
+        assert_eq!(d.name, "Front");
+        assert_eq!(d.model, "UVC G4 Dome");
+        assert_eq!(d.address, "192.168.1.115");
+    }
+
+    #[test]
+    fn a_reply_with_no_name_falls_back_to_the_address() {
+        // A controller answered with only a hostname and no model; other
+        // firmware sends neither, and the address is always usable.
+        let body = tlv(&[(0x02, vec![0, 0, 0, 0, 0, 0, 192, 168, 1, 1])]);
+        let d = parse_ubiquiti_reply(&body, "192.168.1.1").unwrap();
+        assert_eq!(d.name, "192.168.1.1");
+        assert!(d.model.is_empty());
+    }
+
+    #[test]
+    fn a_gateways_wan_address_is_not_mistaken_for_another_device() {
+        // Observed on a real UDM Pro: it reports every interface, WAN
+        // included, so trusting the payload listed a public IP among the
+        // cameras. The address it answered from is the one that is real.
+        let body = tlv(&[
+            (0x02, vec![0, 0, 0, 0, 0, 0, 192, 168, 1, 1]),
+            (0x02, vec![0, 0, 0, 0, 0, 0, 162, 156, 176, 174]),
+            (0x0b, b"UCTRL-7845".to_vec()),
+        ]);
+        let d = parse_ubiquiti_reply(&body, "192.168.1.1").unwrap();
+        assert_eq!(d.address, "192.168.1.1", "must not adopt the WAN address");
+        assert_eq!(d.name, "UCTRL-7845");
+    }
+
+    #[test]
+    fn a_truncated_record_keeps_what_was_already_read_instead_of_panicking() {
+        let mut body = tlv(&[(0x0b, b"Carport".to_vec())]);
+        body.extend_from_slice(&[0x0c, 0xff, 0xff]); // claims 65535 bytes, sends none
+        let d = parse_ubiquiti_reply(&body, "10.0.0.9").unwrap();
+        assert_eq!(d.name, "Carport");
+        assert_eq!(d.address, "10.0.0.9");
+        // And pure junk must not panic either.
+        assert!(parse_ubiquiti_reply(&[], "10.0.0.9").is_some());
+        assert!(parse_ubiquiti_reply(&[0xff; 3], "10.0.0.9").is_some());
     }
 }

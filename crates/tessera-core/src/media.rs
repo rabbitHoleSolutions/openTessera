@@ -7,6 +7,10 @@ pub enum SourceKind {
     Smb,
     Jellyfin,
     Plex,
+    /// A live camera feed. Everything about it is an ordinary item —
+    /// queued, tiled, pinned, dragged between screens — except that it
+    /// never ends, which is what [`SourceKind::is_live`] exists to say.
+    Camera,
 }
 
 impl SourceKind {
@@ -16,7 +20,19 @@ impl SourceKind {
             SourceKind::Smb => "smb",
             SourceKind::Jellyfin => "jellyfin",
             SourceKind::Plex => "plex",
+            SourceKind::Camera => "camera",
         }
+    }
+
+    /// A stream with no end and no seeking.
+    ///
+    /// This is the distinction that actually matters to playback: buffering
+    /// a live feed is just latency, end-of-file never arrives so
+    /// auto-advance and looping are meaningless, and the scrub bar has
+    /// nothing to scrub. Kept on the kind rather than guessed from the URI
+    /// scheme so a future source cannot forget to declare it.
+    pub fn is_live(&self) -> bool {
+        matches!(self, SourceKind::Camera)
     }
 }
 
@@ -66,6 +82,11 @@ impl MediaItem {
             thumb_url: None,
             source: None,
         }
+    }
+
+    /// True for an item that plays forever (see [`SourceKind::is_live`]).
+    pub fn is_live(&self) -> bool {
+        self.kind.is_live()
     }
 
     pub fn aspect(&self) -> Option<f32> {

@@ -101,6 +101,18 @@ fn pair(url: Option<String>, token: Option<String>) -> Option<ServerConfig> {
     }
 }
 
+/// One library on a server, as offered by the add-source picker.
+///
+/// `movies` is what the lister would actually return for it. It is shown
+/// (choosing between "Movies" and "Movies Demo" is much easier with the
+/// counts in front of you) and, for Jellyfin, it is also the filter — see
+/// [`JellyfinSource::libraries`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LibraryInfo {
+    pub name: String,
+    pub movies: u64,
+}
+
 /// One configured media source: a folder on disk, or a Plex/Jellyfin
 /// server. Sources persist in settings.conf (as one JSON line) and are
 /// editable in the settings panel; listing them is shared between startup
@@ -125,6 +137,32 @@ pub enum Source {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         library: Option<String>,
     },
+    /// Live camera feeds, one item per stream.
+    ///
+    /// Deliberately a list of plain stream URLs rather than a client for
+    /// any particular NVR. A camera source is the one place where the
+    /// vendor API buys least: it costs an API key, a self-signed-certificate
+    /// bypass and a parser per vendor, and all it returns is a URL that mpv
+    /// was always going to open anyway. Taking the URL directly works with
+    /// every camera that speaks RTSP.
+    ///
+    /// The cost is that the list is assembled rather than enumerated —
+    /// which is what network discovery is for: it finds the cameras and
+    /// names them, and only the stream path has to be supplied.
+    Cameras {
+        /// What to call this group in the source list.
+        label: String,
+        streams: Vec<CameraStream>,
+    },
+}
+
+/// One camera: a name to show and a stream to open.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CameraStream {
+    pub name: String,
+    /// Anything mpv can open — `rtsp://`, `rtsps://`, an MJPEG `http://`
+    /// endpoint, an HLS playlist.
+    pub url: String,
 }
 
 impl Source {
@@ -139,6 +177,9 @@ impl Source {
             Source::Folder { path } => format!("folder {path}"),
             Source::Plex { url, library, .. } => format!("plex {url}{}", lib(library)),
             Source::Jellyfin { url, library, .. } => format!("jellyfin {url}{}", lib(library)),
+            Source::Cameras { label, streams } => {
+                format!("cameras {label} ({})", streams.len())
+            }
         }
     }
 
@@ -159,6 +200,10 @@ impl Source {
                 api_key: api_key.clone(),
             }
             .list(library.as_deref())?,
+            // No round trip: the streams *are* the listing. A camera that
+            // is unplugged still belongs in the list — it is the wall that
+            // discovers that, by failing to open it, not this.
+            Source::Cameras { streams, .. } => streams.iter().map(camera_item).collect(),
         };
         // Stamped here, in the one place every listing goes through, so no
         // path can forget and leave an item that delete can't route.
@@ -167,6 +212,31 @@ impl Source {
             item.source = Some(label.clone());
         }
         Ok(items)
+    }
+}
+
+/// One camera stream as a queueable item.
+///
+/// Dimensions are left unknown on purpose: unlike a Plex listing there is
+/// no metadata to read without opening the stream, so the decode budget
+/// admits it on the placeholder and corrects itself from the real numbers
+/// the moment mpv reports them (`TileEvent::Loaded`).
+fn camera_item(cam: &CameraStream) -> MediaItem {
+    MediaItem {
+        // Keyed on the URL, so renaming a camera does not orphan its place
+        // in a saved queue.
+        id: format!("camera|{}", cam.url),
+        title: cam.name.clone(),
+        uri: cam.url.clone(),
+        kind: SourceKind::Camera,
+        width: None,
+        height: None,
+        fps: None,
+        codec: None,
+        size: None,
+        modified: None,
+        thumb_url: None,
+        source: None,
     }
 }
 
@@ -180,8 +250,27 @@ fn config_path() -> Option<PathBuf> {
 // HTTP + JSON plumbing
 // ---------------------------------------------------------------------------
 
+/// The shared HTTP client for every server call.
+///
+/// The timeouts are the point. ureq applies none by default, and
+/// `catalog.rs` runs a single listing worker deliberately — so one server
+/// that accepts a connection and then goes quiet blocks *every* source's
+/// listing for the life of the process, with the browser stuck on
+/// "listing…" and no way back short of a restart. `timeout_read` is per
+/// socket read rather than for the whole body, so a large-but-progressing
+/// library listing is not cut off.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(std::time::Duration::from_secs(5))
+            .timeout_read(std::time::Duration::from_secs(20))
+            .build()
+    })
+}
+
 fn get_json(url: &str, headers: &[(&str, &str)]) -> Result<Value, SourceError> {
-    let mut req = ureq::get(url).set("Accept", "application/json");
+    let mut req = agent().get(url).set("Accept", "application/json");
     for (k, v) in headers {
         req = req.set(k, v);
     }
@@ -202,6 +291,32 @@ pub struct PlexSource {
 }
 
 impl PlexSource {
+    /// The titles of this server's movie libraries, for the add-source
+    /// picker. Deliberately the same section filter [`PlexSource::list`]
+    /// applies, so everything offered here is something `list` can actually
+    /// return items for — a picker that can suggest a library the lister
+    /// then rejects would be worse than no picker.
+    pub fn libraries(&self) -> Result<Vec<LibraryInfo>, SourceError> {
+        let auth = format!("X-Plex-Token={}", self.token);
+        let sections = get_json(&format!("{}/library/sections?{auth}", self.base), &[])?;
+        let mut out = Vec::new();
+        for (key, name) in movie_sections(&sections) {
+            // Container-Size=0 asks for the count without the metadata —
+            // the full listing of a large section is megabytes, and the
+            // picker only needs the number.
+            let counted = get_json(
+                &format!("{}/library/sections/{key}/all?{auth}&X-Plex-Container-Start=0&X-Plex-Container-Size=0", self.base),
+                &[],
+            )?;
+            let movies = counted
+                .pointer("/MediaContainer/totalSize")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            out.push(LibraryInfo { name, movies });
+        }
+        Ok(out)
+    }
+
     /// Lists every movie library. `library` restricts to one section by
     /// title (case-insensitive).
     pub fn list(&self, library: Option<&str>) -> Result<Vec<MediaItem>, SourceError> {
@@ -229,32 +344,50 @@ impl PlexSource {
                 }
             }
             let section = get_json(&format!("{}/library/sections/{key}/all?{auth}", self.base), &[])?;
-            items.extend(plex_items_from_section(&section, &self.base, &self.token, &lib_title));
+            items.extend(plex_items_from_section(&section, &self.base, &self.token));
         }
-        if library.is_some() && items.is_empty() {
-            let available: Vec<String> = sections
-                .pointer("/MediaContainer/Directory")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default()
-                .iter()
-                .filter(|d| d.get("type").and_then(Value::as_str) == Some("movie"))
-                .filter_map(|d| d.get("title").and_then(Value::as_str))
-                .map(str::to_owned)
-                .collect();
-            return Err(SourceError::Http(format!(
-                "no plex movie library named {:?} (have: {})",
-                library.unwrap_or_default(),
-                available.join(", ")
-            )));
+        // Only a naming mistake is an error: a library that exists and is
+        // genuinely empty is not.
+        if let Some(want) = library {
+            let available = movie_section_titles(&sections);
+            if !available.iter().any(|t| t.eq_ignore_ascii_case(want)) {
+                return Err(SourceError::Http(format!(
+                    "no plex movie library named {want:?} (have: {})",
+                    available.join(", ")
+                )));
+            }
         }
         Ok(items)
     }
 }
 
+/// `(section key, title)` for every movie section in a `/library/sections`
+/// response. Plex's `type` is authoritative here, unlike Jellyfin's
+/// CollectionType — see [`JellyfinSource::libraries`].
+fn movie_sections(sections: &Value) -> Vec<(String, String)> {
+    sections
+        .pointer("/MediaContainer/Directory")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter(|d| d.get("type").and_then(Value::as_str) == Some("movie"))
+        .filter_map(|d| {
+            Some((
+                d.get("key").and_then(Value::as_str)?.to_owned(),
+                d.get("title").and_then(Value::as_str)?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+fn movie_section_titles(sections: &Value) -> Vec<String> {
+    movie_sections(sections).into_iter().map(|(_, t)| t).collect()
+}
+
 /// Maps one Plex library-section listing (`/library/sections/{id}/all`)
 /// into MediaItems. Direct-play URI: `{base}{part.key}?X-Plex-Token=...`.
-fn plex_items_from_section(json: &Value, base: &str, token: &str, lib: &str) -> Vec<MediaItem> {
+fn plex_items_from_section(json: &Value, base: &str, token: &str) -> Vec<MediaItem> {
     let metadata = json
         .pointer("/MediaContainer/Metadata")
         .and_then(Value::as_array)
@@ -292,7 +425,6 @@ fn plex_items_from_section(json: &Value, base: &str, token: &str, lib: &str) -> 
             thumb_url,
             source: None,
         });
-        let _ = lib;
     }
     items.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
     items
@@ -327,6 +459,50 @@ pub struct JellyfinSource {
 }
 
 impl JellyfinSource {
+    /// This server's libraries, for the add-source picker.
+    ///
+    /// Jellyfin's `CollectionType` cannot be the filter the way Plex's
+    /// `type` can: a perfectly ordinary movie library reports
+    /// `CollectionType: null` (observed on a real server holding 30
+    /// movies), so filtering on it hides exactly the library the user
+    /// wants. The reliable question is the one the lister itself asks —
+    /// how many `Movie` items does this folder hold — so each folder is
+    /// counted with `Limit=0`, which returns `TotalRecordCount` and no
+    /// items. A folder is offered if it holds movies, or if it is declared
+    /// a movie library and merely happens to be empty.
+    pub fn libraries(&self) -> Result<Vec<LibraryInfo>, SourceError> {
+        let folders = get_json(
+            &format!("{}/Library/MediaFolders?EnableImages=false&api_key={}", self.base, self.api_key),
+            &[],
+        )?;
+        let mut out = Vec::new();
+        for f in folders.get("Items").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default() {
+            let (Some(name), Some(id)) = (
+                f.get("Name").and_then(Value::as_str),
+                f.get("Id").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            let declared_movies =
+                f.get("CollectionType").and_then(Value::as_str) == Some("movies");
+            let counted = get_json(
+                &format!(
+                    "{}/Items?ParentId={id}&Recursive=true&IncludeItemTypes=Movie&Limit=0&api_key={}",
+                    self.base, self.api_key
+                ),
+                &[],
+            )?;
+            let movies = counted
+                .get("TotalRecordCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if movies > 0 || declared_movies {
+                out.push(LibraryInfo { name: name.to_owned(), movies });
+            }
+        }
+        Ok(out)
+    }
+
     /// Lists every movie across all libraries. `library` restricts to one
     /// library by name (case-insensitive).
     pub fn list(&self, library: Option<&str>) -> Result<Vec<MediaItem>, SourceError> {
@@ -393,10 +569,18 @@ fn jellyfin_items_from_query(json: &Value, base: &str, api_key: &str) -> Vec<Med
             None => title,
         };
         let stream = i.pointer("/MediaSources/0").cloned().unwrap_or(Value::Null);
-        // Prefer the container's declared name; fall back to the original path.
         let size = stream.get("Size").and_then(Value::as_i64).map(|v| v.max(0) as u64);
+        // The stream of Type "Video", not merely the first one: Jellyfin
+        // guarantees no order, and an audio stream in slot 0 leaves every
+        // dimension None — which silently hands the decode budget the
+        // 1080p30 placeholder for a file that might be 4K.
         let video = stream
-            .pointer("/MediaStreams/0")
+            .pointer("/MediaStreams")
+            .and_then(Value::as_array)
+            .and_then(|list| {
+                list.iter()
+                    .find(|s| s.get("Type").and_then(Value::as_str) == Some("Video"))
+            })
             .cloned()
             .unwrap_or(Value::Null);
         let thumb_url = format!("{base}/Items/{id}/Images/Primary?maxWidth=160&quality=90&api_key={api_key}");
@@ -447,7 +631,7 @@ pub fn delete_item(item: &MediaItem, configured: &[Source]) -> Result<(), String
             };
             let id = item.id.strip_prefix("jellyfin|").ok_or("bad jellyfin item id")?;
             let url = format!("{}/Items/{id}?api_key={key}", base.trim_end_matches('/'));
-            ureq::delete(&url).call().map(|_| ()).map_err(|e| e.to_string())
+            agent().delete(&url).call().map(|_| ()).map_err(|e| e.to_string())
         }
         SourceKind::Plex => {
             let (base, token) = match owner {
@@ -460,15 +644,22 @@ pub fn delete_item(item: &MediaItem, configured: &[Source]) -> Result<(), String
                 }
             };
             let key = item.id.strip_prefix("plex|").ok_or("bad plex item id")?;
-            // Endpoint form kept as-is from the Quest app; untested here,
-            // and not worth changing blind.
+            // DELETE /library/metadata/{ratingKey} — the trailing "/delete"
+            // this carried over from the Quest app is not a Plex endpoint,
+            // so the request 404'd and nothing was ever removed. Matches
+            // Plex's documented API, but is NOT verified against a live
+            // server: this erases the file on the server's disk, so try it
+            // on something expendable first.
             let url = format!(
-                "{}/library/metadata/{key}/delete?X-Plex-Token={token}",
+                "{}/library/metadata/{key}?X-Plex-Token={token}",
                 base.trim_end_matches('/')
             );
-            ureq::delete(&url).call().map(|_| ()).map_err(|e| e.to_string())
+            agent().delete(&url).call().map(|_| ()).map_err(|e| e.to_string())
         }
         SourceKind::Smb => Err("smb delete not supported (mount it locally instead)".into()),
+        // There is no file to remove, and the trash sits right there on the
+        // transport next to a live feed.
+        SourceKind::Camera => Err("a camera feed is live — there is nothing to delete".into()),
     }
 }
 
@@ -496,7 +687,7 @@ mod tests {
                 { "title": "No Media", "ratingKey": "124" }
             ]}
         });
-        let items = plex_items_from_section(&json, "http://x:32400", "tok", "lib");
+        let items = plex_items_from_section(&json, "http://x:32400", "tok");
         assert_eq!(items.len(), 1);
         let it = &items[0];
         assert_eq!(it.title, "Gravity (2013)");
@@ -541,6 +732,35 @@ mod tests {
             it.thumb_url.as_deref(),
             Some("http://x:8096/Items/abc123/Images/Primary?maxWidth=160&quality=90&api_key=key")
         );
+    }
+
+    #[test]
+    fn jellyfin_picks_the_video_stream_not_the_first_one() {
+        // Audio in slot 0 is perfectly normal in a Jellyfin response.
+        let json: Value = serde_json::json!({
+            "Items": [{
+                "Name": "Dune", "Id": "d1",
+                "MediaSources": [{
+                    "MediaStreams": [
+                        { "Type": "Audio", "Codec": "eac3", "Channels": 6 },
+                        { "Type": "Video", "Width": 3840, "Height": 2160,
+                          "RealFrameRate": 24.0, "Codec": "hevc" },
+                        { "Type": "Subtitle", "Codec": "subrip" }
+                    ]
+                }]
+            }]
+        });
+        let it = &jellyfin_items_from_query(&json, "http://x:8096", "k")[0];
+        assert_eq!(it.width, Some(3840));
+        assert_eq!(it.height, Some(2160));
+        assert_eq!(it.fps, Some(24.0));
+        assert_eq!(it.codec.as_deref(), Some("hevc"));
+        // No video track at all is still not a panic, just unknown.
+        let none: Value = serde_json::json!({
+            "Items": [{ "Name": "Audiobook", "Id": "a1",
+                        "MediaSources": [{ "MediaStreams": [{ "Type": "Audio" }] }] }]
+        });
+        assert_eq!(jellyfin_items_from_query(&none, "http://x:8096", "k")[0].width, None);
     }
 
     #[test]
@@ -589,6 +809,63 @@ mod tests {
             .as_deref()
             .and_then(|l| [a, b].into_iter().find(|s| s.label() == l));
         assert!(owner.is_none());
+    }
+
+    #[test]
+    fn movie_sections_are_offered_and_others_are_not() {
+        let sections: Value = serde_json::json!({
+            "MediaContainer": { "Directory": [
+                { "key": "1", "type": "movie", "title": "_sx2" },
+                { "key": "2", "type": "movie", "title": "Movies" },
+                { "key": "3", "type": "show",  "title": "TV" },
+                { "key": "4", "type": "movie", "title": "Movies Demo" },
+            ]}
+        });
+        // The picker offers exactly what the lister can serve: movie
+        // sections, in server order, with TV left out.
+        assert_eq!(movie_section_titles(&sections), ["_sx2", "Movies", "Movies Demo"]);
+        assert!(movie_section_titles(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn plex_sections_carry_their_keys() {
+        let sections: Value = serde_json::json!({
+            "MediaContainer": { "Directory": [
+                { "key": "1", "type": "movie", "title": "_sx2" },
+                { "key": "9", "type": "show",  "title": "TV" },
+                { "key": "2", "type": "movie", "title": "Movies" },
+            ]}
+        });
+        assert_eq!(
+            movie_sections(&sections),
+            [("1".to_owned(), "_sx2".to_owned()), ("2".to_owned(), "Movies".to_owned())]
+        );
+    }
+
+    #[test]
+    fn jellyfin_offers_a_library_that_declares_no_collection_type() {
+        // The rule this encodes, from a real server: `Movies` holds 30
+        // films and reports CollectionType null, while `Playlists` is
+        // typed and holds none. Filtering on the type would offer exactly
+        // the wrong one of those two.
+        let folder = |name: &str, ct: Option<&str>| {
+            let mut m = serde_json::Map::new();
+            m.insert("Name".into(), Value::from(name));
+            m.insert("Id".into(), Value::from(format!("id-{name}")));
+            if let Some(ct) = ct {
+                m.insert("CollectionType".into(), Value::from(ct));
+            }
+            Value::Object(m)
+        };
+        let offered = |f: &Value, movies: u64| {
+            let declared = f.get("CollectionType").and_then(Value::as_str) == Some("movies");
+            movies > 0 || declared
+        };
+        assert!(offered(&folder("Movies", None), 30), "untyped but full");
+        assert!(!offered(&folder("Playlists", Some("playlists")), 0), "typed, empty, not movies");
+        assert!(offered(&folder("_sx2", Some("movies")), 4279), "typed and full");
+        assert!(offered(&folder("New", Some("movies")), 0), "declared movies, merely empty");
+        assert!(!offered(&folder("Music", Some("music")), 0), "not a movie library");
     }
 
     #[test]
@@ -667,4 +944,61 @@ mod tests {
 
     use std::sync::Mutex;
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+}
+
+#[cfg(test)]
+mod camera_source_tests {
+    use super::*;
+
+    fn cams() -> Source {
+        Source::Cameras {
+            label: "Outside".into(),
+            streams: vec![
+                CameraStream { name: "Front".into(), url: "rtsps://192.168.1.1:7441/abc?enableSrtp".into() },
+                CameraStream { name: "Carport".into(), url: "rtsp://192.168.1.36:554/s0".into() },
+            ],
+        }
+    }
+
+    #[test]
+    fn each_camera_becomes_a_queueable_item() {
+        // The whole point: a camera is to the queue what a film is.
+        let items = cams().list().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].title, "Front");
+        assert_eq!(items[0].uri, "rtsps://192.168.1.1:7441/abc?enableSrtp");
+        assert_eq!(items[0].kind, SourceKind::Camera);
+        assert!(items[0].is_live(), "a camera never ends");
+        // Stamped with its source, like every other listing, so routing works.
+        assert_eq!(items[0].source.as_deref(), Some("cameras Outside (2)"));
+        // Ids key on the URL, so renaming a camera keeps its place in a
+        // saved queue.
+        assert_eq!(items[1].id, "camera|rtsp://192.168.1.36:554/s0");
+    }
+
+    #[test]
+    fn a_camera_is_not_something_you_can_delete() {
+        let item = &cams().list().unwrap()[0];
+        let err = delete_item(item, &[]).unwrap_err();
+        assert!(err.contains("live"), "got {err}");
+    }
+
+    #[test]
+    fn recorded_items_are_not_live() {
+        assert!(!MediaItem::from_path(std::path::Path::new("/m/a.mkv")).is_live());
+    }
+
+    #[test]
+    fn a_camera_source_round_trips_through_settings() {
+        let json = serde_json::to_string(&vec![cams()]).unwrap();
+        assert!(!json.contains('\n'), "settings.conf is one line per key");
+        let back: Vec<Source> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, vec![cams()]);
+    }
+
+    #[test]
+    fn an_empty_camera_group_is_a_listing_of_nothing_not_an_error() {
+        let empty = Source::Cameras { label: "None".into(), streams: vec![] };
+        assert!(empty.list().unwrap().is_empty());
+    }
 }

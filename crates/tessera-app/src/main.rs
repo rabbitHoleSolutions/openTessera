@@ -2,8 +2,10 @@ mod auth;
 mod browser;
 mod catalog;
 mod compositor;
+mod instance;
 mod overlay;
 mod platform;
+mod poster;
 mod thumbs;
 mod png_util;
 mod screen;
@@ -210,6 +212,15 @@ OPTIONS:
   --max-streams N    Budget: max concurrent streams (default 128; also in settings)
   --ceiling N        Budget: 1080p30-equivalent decode ceiling (default 96)
   --status-interval S  Seconds between status prints (default 5)
+
+SECOND LAUNCH:
+  Running tessera again does not start a second app: it hands its files to
+  the instance already running, brings that window to the front and exits.
+  One process owns one queue and one decode budget, so a second would
+  double-count the GPU and both would overwrite each other's settings.
+  The instance is keyed on the config directory, so a different HOME is a
+  different instance. Set TESSERA_ALLOW_MULTI=1 to force a second process
+  against the same config (development only — it reinstates both hazards).
   --overlay          Start with the overlay UI pinned on (Tab toggles pinning;
                      otherwise the UI shows on input and hides after 5s idle)
   --plex             Add the Plex server from ~/.config/opentessera/sources.conf
@@ -276,6 +287,31 @@ fn main() {
             print_usage();
             std::process::exit(2);
         }
+    };
+
+    // Single instance, before anything expensive. A second launch is a
+    // request aimed at the running app, not a second app: it hands over its
+    // paths and exits. See `instance.rs` for why this is ownership rather
+    // than a nicety — one queue and one decode budget per *process*.
+    let mut opens = match instance::acquire(&config_dir(), &args.files) {
+        instance::Acquired::HandedOff => {
+            // Say so rather than dropping them silently: a window that
+            // already exists cannot retroactively adopt --windowed or
+            // --tiles, and a user who passed them deserves to know they
+            // did nothing.
+            let flags: Vec<String> = std::env::args()
+                .skip(1)
+                .filter(|a| a.starts_with('-'))
+                .collect();
+            if !flags.is_empty() {
+                eprintln!(
+                    "note: {} ignored — flags apply only to the launch that starts the app",
+                    flags.join(" ")
+                );
+            }
+            return;
+        }
+        instance::Acquired::Primary(opens) => opens,
     };
 
     // Settings first: sources configured in the gear panel (persisted in
@@ -373,13 +409,10 @@ fn main() {
     let mpv_lib = match tessera_mpv::MpvLib::load() {
         Ok(l) => {
             let v = l.client_api_version();
-            println!(
-                "libmpv client API 0x{:X} ({}.{}.{})",
-                v,
-                v >> 16,
-                (v >> 8) & 0xFF,
-                v & 0xFF
-            );
+            // MPV_MAKE_VERSION packs major in the high 16 bits and minor
+            // in the low 16 — splitting the minor into two bytes printed
+            // API 2.2 (0x20002) as "2.0.2".
+            println!("libmpv client API 0x{:X} ({}.{})", v, v >> 16, v & 0xFFFF);
             l
         }
         Err(e) => {
@@ -526,6 +559,11 @@ fn main() {
     let mut cursor_over: Option<winit::window::WindowId> = None;
     // Left mouse button currently held (drag-threshold tracking).
     let mut left_held = false;
+    // Files dropped on a window this frame, per window. winit delivers one
+    // DroppedFile event per file with no pointer position, so a multi-file
+    // drop arrives as a burst and is acted on once, together.
+    let mut dropped: Vec<(winit::window::WindowId, Vec<PathBuf>)> = Vec::new();
+
     // When the last button-wheel step was applied (see WHEEL_NOTCH_INTERVAL).
     let mut last_wheel_at: Option<Instant> = None;
     // Deferred WM-settle check after a window/fullscreen toggle:
@@ -546,17 +584,9 @@ fn main() {
     // Set once the wall has been torn down, by whichever path got there
     // first — Esc, closing the last window, or the OS quitting us.
     let mut shut_down = false;
-    // Files opened from the OS while running, being listed off-thread. The
-    // window is where a drag-and-drop landed, so the files play on the
-    // window they were dropped on; a Finder open names no window (None).
-    let (opened_tx, opened_rx) =
-        std::sync::mpsc::channel::<(Option<winit::window::WindowId>, Vec<tessera_core::MediaItem>)>();
-    // Files dropped onto a window this frame. winit sends one DroppedFile
-    // per file with no marker for where the drop ends, so they accumulate
-    // and flush once a frame — otherwise dropping five files would fire
-    // five separate "play this now", and only the last would survive.
-    let mut dropped: Vec<PathBuf> = Vec::new();
-    let mut dropped_on: Option<winit::window::WindowId> = None;
+    // Files opened from the OS while running, being listed off-thread.
+    // (Drag-and-drop has its own path: see `dropped` and `open_handed_off`.)
+    let (opened_tx, opened_rx) = std::sync::mpsc::channel::<Vec<tessera_core::MediaItem>>();
 
     // Startup population. --max is the video-wall mode: fill every
     // screen to the --tiles cap. A plain window starts at
@@ -622,21 +652,10 @@ fn main() {
                     if !opened.is_empty() {
                         let tx = opened_tx.clone();
                         std::thread::spawn(move || {
-                            let _ = tx.send((None, list_paths(&opened).1));
+                            let _ = tx.send(list_paths(&opened).1);
                         });
                     }
-                    // Whatever was dropped this frame, listed the same way —
-                    // a dropped folder is a directory walk, which must not
-                    // run on the render thread.
-                    if !dropped.is_empty() {
-                        let paths = std::mem::take(&mut dropped);
-                        let target = dropped_on.take();
-                        let tx = opened_tx.clone();
-                        std::thread::spawn(move || {
-                            let _ = tx.send((target, list_paths(&paths).1));
-                        });
-                    }
-                    while let Ok((target, items)) = opened_rx.try_recv() {
+                    while let Ok(items) = opened_rx.try_recv() {
                         let mut wall = Wall {
                             screens: &mut screens,
                             budget: &mut budget,
@@ -649,7 +668,7 @@ fn main() {
                             max_tiles: args.tiles,
                             wm_settle_at: &mut wm_settle_at,
                         };
-                        play_opened(&mut wall, items, target);
+                        play_opened(&mut wall, items);
                     }
                     sync_fullscreen_chrome(&screens);
                     // Overlay auto-hide: visible while pinned or while user
@@ -671,29 +690,62 @@ fn main() {
                     // Deferred: a new window has to be created after the
                     // per-screen loop, which is iterating `screens` by index.
                     let mut new_windows: Vec<(ScreenRole, browser::Tab)> = Vec::new();
+                    // Files handed over by a later launch (see instance.rs).
+                    for paths in opens.poll() {
+                        if open_handed_off(&mut screens, &mut queue, &mut overlay, &paths, OpenTarget::Anywhere) {
+                            new_windows.push((ScreenRole::Wall, browser::Tab::Library));
+                        }
+                    }
+                    // Files dragged onto a window. winit reports one event
+                    // per file with no position, so they are collected as
+                    // they arrive and acted on together here — a multi-file
+                    // drop is one gesture and should behave like one.
+                    for (window_id, paths) in std::mem::take(&mut dropped) {
+                        if open_handed_off(
+                            &mut screens,
+                            &mut queue,
+                            &mut overlay,
+                            &paths,
+                            OpenTarget::Window(window_id),
+                        ) {
+                            new_windows.push((ScreenRole::Wall, browser::Tab::Library));
+                        }
+                    }
                     // Snapshot every wall tile for the queue tab: a Screen
                     // can't see its siblings, so this has to be gathered
                     // before the per-screen loop borrows them one at a time.
-                    let wall_tiles: Vec<browser::WallTile> = screens
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, s)| s.role == ScreenRole::Wall)
-                        .flat_map(|(wi, s)| {
-                            let monitor = s.monitor_index;
-                            s.tiles.iter().map(move |t| browser::WallTile {
-                                window: wi,
-                                monitor,
-                                tile_id: t.id,
-                                title: t.item.title.clone(),
-                                paused: t.is_paused(),
-                                muted: t.is_muted(),
-                                audio_enabled: t.audio_enabled(),
-                                volume: t.volume(),
-                                time_pos: t.last_time_pos,
-                                duration: t.duration,
+                    //
+                    // Only when something will read it. Each tile here costs
+                    // three mpv property round trips — `pause` and `mute` are
+                    // string properties, so mpv formats a C string, we copy
+                    // it and hand it back to be freed — plus a title clone.
+                    // With no browser window open that was a few thousand
+                    // calls a second producing a Vec nobody looked at.
+                    let browser_open = screens.iter().any(|s| s.role == ScreenRole::Browser);
+                    let wall_tiles: Vec<browser::WallTile> = if !browser_open {
+                        Vec::new()
+                    } else {
+                        screens
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, s)| s.role == ScreenRole::Wall)
+                            .flat_map(|(wi, s)| {
+                                let monitor = s.monitor_index;
+                                s.tiles.iter().map(move |t| browser::WallTile {
+                                    window: wi,
+                                    monitor,
+                                    tile_id: t.id,
+                                    title: t.item.title.clone(),
+                                    paused: t.is_paused(),
+                                    muted: t.is_muted(),
+                                    audio_enabled: t.audio_enabled(),
+                                    volume: t.volume(),
+                                    time_pos: t.last_time_pos,
+                                    duration: t.duration,
+                                })
                             })
-                        })
-                        .collect();
+                            .collect()
+                    };
                     for screen_idx in 0..screens.len() {
                         let mut services = screen::Services {
                             catalog: &mut catalog,
@@ -1018,15 +1070,6 @@ fn main() {
                         WindowEvent::Resized(size) => {
                             screens[idx].resize(size.width, size.height);
                         }
-                        // Drag-and-drop from Finder. winit already tells the
-                        // OS we accept the drag, so without this arm the
-                        // cursor promises a drop that then does nothing.
-                        // Collected here, flushed once a frame (see `dropped`).
-                        WindowEvent::DroppedFile(path) => {
-                            dropped.push(path);
-                            dropped_on = Some(window_id);
-                            last_input = Instant::now();
-                        }
                         WindowEvent::ModifiersChanged(m) => {
                             mods = m.state();
                         }
@@ -1080,6 +1123,24 @@ fn main() {
                         WindowEvent::CursorLeft { .. } => {
                             if cursor_over == Some(window_id) {
                                 cursor_over = None;
+                            }
+                        }
+                        WindowEvent::HoveredFile(_) => {
+                            // Say the window will take it, before the drop.
+                            overlay.drop_target = Some(window_id);
+                            last_input = Instant::now();
+                        }
+                        WindowEvent::HoveredFileCancelled => {
+                            if overlay.drop_target == Some(window_id) {
+                                overlay.drop_target = None;
+                            }
+                        }
+                        WindowEvent::DroppedFile(path) => {
+                            overlay.drop_target = None;
+                            last_input = Instant::now();
+                            match dropped.iter_mut().find(|(w, _)| *w == window_id) {
+                                Some((_, paths)) => paths.push(path),
+                                None => dropped.push((window_id, vec![path])),
                             }
                         }
                         WindowEvent::MouseInput { state, button, .. } => {
@@ -1197,7 +1258,7 @@ fn main() {
                                                     println!("screen {monitor_index} tile {}: vol {}%", tile.id, tile.volume());
                                                 } else {
                                                     overlay.notice = Some((
-                                                        "audio is off — enable it in config (C), then restart".into(),
+                                                        "audio is off — turn it on in the config tab (C)".into(),
                                                         Instant::now(),
                                                     ));
                                                 }
@@ -1484,16 +1545,11 @@ fn list_paths(paths: &[PathBuf]) -> (Vec<tessera_core::sources::Source>, Vec<tes
     (sources, items)
 }
 
-/// Plays files that arrived while the wall was running — an "Open With" on
-/// a running Tessera, or a drag-and-drop onto one of its windows. The first
-/// plays now, on the window named by `onto` (where a drop landed) or else
-/// the first wall window with a tile — on a new tile, if that window has
-/// none — and all of them join the end of the queue.
-fn play_opened(
-    wall: &mut Wall,
-    items: Vec<tessera_core::MediaItem>,
-    onto: Option<winit::window::WindowId>,
-) {
+/// Plays files the OS opened while the wall was running ("Open With" on a
+/// running Tessera): the first plays now on the first wall window with a
+/// tile — on a new tile, if no wall window has one — and all of them join
+/// the end of the queue. Drag-and-drop goes through `open_handed_off`.
+fn play_opened(wall: &mut Wall, items: Vec<tessera_core::MediaItem>) {
     let Some(first) = items.first().cloned() else {
         notify(wall.overlay, "nothing playable in what was opened".into());
         return;
@@ -1501,16 +1557,9 @@ fn play_opened(
     let n = items.len();
     wall.queue.append_items(items);
     println!("opened: {n} item(s) added to the queue ({} total)", wall.queue.len());
-    // A drag-and-drop names the window it landed on, and plays there — the
-    // window you dropped on is the one you meant. An OS open names none, and
-    // a drop onto the browser window has no tiles to play on; both fall back
-    // to the first wall window that already has one.
-    let target = onto
-        .and_then(|id| wall.screens.iter().position(|s| s.window.id() == id))
-        .filter(|&i| wall.screens[i].role == ScreenRole::Wall);
     let with_tile = wall.screens.iter().position(|s| s.role == ScreenRole::Wall && !s.tiles.is_empty());
     let any_wall = wall.screens.iter().position(|s| s.role == ScreenRole::Wall);
-    let Some(idx) = target.or(with_tile).or(any_wall) else {
+    let Some(idx) = with_tile.or(any_wall) else {
         notify(wall.overlay, "no wall window to play on — open one with + first".into());
         return;
     };
@@ -1579,12 +1628,37 @@ fn save_queue(queue: &PlaybackQueue) {
     let body = serde_json::json!({ "cursor": cursor, "items": items });
     match serde_json::to_string(&body) {
         Ok(text) => {
-            if let Err(e) = std::fs::write(queue_path(), text) {
+            // Private: every remote item's uri carries its server token.
+            if let Err(e) = write_private(&queue_path(), &text) {
                 eprintln!("warning: could not save the queue: {e}");
             }
         }
         Err(e) => eprintln!("warning: could not serialise the queue: {e}"),
     }
+}
+
+/// Writes a file only its owner can read.
+///
+/// Both files this is used for carry live server tokens: settings.conf in
+/// its `sources = [...]` JSON, and queue.json inside every item's `uri` and
+/// `thumb_url` (a Plex/Jellyfin direct-play URL *is* `...?api_key=...`).
+/// The default umask leaves them 0644, which on any shared machine hands
+/// every local account a working key. Proper secret storage is a bigger
+/// job — docs/ROADMAP.md §9 — but the mode costs nothing.
+///
+/// `mode()` only applies when the file is created, so an existing file
+/// written before this change is tightened explicitly.
+fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    file.write_all(text.as_bytes())
 }
 
 /// `~/.config/opentessera`, where settings, source credentials and the
@@ -1664,8 +1738,13 @@ fn save_settings(s: &overlay::UiSettings) {
          ui_scale = {}\nmonitor_scale = {}\ncache_mb = {}\nmax_streams = {}\naudio = {}\nretain_queue = {}\nsources = {}\n",
         s.ui_scale, scales_json, s.cache_mb, s.max_streams, s.audio, s.retain_queue, sources_json
     );
-    let _ = std::fs::write(dir.join("settings.conf"), text);
-    println!("settings: saved to {}", dir.join("settings.conf").display());
+    // Private: the sources line holds Plex tokens and Jellyfin API keys.
+    let path = dir.join("settings.conf");
+    if let Err(e) = write_private(&path, &text) {
+        eprintln!("warning: could not save settings: {e}");
+        return;
+    }
+    println!("settings: saved to {}", path.display());
 }
 
 fn dump_dir() -> Option<std::path::PathBuf> {
@@ -2017,7 +2096,11 @@ fn add_tile_action(wall: &mut Wall, screen_idx: usize) {
     if !can_add_tile(wall, screen_idx) {
         return;
     }
-    let item = match wall.queue.advance().cloned() {
+    // Peek at what the next advance would yield rather than taking it: a
+    // rejected add used to consume a queue position anyway, so pressing "+"
+    // against a full budget silently skipped an item. The cursor moves only
+    // once the tile actually exists, below.
+    let item = match wall.queue.upcoming(1).first().map(|m| (*m).clone()) {
         Some(m) => m,
         None => {
             notify(wall.overlay, "not adding: queue is empty".into());
@@ -2057,6 +2140,8 @@ fn spawn_tile(wall: &mut Wall, screen_idx: usize, item: tessera_core::MediaItem)
                 Ok(tile) => {
                     wall.screens[screen_idx].add_tile(tile);
                     *wall.next_tile_id += 1;
+                    // Only now: the item is really playing somewhere.
+                    wall.queue.advance();
                     println!(
                         "screen {monitor_index}: added tile {id} \"{}\" ({} tiles)",
                         item.title,
@@ -2147,7 +2232,7 @@ fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx: usi
                             if muted { "muted".to_string() } else { format!("audio on (vol {}%)", tile.volume()) }
                         );
                     } else {
-                        notify(wall.overlay, "audio is off — enable it in config (C), then restart".into());
+                        notify(wall.overlay, "audio is off — turn it on in the config tab (C)".into());
                     }
                     return;
                 }
@@ -2178,12 +2263,21 @@ fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx: usi
                 }
             }
             if !target_ok {
-                notify(wall.overlay, "audio is off — enable it in config (C), then restart".into());
+                notify(wall.overlay, "audio is off — turn it on in the config tab (C)".into());
             } else {
                 if muted_others > 0 {
                     println!("solo: muted {muted_others} other stream(s)");
                 }
                 wall.overlay.solo_id = Some(tile_id);
+            }
+        }
+        OverlayAction::GoLive { tile_id } => {
+            for screen in wall.screens.iter_mut() {
+                if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
+                    tile.go_live();
+                    println!("screen {} tile {tile_id}: rejoined the live stream", screen.monitor_index);
+                    return;
+                }
             }
         }
         OverlayAction::TogglePin { tile_id } => {
@@ -2440,6 +2534,130 @@ fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx: usi
     }
 }
 
+/// Where a batch of files should land.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenTarget {
+    /// No window in particular — a hand-off from another launch. Plays on
+    /// the first wall window that has a tile.
+    Anywhere,
+    /// Dropped onto this window: play there, on the tile under the pointer
+    /// if the drop landed on one. A browser window queues instead, since it
+    /// has no tiles to play on.
+    Window(winit::window::WindowId),
+}
+
+/// Acts on files handed over by a later launch.
+///
+/// "Play that file" rather than "quietly append it" is the same rule the
+/// command line already follows — see the positional-paths note in `main`.
+/// Double-clicking a video in the file manager has to result in that video
+/// playing, whether or not an instance was already up.
+///
+/// Returns true when there was nowhere to play it and the caller should
+/// open a wall window; the file is left at the head of the pending queue,
+/// so the tile that window opens with is the one just asked for.
+fn open_handed_off(
+    screens: &mut [Screen],
+    queue: &mut PlaybackQueue,
+    overlay: &mut OverlayState,
+    paths: &[PathBuf],
+    target: OpenTarget,
+) -> bool {
+    // Even a bare re-launch means "come to the front" — that is what a
+    // second click on the dock icon is asking for. A drop already happened
+    // in the window the user was looking at, so it needs no raising.
+    if target == OpenTarget::Anywhere {
+        let front = screens
+            .iter()
+            .position(|s| s.role == ScreenRole::Wall)
+            .or(if screens.is_empty() { None } else { Some(0) });
+        if let Some(i) = front {
+            screens[i].window.focus_window();
+        }
+    }
+    if paths.is_empty() {
+        return false;
+    }
+    let items = tessera_core::media::collect_items(paths);
+    if items.is_empty() {
+        notify(overlay, "nothing playable in what was dropped".into());
+        return false;
+    }
+    let count = items.len();
+
+    // Dropping on the browser window means "add these", not "play these" —
+    // it has no tiles, and the queue tab is the thing you were looking at.
+    if let OpenTarget::Window(id) = target {
+        if screens.iter().any(|s| s.window.id() == id && s.role == ScreenRole::Browser) {
+            queue.append_items(items);
+            notify(overlay, format!("added {count} item(s) to the queue"));
+            return false;
+        }
+    }
+
+    // Where it will play is decided BEFORE the queue is touched, because
+    // that is what decides whether the file belongs in the queue at all.
+    // The tile to take over: the one under the pointer when the drop landed
+    // on a specific window, else that window's first, else any wall tile.
+    let spot = match target {
+        OpenTarget::Window(id) => screens
+            .iter()
+            .position(|s| s.window.id() == id && s.role == ScreenRole::Wall && !s.tiles.is_empty())
+            .map(|si| {
+                let under = screens[si].cursor.and_then(|(x, y)| screens[si].tile_at(x, y));
+                (si, under.unwrap_or(screens[si].tiles[0].id))
+            }),
+        OpenTarget::Anywhere => None,
+    }
+    .or_else(|| {
+        screens
+            .iter()
+            .position(|s| s.role == ScreenRole::Wall && !s.tiles.is_empty())
+            .map(|si| (si, screens[si].tiles[0].id))
+    });
+
+    let Some((si, tile_id)) = spot else {
+        // Nowhere to play it, so the queue is the only place it can go. The
+        // first one is moved to the head of the pending tail so the window
+        // about to be opened comes up on the file that was asked for,
+        // rather than wherever the cursor happened to be.
+        let first_id = items[0].id.clone();
+        queue.append_items(items);
+        if let Some(idx) = queue.items().iter().position(|m| m.id == first_id) {
+            queue.move_pending_to_front(idx);
+        }
+        println!("opened: {count} file(s) — no wall tile yet, opening a window");
+        return true;
+    };
+
+    // Playing it and queueing it are alternatives, never both. A file on a
+    // tile that is *also* sitting at the head of the queue starts again the
+    // moment you press next, which reads as the wall being stuck on it.
+    // This is the split `OverlayAction::PlayNow` already draws: the tile
+    // owns the item it is playing, and the queue holds what is still to
+    // come. Only the extras from a multi-file drop are queued.
+    let mut items = items;
+    let first = items.remove(0);
+    let queued = items.len();
+    queue.append_items(items);
+
+    let monitor_index = screens[si].monitor_index;
+    if let Some(tile) = screens[si].tiles.iter_mut().find(|t| t.id == tile_id) {
+        tile.item = first.clone();
+        if let Err(e) = tile.load(&first) {
+            eprintln!("screen {monitor_index} tile {tile_id}: load failed: {e}");
+        } else {
+            println!(
+                "opened: screen {monitor_index} tile {tile_id}: now playing \"{}\"{}",
+                first.title,
+                if queued > 0 { format!(" (+{queued} queued)") } else { String::new() }
+            );
+        }
+    }
+    screens[si].window.focus_window();
+    false
+}
+
 /// Closes one window: frees its tiles' budget slots and GL resources, drops
 /// the [`Screen`] (and with it the GL context, surface and egui context),
 /// and terminates its mpv instances in parallel — serial teardown is what
@@ -2467,6 +2685,9 @@ fn close_screen(
     }
     if overlay.help_open == Some(window_id) {
         overlay.help_open = None;
+    }
+    if overlay.drop_target == Some(window_id) {
+        overlay.drop_target = None;
     }
     if overlay.settings_open == Some(window_id) {
         overlay.settings_open = None;

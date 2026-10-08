@@ -18,7 +18,11 @@ glutin = "0.31"
 glutin-winit = "0.4"
 glow = "0.13"
 egui = "0.27"
-egui_glow = { version = "0.27", features = ["winit"] }
+# "clipboard" is not optional in practice: without it egui-winit falls back
+# to an in-app clipboard, so Ctrl+V returns whatever was last copied *inside*
+# Tessera and the system clipboard is never consulted. Pasting a camera URL
+# from a browser silently produced an unrelated string.
+egui_glow = { version = "0.27", features = ["winit", "clipboard"] }
 raw-window-handle = "0.5"
 ureq = { version = "2", features = ["json"] }
 libc = "0.2"

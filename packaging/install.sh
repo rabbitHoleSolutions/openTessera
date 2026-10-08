@@ -72,7 +72,13 @@ BIN="$REPO/target/release/tessera"
 [ -x "$BIN" ] || { echo "no binary at $BIN — run without --no-build" >&2; exit 1; }
 
 install -d "$BIN_DIR" "$APP_DIR"
-install -m755 "$BIN" "$BIN_DIR/tessera"
+# Staged then renamed, rather than written in place: writing over a running
+# executable fails with ETXTBSY, and now that Tessera is something people
+# leave open, reinstalling mid-session is the normal case. rename(2) within
+# one directory is atomic, and a running instance simply keeps the old
+# inode until it is restarted.
+install -m755 "$BIN" "$BIN_DIR/tessera.new"
+mv -f "$BIN_DIR/tessera.new" "$BIN_DIR/tessera"
 
 for s in "${SIZES[@]}"; do
   install -d "$ICON_ROOT/${s}x${s}/apps"

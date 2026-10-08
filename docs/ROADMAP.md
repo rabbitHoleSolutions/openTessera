@@ -622,15 +622,71 @@ Next:
 
 ---
 
+## 17. Single instance, and the hand-off from later launches
+
+Status: **implemented** (2026-09-03)
+
+A second launch used to become a second app, which quietly broke two
+invariants that are written down as global but are really *per process*:
+
+- **One decode budget.** Two processes each admit up to the full ceiling
+  against one GPU, so admission control stops meaning anything.
+- **One queue, one settings file.** `save_settings` writes the whole file
+  from memory and never re-reads the disk, so a process holding a stale
+  copy silently erases whatever another added. Reproduced: with sources A
+  and B loaded, a second writer adding C, then toggling *queue retention*
+  in the first — an unrelated setting — left A and B and destroyed C. This
+  is believed to be how a configured source went missing in real use.
+
+`instance.rs` claims a Unix socket before any expensive setup; a later
+launch hands over its paths, asks the running instance to come to the
+front, and exits 0 (measured at ~1ms). Design notes:
+
+- **Connect-first, never a lock file.** A lock can be inherited from a
+  process that died holding it; a dead instance simply refuses connections,
+  which is the signal wanted. A `kill -9` leaves the socket file behind and
+  the next launch reclaims it — verified.
+- **Keyed on the config directory**, not the uid. Isolating HOME isolates
+  the instance, which is what lets a sandboxed run coexist with the real
+  app instead of fighting it for the socket.
+- **Paths are absolutised by the sender**, whose cwd is the relevant one.
+- **The accept loop is a worker thread** feeding a channel drained in the
+  event loop — blocking work stays off the render thread.
+- `TESSERA_ALLOW_MULTI=1` opts out, for development only.
+
+Handed-off files play immediately rather than queueing quietly, matching
+the rule positional paths already follow: opening a video has to play that
+video. They are also moved to the head of the pending queue, which is what
+makes the no-tile branch deterministic — the window it opens comes up on
+the file that was just asked for, not on whatever the cursor pointed at.
+
+### Next: where new videos go
+
+The policy lives in exactly one place, `open_handed_off`, which already has
+both outcomes wired: play on an existing tile, or open a wall window for it
+(today the second only fires when there is no tile to use). A setting to
+choose between them — "play in an existing stream" vs. "give it its own
+window", the VLC/Celluloid distinction — is a branch at that call site plus
+a `UiSettings` field, not new machinery.
+
+**Effort**: S (for the setting)
+
+---
+
 ## 9. Credential and key management
 
-Status: **not started** — deliberately deferred, see below.
+Status: **not started** — deliberately deferred, see below. File modes
+are now tightened (2026-08-31); everything else here stands.
 
-Credentials currently live in plaintext: `~/.config/opentessera/sources.conf`
-(`plex_token`, `jellyfin_key`) and, since sources moved into the settings
-panel, inside the `sources = [...]` JSON line of `settings.conf`. The
-friendlier sign-in flows (#10) do not change that — they only mean the user
-never has to *handle* the token; one still ends up on disk.
+Credentials currently live in plaintext in three places, not two:
+`~/.config/opentessera/sources.conf` (`plex_token`, `jellyfin_key`); the
+`sources = [...]` JSON line of `settings.conf`, since sources moved into
+the settings panel; and — the one this entry used to miss — **`queue.json`**,
+because a Plex/Jellyfin direct-play URI *is* the token: every persisted
+item carries `?api_key=…` or `?X-Plex-Token=…` in its `uri`, and again in
+`thumb_url`. The friendlier sign-in flows (#10) do not change any of that —
+they only mean the user never has to *handle* the token; one still ends up
+on disk.
 
 This is knowingly fine for now (single developer, one machine, services
 reachable only on the LAN) and knowingly not fine as soon as any of those
@@ -643,9 +699,14 @@ stops being true. It should be designed properly rather than patched in:
 - **What is stored.** Prefer a revocable, per-device token over an account
   password; never persist passwords. Record which server minted it so it
   can be invalidated.
-- **File permissions and migration.** `settings.conf` is written 0644 today
-  and has held tokens; a migration needs to move existing secrets out AND
-  tighten or rewrite the old file.
+- **File permissions and migration.** *Partly done (2026-08-31).* Both
+  token-bearing files the app writes — `settings.conf` and `queue.json` —
+  now go through `write_private` in `main.rs`: created 0600, and existing
+  files chmod'd on the next write, so an install predating the change is
+  tightened rather than left behind. `sources.conf` is hand-written and
+  untouched. This is the cheap half; a migration still needs to move the
+  secrets out of these files entirely, at which point the mode stops being
+  the only thing protecting them.
 - **Logging and screenshots.** `Source::label()` is printed at startup, put
   in window titles and drawn in the settings/library panels. Audit that no
   path can surface a token, including `TESSERA_DUMP_DIR` screenshots and
@@ -659,7 +720,48 @@ stops being true. It should be designed properly rather than patched in:
 
 ## 10. Friendlier server sign-in
 
-Status: **implemented** (2026-08-27)
+Status: **implemented** (2026-08-27); library picker added 2026-09-01
+
+### Library picker (2026-09-01)
+
+Signing in was friendly; saying *which library* was not. Both flows ended
+by committing a source scoped to whatever sat in a free-text "library" box
+— a name the user had to type before ever being shown one. Worse, the add
+tore the form down (`AddForm::clear` + `Auth::reset`), so a second library
+from the same server meant walking through the whole plex.tv link again.
+One library per sign-in, name typed from memory.
+
+Choosing a server now *lists* its libraries instead of committing:
+
+- Tick any number → one `Source` per library, which is what makes them
+  browse separately (distinct `label()` → distinct catalog entries).
+- "add all as one source" keeps the whole-server behaviour.
+- "back" returns to the server list without re-linking.
+- The pasted-token/API-key paths get "browse libraries" too, so they are
+  not second-class.
+- Adding a batch reports duplicates without aborting the rest; only a clean
+  add closes the form, so the picker stays up for the other libraries.
+
+`ServerLibraries` + `ServerKind` in `auth.rs` carry both flows through one
+worker request and one picker widget; only the `Source` a tick becomes
+differs.
+
+**Which libraries are offered** is decided differently per server, and the
+difference is load-bearing:
+
+- **Plex** — `type == "movie"` on `/library/sections` is authoritative.
+- **Jellyfin** — `CollectionType` is *not*. A real server here reports
+  `CollectionType: null` for a library holding 30 movies, while `Playlists`
+  is properly typed and holds none; filtering on the type offers exactly
+  the wrong one of the two. So each folder is counted with
+  `Limit=0` (`TotalRecordCount`, no items) and offered if it holds movies
+  or declares itself a movie library and is merely empty.
+
+Counts are shown either way — `_sx2 (4279 movies)` vs `Movies (30 movies)`
+is the whole decision, and it is invisible without them.
+
+Still open: only movie libraries are offered, because `Source::list` only
+serves movies. TV libraries need a listing path before they can be picked.
 
 Typing an API key or `X-Plex-Token` is the least friendly part of adding a
 source. All three of these already exist in the Quest app and port over:
@@ -695,6 +797,375 @@ Notes from the port:
 
 Whatever these produce still lands on disk, so #9 is the follow-up, not an
 alternative.
+
+---
+
+## 18. Chapter markings in the transport
+
+Status: **not started**
+
+Celluloid draws chapter boundaries on its seek bar and lets you jump
+between them; a two-hour film with chapters is far easier to navigate than
+one long undifferentiated rail. Nothing about this is wall-specific, which
+is rather the point — the transport is already a real transport, and this
+is the obvious missing piece of it.
+
+### Where the data comes from
+
+mpv already has it, and the pattern for reading it already exists here:
+
+- `chapter-list` — a node property, so requesting it as a string returns
+  JSON: an array of `{ "title": ..., "time": <seconds> }`. This is exactly
+  how `Tile::refresh_tracks` reads `track-list`, and should be read the
+  same way, into the same kind of cache on `Tile`.
+- `chapters` — the count; `chapter` — the current index, and **settable**,
+  which gives prev/next for free without arithmetic on timestamps.
+
+Refresh where `refresh_tracks()` is already called: on `FileLoaded`. A
+chapterless file (and every live stream) simply yields an empty list and
+nothing is drawn.
+
+### Drawing it
+
+The scrub bar is an `egui::Slider` whose rail is drawn at
+`spacing.slider_width`, which the transport sets to `scrub_w` — so the rail
+rect is known and marks can be painted over it from the `Response`. Two
+things to respect, both already documented invariants:
+
+- **Marks are explicit pixel sizes, so they take `k` at the call site.**
+  The chip is style-scaled, not layer-scaled, and style scaling does not
+  reach painter-drawn geometry (see §15).
+- **The chapter list rides in `TileUiInfo`, cloned only for the chip
+  tile.** The track lists already work this way after the per-frame
+  snapshot work — cloning a chapter list for every tile every frame is the
+  same waste in a new coat.
+
+Worth having beyond the marks themselves: the current chapter's title
+beside the time readout, and click-a-mark to seek. Keys for prev/next
+chapter would have to go through `OverlayState::pending_seek`'s coalescing
+if they are made repeatable, or be declared non-repeating like every other
+toggle (§14).
+
+**Effort**: S–M
+
+---
+
+## 19. Security cameras as a source
+
+Status: **implemented** (2026-09-03)
+
+A live camera is, to this app, a media item that happens never to end.
+`Source::Cameras` joins the enum beside Plex and Jellyfin, `list()` returns
+one `MediaItem` per stream, and a camera is queued, tiled, pinned, soloed
+and dragged between screens exactly like a film. No new plumbing in the
+queue, the layout or the budget — which was the test of whether `Source`
+was drawn in the right place.
+
+### Streams directly, not a vendor API
+
+The original sketch here was a UniFi Protect client. Probing real hardware
+killed it, and rightly:
+
+- Protect's API needs an API key **and** a self-signed-certificate bypass —
+  the controller presents `CN=unifi.local` on `192.168.1.1`, so strict
+  verification fails and hostname verification cannot succeed either. That
+  means a custom rustls verifier, a new direct dependency, and a
+  vendor-specific parser.
+- All of which buys is a URL that mpv was always going to open anyway.
+
+So a camera source is a list of stream URLs. It works with any camera that
+speaks RTSP — or MJPEG over HTTP, or HLS — with no key, no certificate
+handling, and no per-vendor client to maintain.
+
+**Discovery still does the tedious half.** Ubiquiti devices answer a UDP
+broadcast on port 10001 with their name, model and address and **no
+credentials at all**, so the scan names the cameras and only the stream
+path has to be supplied. Verified against real hardware: three cameras
+(two G4 Domes, a G6 Turret) and the controller. Two pitfalls found by doing
+it rather than reading about it:
+
+- A gateway reports *every* interface, WAN included, so trusting the
+  payload's address listed a public IP alongside the cameras as though it
+  were another device. A device is reachable at the address it answered
+  from; that is the only one worth having, and using it also collapses a
+  multi-interface device's several replies into one entry.
+- **A Protect-adopted camera does not serve RTSP itself** — 554 and 7441
+  are both refused on the camera. Its stream comes from the controller, at
+  `rtsps://<controller>:7441/<alias>`, with RTSP enabled per camera in
+  Protect. The form says so, because the guessed `rtsp://<address>:554/`
+  prefill is right for a generic camera and wrong for these.
+
+### What a stream with no end actually broke
+
+1. **mpv options stopped being global.** `TileOptions` was one struct
+   applied identically to every tile, and its 512 MiB demuxer cache is
+   exactly backwards for a live feed — that is not resilience, it is
+   latency. Options now key off the item: live gets `profile=low-latency`,
+   `rtsp-transport=tcp`, `network-timeout=10`, an 8 MiB cache and no
+   readahead; recorded gets what it always had. `set_cache_mb` skips live
+   tiles, so changing the global cache setting cannot hand back the latency
+   the live profile just removed.
+2. **Looping is meaningless** and is no longer set for live items — mpv
+   would only ever act on it after an EOF that never arrives.
+3. **The decode budget was being told the stream weighs nothing.** A live
+   stream reports `0x0` at file-load: mpv has the container open but has
+   not seen a frame, and the low-latency profile deliberately probes as
+   little as possible. `StreamSpec { width: 0, height: 0 }` weighs zero, so
+   a wall of cameras would have admitted itself for free — undermining
+   admission control in exactly the case it exists for. Two halves to the
+   fix: a zero-size `Loaded` no longer updates the budget (the placeholder
+   stands), and `ensure_texture` now reports a size *change*, so the first
+   real frame re-reports the stream and the budget corrects itself.
+   Observed end to end: `0x0` → "holding the budget estimate" →
+   `loaded 640x360@30`.
+4. **Delete is refused.** There is no file to remove and the trash sits
+   right there on the transport next to a live feed. The compiler demanded
+   this the moment `SourceKind::Camera` was added, which is the enum
+   earning its keep.
+
+`SourceKind::is_live()` is where the distinction lives, rather than
+guessing from a URI scheme, so a future source cannot forget to declare it.
+
+### Verified
+
+Discovery found the real cameras through the real UI; a source was
+assembled, persisted and re-listed with each camera appearing in the
+library beside films, with the same queue and play buttons. Playback was
+tested against a genuinely endless MPEG-TS over UDP (the Protect streams
+need an alias this build has no way to obtain): it ran at `1.00x 15.0fps
+[640x360] drops=0`, with the budget correcting itself as above.
+
+### A stream that will not open must say so
+
+Found in use, and three separate defects behind one symptom — cameras
+queued, the queue advanced, and the last frame of the *previous* item just
+sat there:
+
+1. **A failed load was invisible.** `load()` is async, so a bad stream
+   surfaces as an end-of-file event carrying an error code, which was
+   `eprintln!`d and otherwise dropped. The tile kept its old texture, so a
+   failure was indistinguishable from a freeze — the queue had moved on and
+   the picture had not. Now the frame is cleared and the reason is said out
+   loud: *"Carport: could not open the stream (unknown format)"*.
+   `tessera_mpv::error_name` is public for this.
+2. **`load()` did not re-apply per-item options.** They were set once, at
+   tile *creation*, from whatever that tile first held — but one queue
+   mixes films and cameras freely. A camera loaded into a tile built for a
+   film inherited a 512 MiB demuxer cache, which on a live feed is not
+   resilience but latency. The options that differ are now re-derived on
+   every load, in both directions.
+3. **The prefill was a wrong answer that looked like a right one.** Taking
+   a discovered camera filled in `rtsp://<camera>:554/`, which is a fair
+   guess for a generic camera and simply false for a Ubiquiti one: those
+   refuse 554, because the stream comes from the controller. It was
+   accepted, saved and queued, and only failed at playback. A "UVC" model
+   now gets an empty field, an amber "needs the controller's url" beside
+   it, and instructions naming the Protect setting to turn on.
+
+The through-line: the app knew the stream had failed and had the model
+string that predicted it would, and told the user neither.
+
+### Pause makes a camera fall behind, so resume rejoins
+
+A paused live tile keeps demuxing, so it comes back late. Measured on a 4K
+Protect feed, the lag tracks pause time 1:1 and then stops:
+
+| paused | behind on resume |
+|---|---|
+| 5s | 5.03s |
+| 10s | 10.02s |
+| 20s / 40s / 60s | 10.26s |
+
+The ceiling is the 8 MiB live cache at that camera's bitrate — pause longer
+and mpv simply stops reading. Ten seconds is a lot on a security camera.
+
+**Resuming a live tile now rejoins at the edge**, because on a camera
+"play" means "show me now", not "show me what I missed". Seeking cannot do
+it: mpv *accepts* a forward seek on a live stream, returns success, and
+changes nothing — measured identical before and after. A reload does, and
+took 0.07s on a LAN camera, taking 10.09s of lag to 0.00s.
+
+The transport says so too. A live tile has no duration to scrub and nothing
+to seek, so that space carries a **LIVE** indicator instead: green at the
+edge, amber and clickable with the lag on it (`LIVE −13s`) when behind — for
+drift that arrives without an explicit pause, such as a network stall. The
+seek buttons and the time readout are hidden for live tiles, both being
+meaningless.
+
+(The first cut of that label led with `●` U+25CF, which is not in egui's
+bundled fonts and rendered as tofu — the house rule about checking a glyph
+before trusting it, ignored and then immediately paid for.)
+
+### Reconnect, and why an error event is not enough
+
+*Done (2026-09-03).* A live tile that drops now retries on its own, backing
+off 1s → 2s → 5s → 10s → 20s → 30s and then holding there forever. It never
+gives up: a wall is a thing you leave running, and a camera that comes back
+on Monday should simply be there again. Only the first drop raises a
+notice; the rest are the retry loop doing its job.
+
+**The naive version does not work, and testing is the only way to find
+that out.** Reconnecting on `EndFile` with an error covers a stream that
+refuses to *open* — but killing a source mid-play produced no end-of-file,
+no error, and no event of any kind. mpv simply stopped, and the tile sat at
+`0.00x 0.0fps` indefinitely. The most ordinary camera failure there is —
+one that stops sending — is silent.
+
+So the trigger is the clock, not an event: a live tile whose `time-pos`
+stops advancing for [`STALL_TIMEOUT`] has dropped, whatever it did or did
+not report. Detection cannot be instant, because after the source goes away
+mpv plays out its buffer — up to the ~10s live cache — so the clock keeps
+moving for a while first; the timeout is measured from when it stops.
+
+Two things the stall clock has to be told about, or it reads them as drops:
+a fresh load restarts it (or a reconnect is judged on the silence that
+preceded it), and so does resuming, since a paused tile's clock has not
+moved for as long as it was paused.
+
+Verified end to end against a killable source: kill it → *"stopped sending
+— retry 1 in 1s"* → the backoff escalates → bring it back → *"Flaky Cam is
+back"*, playing at 1.00x with no drops and no intervention. The transport
+shows `reconnecting…` in red throughout.
+- **Substream selection.** Protect exposes high/medium/low. A wall of
+  sixteen wants low, the pinned one wants high — switching channel on
+  pin/unpin remains the good idea it was, but it needs per-camera URLs for
+  each quality, which the current form would make tedious.
+- ~~**Snapshot thumbnails.**~~ *Done (2026-09-03).* No vendor snapshot
+  endpoint and no auth header needed after all: the same `vo=image` frame
+  extraction §20 uses for files works on any URL mpv can open, including
+  `rtsps://`, in 0.34s on a real camera. Refresh is hourly and
+  **opportunistic** — the TTL is only checked when something actually draws
+  the thumbnail, so cameras nobody is looking at cost nothing. Verified by
+  shortening the TTL: the entry regenerated on schedule while the library
+  was open and stopped the moment the tab was switched away. A stale
+  thumbnail is refreshed *while still on screen*, and a refresh that fails
+  keeps the old picture rather than dropping to a placeholder — a camera
+  that is briefly unreachable still shows what it watches.
+- **ONVIF WS-Discovery** (UDP multicast 239.255.255.250:3702) would find
+  non-Ubiquiti cameras the same way, and can report the RTSP path itself —
+  which would remove the one manual step left.
+- The scan lists every Ubiquiti device, not just cameras; a switch or an AP
+  will appear in the list too.
+
+**Effort**: L — done, minus the gaps above.
+
+---
+
+## 20. Thumbnails for local files
+
+Status: **implemented** (2026-09-03)
+
+Plex and Jellyfin hand over a poster URL; a file on disk had nothing, so
+every local item drew a grey placeholder. A frame out of the file is the
+obvious substitute.
+
+**Extraction uses libmpv, not ffmpeg.** `vo=image` writes a frame to a
+directory and `frames=1` stops after the first — no display, no GL context,
+no external tool, and libmpv is already a hard dependency. Measured at
+**0.37s for a 77 GB 4K HEVC remux on cold storage**, so one worker keeps up
+with what a scrolling list asks for. The worker takes its own `MpvLib`
+handle (a dlopen of a library already in the process) rather than threading
+the main one through `Screen::new` and `create_screen`. These instances
+never get a render context, so the GL-thread teardown rule does not apply
+to them.
+
+**The cache is central and fingerprinted.** `$XDG_CACHE_HOME/opentessera/
+thumbs`, one JPEG per fingerprint — explicitly *not* beside the user's
+media, which was the stated requirement, and not in the config directory
+either, because this is regenerable and config is not. Deleting the
+directory is supported and costs a re-extract.
+
+The fingerprint is FNV-1a over **path, size and mtime**. Content-hashing 77
+GB to decide whether to draw a 9 KB image is absurd, and those three are
+already on every local `MediaItem`, so a cache *lookup* costs no I/O — which
+is what makes it usable while scrolling. Re-encoding in place moves the
+mtime and re-extracts; moving the file does too. For a cache that is the
+right trade.
+
+Writes go to a scratch directory and are renamed into place, so a cache hit
+always means "complete" — a killed process leaves a stray directory, never a
+truncated JPEG that would be served forever.
+
+Verified: four clips extracted correct distinct frames; a restart reused
+them byte-identically with no regeneration; `touch` on a file produced a new
+fingerprint and a new entry; and nothing whatsoever was written next to the
+media.
+
+### Known gaps
+
+- **The disk cache never shrinks.** A changed file orphans its old entry.
+  The in-memory texture cache has an LRU bound; the disk one wants a sweep
+  (age, or total size) — worth doing before anyone points a library of tens
+  of thousands of files at it.
+- Extraction is single-worker, shared with remote poster fetches. Fine at
+  0.37s each, but a slow network mount will queue behind itself.
+- The sample point is a fixed 25%. Something smarter (scene detection, or
+  skipping near-black frames) would occasionally do better.
+
+---
+
+## 21. Drag and drop
+
+Status: **implemented** (2026-09-03)
+
+Dragging a video from the file manager onto a window plays it; dragging
+onto the browser window adds it to the queue instead. Multiple files play
+the first and queue the rest, matching what a hand-off from a second launch
+already does — both go through one function, so they cannot drift apart.
+
+**Drops target the tile they land on.** winit reports `DroppedFile` with no
+pointer position, so this reads `Screen::cursor`, which was expected to be
+stale during an X11 drag (the source holds a pointer grab). Tested with a
+real GTK XDND source rather than assumed: with the pointer parked over the
+top-left tile beforehand, dropping on the bottom-right quadrant of a 2×2
+wall loaded tile 3, and dropping on the top-right loaded tile 1. It works
+here; it depends on the toolkit and WM delivering motion during the drag,
+so it is a refinement rather than a guarantee — the drop still lands
+somewhere sensible either way.
+
+winit delivers one event per file with no grouping, so drops are
+accumulated per window as they arrive and acted on together in the frame
+block: a multi-file drop is one gesture and behaves like one.
+
+A `HoveredFile` banner says what will happen before the user commits —
+"drop to play" on a wall, "add to the queue" on the browser. It is
+window-scoped (`OverlayState::drop_target`, an `Option<WindowId>`) for the
+usual reason: every screen runs its own egui pass over one shared struct,
+and a plain bool would light the hint on all of them.
+
+Both that banner and the pre-existing empty-wall panel needed an explicit
+`set_width`: `vertical_centered` inside an `Area` claims the rest of the
+window, which drew the hint as a full-width band across the wall. Same trap
+`with_layout` sets in the gear panel.
+
+### Playing and queueing are alternatives
+
+First cut got this wrong: every dropped file was appended to the queue *and*
+the first was loaded onto a tile, so it played while also sitting at the
+head of the pending tail — press next and the same film started again,
+which reads as the wall being stuck on it. The comment even said "put it
+next in line as well as playing it", which is the bug stated out loud.
+
+The queue is now touched only on the branch that needs it:
+
+| where it lands | queue |
+|---|---|
+| plays on a tile | only the *extras* from a multi-file drop |
+| dropped on the browser | all of them; nothing plays |
+| nowhere to play | all of them, first moved to the head, then a window opens on it |
+
+This is the split `OverlayAction::PlayNow` already drew — a tile owns the
+item it is playing, and the queue holds what is still to come. Verified:
+dropping onto a wall with a three-item queue then pressing next four times
+walks the original queue and the dropped file never reappears; a
+three-file drop plays the first and queues exactly two.
+
+### Known gaps
+
+- Dropping onto a wall window with no tiles opens one, rather than adding a
+  tile to the window that was dropped on.
+- Only files are accepted. A dropped URL (`text/uri-list` pointing at
+  http) would be a reasonable thing to feed mpv directly.
 
 ---
 

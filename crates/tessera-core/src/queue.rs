@@ -163,9 +163,15 @@ impl PlaybackQueue {
 
     /// Reorders within the pending tail: the item at `from` is inserted
     /// immediately before the item currently at `to`.
+    ///
+    /// `to == len()` means "after everything". Drag-and-drop only ever
+    /// names an occupied index, but a move-one-later button has to be able
+    /// to reach the last slot — and note that "one later" is `from + 2`,
+    /// not `from + 1`: inserting before the item that already follows you
+    /// is where you started (see the adjacent-no-op test below).
     pub fn move_pending(&mut self, from: usize, to: usize) {
         let cur = self.current_index();
-        if from > cur && from < self.items.len() && to > cur && to < self.items.len() && from != to {
+        if from > cur && from < self.items.len() && to > cur && to <= self.items.len() && from != to {
             let item = self.items.remove(from);
             // After removal, positions above `from` shift down by one;
             // "insert before original `to`" accounts for that.
@@ -428,6 +434,22 @@ mod tests {
         q.move_pending(1, 3);
         q.move_pending(2, 1);
         assert_eq!(q.items().iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), vec!["a", "b", "c", "d", "e"]);
+    }
+
+    #[test]
+    fn move_one_place_later_reaches_the_last_slot() {
+        // The queue tab's ⏷ button. `to` is "insert before whatever is at
+        // this index", so one-place-later is from + 2 — and for the
+        // second-to-last item that index is len(), past the end.
+        let mut q = filled(); // [a b c d e], cursor on "b"
+        q.move_pending(2, 4); // "c" one place later
+        assert_eq!(q.items().iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), vec!["a", "b", "d", "c", "e"]);
+        q.move_pending(3, 5); // "c" again, now into the final slot
+        assert_eq!(q.items().iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), vec!["a", "b", "d", "e", "c"]);
+        // Past the end is still refused, and the cursor never moves.
+        q.move_pending(3, 6);
+        assert_eq!(q.items().iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), vec!["a", "b", "d", "e", "c"]);
+        assert_eq!(q.current().unwrap().title, "b");
     }
 
     #[test]

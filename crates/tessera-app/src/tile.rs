@@ -14,6 +14,47 @@ pub struct TileOptions {
 pub enum TileEvent {
     EndOfFile,
     Loaded { width: u32, height: u32, fps: f64, codec: String },
+    /// The stream could not be opened, or died mid-play.
+    Failed { reason: String },
+    /// A live stream that had dropped came back on its own.
+    Reconnected,
+}
+
+/// A live stream that dropped, and when to try it again.
+struct Reconnect {
+    attempts: u32,
+    next_at: std::time::Instant,
+}
+
+/// Backoff between reconnect attempts, in seconds, holding at the last
+/// value forever after.
+///
+/// Quick at first because most drops are a blip — a switch renegotiating,
+/// a camera rebooting after a firmware update — and those come back within
+/// seconds. Then it backs off, because a camera that has been unplugged
+/// should not be a permanent connection attempt every second for the rest
+/// of the week. It never gives up: a wall is a thing you leave running,
+/// and a camera that returns on Monday should simply be there again.
+const RECONNECT_BACKOFF_SECS: [u64; 6] = [1, 2, 5, 10, 20, 30];
+
+/// How long a live stream may go without its clock advancing before it is
+/// treated as dropped.
+///
+/// Necessary because **a dead stream frequently reports nothing at all**.
+/// Killing the source mid-play produced no end-of-file, no error, no event
+/// of any kind — mpv simply stopped, and the tile sat at 0.0fps
+/// indefinitely. Reconnecting only on an error event therefore misses the
+/// most ordinary failure there is: a camera that stops sending.
+///
+/// Detection is not instant, and cannot be: after the source goes away mpv
+/// plays out whatever it has buffered — up to the ~10s live cache — so the
+/// clock keeps advancing for a while before it stops. This is measured from
+/// the moment it *stops*, so the total is roughly the buffer plus this.
+const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn reconnect_delay(attempts: u32) -> std::time::Duration {
+    let i = (attempts.max(1) as usize - 1).min(RECONNECT_BACKOFF_SECS.len() - 1);
+    std::time::Duration::from_secs(RECONNECT_BACKOFF_SECS[i])
 }
 
 /// One entry of mpv's track-list (audio or subtitle stream).
@@ -61,9 +102,12 @@ impl TrackInfo {
     }
 }
 
-// The mpv client API is fully thread-safe; GL resources are destroyed via
-// destroy_gl before tiles are handed to another thread (parallel shutdown).
-unsafe impl Send for Tile {}
+// NB: deliberately NOT `unsafe impl Send for Tile`. A Tile owns a
+// RenderContext, and freeing one off its GL thread segfaults inside mpv —
+// which is the whole reason `split_for_teardown` exists. Nothing sends a
+// Tile across threads any more (parallel shutdown moves the bare `Mpv`,
+// which is Send on its own), so leaving Tile !Send lets the compiler keep
+// that invariant instead of a comment.
 
 pub struct Tile {
     pub render: RenderContext,
@@ -78,8 +122,12 @@ pub struct Tile {
     pub frames: u64,
     pub last_time_pos: f64,
     pub duration: f64,
-    pub min_rate: f64,
     pub loaded: bool,
+    /// The recorded-media cache size and loop setting this tile was built
+    /// with. Kept so [`Tile::load`] can re-derive the right options for
+    /// whatever it is about to play — see the comment there.
+    cache_mb: u32,
+    loop_file: bool,
     /// Track caches (mpv track-list) refreshed on file load and whenever the
     /// track panel opens — the overlay snapshot reads them every frame.
     pub audio_tracks: Vec<TrackInfo>,
@@ -87,6 +135,11 @@ pub struct Tile {
     /// The resume load set mpv's `start` option; cleared on FileLoaded so
     /// the NEXT file (queue advance) starts from its own beginning.
     pending_start_reset: bool,
+    /// Set while a live stream is down and being retried.
+    reconnect: Option<Reconnect>,
+    /// When this tile's clock last moved. A live stream whose clock stops
+    /// has dropped, whether or not it said so.
+    progress_at: std::time::Instant,
 }
 
 /// Playback state that survives a screen move. The mpv instance (and its
@@ -110,6 +163,13 @@ impl Tile {
         opts: &TileOptions,
         resume: Option<&ResumeState>,
     ) -> Result<Tile, tessera_mpv::Error> {
+        // A live feed and a film want genuinely different players. mpv
+        // options were one global set applied identically to every tile,
+        // which for a camera is wrong in the one way that matters: a 512
+        // MiB demuxer cache on a stream nobody can seek is not resilience,
+        // it is latency. Everything below keys off the item, so the
+        // difference lives in one place instead of at each call site.
+        let live = item.is_live();
         let mut options: Vec<(&str, &str)> = vec![
             ("vo", "libmpv"),
             ("hwdec", opts.hwdec.as_str()),
@@ -118,6 +178,16 @@ impl Tile {
             ("terminal", "no"),
             ("keep-open", "no"),
         ];
+        if live {
+            // Ordered first so the explicit options below still win: mpv
+            // applies a profile where it appears.
+            options.push(("profile", "low-latency"));
+            // UDP loses packets and cameras are not worth tearing frames
+            // for; TCP is what every NVR client asks for.
+            options.push(("rtsp-transport", "tcp"));
+            // Don't sit forever on a camera that has gone off the network.
+            options.push(("network-timeout", "10"));
+        }
         if opts.audio {
             // Don't pin `ao`: let mpv auto-negotiate (pulse via PipeWire on
             // Linux, coreaudio on macOS). Every tile starts muted — a video
@@ -130,12 +200,20 @@ impl Tile {
         } else {
             options.push(("audio", "no"));
         }
-        if opts.loop_file {
+        // Looping a stream with no end is meaningless, and mpv would only
+        // ever act on it after an EOF that never arrives.
+        if opts.loop_file && !live {
             options.push(("loop-file", "inf"));
         }
         options.push(("cache", "yes"));
-        let cache = format!("{}MiB", opts.cache_mb);
+        // Live: a small cache, because every byte buffered is a second
+        // further behind. Recorded: whatever the user configured, which is
+        // there to ride out a slow network read of a file.
+        let cache = if live { "8MiB".to_owned() } else { format!("{}MiB", opts.cache_mb) };
         options.push(("demuxer-max-bytes", &cache));
+        if live {
+            options.push(("demuxer-readahead-secs", "0"));
+        }
         options.push(("msg-level", if opts.log_verbose { "all=v" } else { "all=error" }));
 
         let mpv = Mpv::new(lib, &options)?;
@@ -173,11 +251,14 @@ impl Tile {
             frames: 0,
             last_time_pos: -1.0,
             duration: -1.0,
-            min_rate: f64::MAX,
             loaded: false,
+            cache_mb: opts.cache_mb,
+            loop_file: opts.loop_file,
             audio_tracks: Vec::new(),
             subtitle_tracks: Vec::new(),
             pending_start_reset,
+            reconnect: None,
+            progress_at: std::time::Instant::now(),
         })
     }
 
@@ -196,15 +277,114 @@ impl Tile {
     }
 
     pub fn load(&self, item: &MediaItem) -> Result<(), tessera_mpv::Error> {
+        // This mpv instance was configured for whatever the tile held when
+        // it was *created*, and one queue mixes films with cameras freely.
+        // So the options that differ are re-applied here, in both
+        // directions — otherwise a camera loaded into a tile that was
+        // playing a film inherits a 512 MiB demuxer cache, which on a live
+        // feed is not resilience but half a minute of latency, and a film
+        // loaded after a camera inherits a cache far too small to ride out
+        // a slow read.
+        let live = item.is_live();
+        let cache = if live { "8MiB".to_owned() } else { format!("{}MiB", self.cache_mb) };
+        for (key, value) in [
+            ("demuxer-max-bytes", cache.as_str()),
+            ("demuxer-readahead-secs", if live { "0" } else { "1" }),
+            ("cache-pause", if live { "no" } else { "yes" }),
+            // Harmless for anything that is not RTSP, and UDP loses packets.
+            ("rtsp-transport", "tcp"),
+            ("network-timeout", if live { "10" } else { "0" }),
+            // Looping a stream with no end would only ever act on an EOF
+            // that never arrives.
+            ("loop-file", if self.loop_file && !live { "inf" } else { "no" }),
+        ] {
+            if let Err(e) = self.mpv.command(&["set", key, value]) {
+                eprintln!("tile {}: set {key} failed: {e}", self.id);
+            }
+        }
         // Async: opening a file can block on I/O (network sources), which
         // would stall the whole render loop.
         self.mpv.load_file_async(&item.uri, "replace")
     }
 
-    pub fn set_paused(&self, paused: bool) {
+    pub fn set_paused(&mut self, paused: bool) {
+        // Resuming a live stream rejoins it at the live edge, because on a
+        // camera "play" means "show me now", not "show me what I missed".
+        //
+        // The demuxer keeps reading while paused, so a paused camera falls
+        // behind by however long it was paused — bounded by the live cache,
+        // which measured 10.3s on a 4K feed (8 MiB at that bitrate). Ten
+        // seconds is a lot on a security camera.
+        let resuming_live = !paused && self.item.is_live() && self.is_paused();
         if let Err(e) = self.mpv.command(&["set", "pause", if paused { "yes" } else { "no" }]) {
             eprintln!("tile {}: set pause failed: {e}", self.id);
         }
+        if !paused {
+            // The clock has not moved for as long as this was paused, which
+            // is not a stall. Start it over.
+            self.progress_at = std::time::Instant::now();
+        }
+        if resuming_live {
+            self.go_live();
+        }
+    }
+
+    /// Fires a reconnect attempt if one is scheduled and due.
+    ///
+    /// Deliberately driven from the render tick rather than a timer thread:
+    /// the retry is a `loadfile`, which is exactly what the tick already
+    /// does, and a tile that is not being ticked is not on screen anyway.
+    fn retry_if_due(&mut self) {
+        let Some(r) = &self.reconnect else { return };
+        if std::time::Instant::now() < r.next_at {
+            return;
+        }
+        // Nothing to reconnect to while the user has it paused — and
+        // resuming rejoins on its own.
+        if self.is_paused() {
+            return;
+        }
+        let attempts = r.attempts;
+        self.reconnect = Some(Reconnect {
+            attempts,
+            // Re-armed before the attempt, so a load that never completes
+            // (a camera answering but never sending a frame) still gets
+            // retried rather than wedging here forever.
+            next_at: std::time::Instant::now() + reconnect_delay(attempts + 1),
+        });
+        self.progress_at = std::time::Instant::now();
+        self.go_live();
+    }
+
+    /// True while a live stream is down and being retried.
+    pub fn reconnecting(&self) -> bool {
+        self.reconnect.is_some()
+    }
+
+    /// Rejoins a live stream at its current edge; a no-op for recorded media.
+    ///
+    /// By reloading, not seeking. Seeking forward on a live stream *looks*
+    /// like it should work — mpv accepts the command and returns success —
+    /// and changes nothing at all; measured, the lag was identical before
+    /// and after. A reload genuinely returns to the edge and costs 0.07s on
+    /// a LAN camera, which is below noticing.
+    pub fn go_live(&self) {
+        if !self.item.is_live() {
+            return;
+        }
+        if let Err(e) = self.mpv.load_file_async(&self.item.uri, "replace") {
+            eprintln!("tile {}: could not rejoin the live stream: {e}", self.id);
+        }
+    }
+
+    /// Seconds behind the live edge — what the demuxer holds ahead of the
+    /// playback position. Zero for recorded media, which is not behind
+    /// anything.
+    pub fn behind_live(&self) -> f64 {
+        if !self.item.is_live() {
+            return 0.0;
+        }
+        self.mpv.get_f64("demuxer-cache-duration").unwrap_or(0.0)
     }
 
     /// Seeks the stream. `absolute` targets a position from the start;
@@ -342,7 +522,15 @@ impl Tile {
 
     /// Adjusts the demuxer cache at runtime (best effort — mpv applies it
     /// to ongoing demuxing where it can, and fully on the next load).
+    ///
+    /// Live tiles are left alone: the global cache setting exists to ride
+    /// out slow reads of a *file*, and applying it to a camera would hand
+    /// back the latency the live profile just removed.
     pub fn set_cache_mb(&mut self, cache_mb: u32) {
+        self.cache_mb = cache_mb;
+        if self.item.is_live() {
+            return;
+        }
         let v = format!("{cache_mb}MiB");
         if let Err(e) = self.mpv.command(&["set", "demuxer-max-bytes", &v]) {
             eprintln!("tile {}: set cache size failed: {e}", self.id);
@@ -355,9 +543,16 @@ impl Tile {
         let profile = std::env::var("TESSERA_PROFILE").map(|v| v != "0").unwrap_or(false);
         let t0 = std::time::Instant::now();
         let mut events = Vec::new();
+        self.retry_if_due();
         while let Some(ev) = self.mpv.poll_event() {
             match ev {
                 MpvEvent::FileLoaded => {
+                    // A load that follows a failure is a recovery, and is
+                    // worth saying so — a tile that went black and came back
+                    // silently leaves you wondering whether you imagined it.
+                    if self.reconnect.take().is_some() {
+                        events.push(TileEvent::Reconnected);
+                    }
                     if self.pending_start_reset {
                         let _ = self.mpv.command(&["set", "start", "none"]);
                         self.pending_start_reset = false;
@@ -386,6 +581,10 @@ impl Tile {
                         self.id, w, h, fps, codec, pixfmt, hwdec, ao
                     );
                     self.loaded = true;
+                    // A fresh load starts the stall clock over; otherwise a
+                    // reconnect would be judged on the silence that
+                    // preceded it.
+                    self.progress_at = std::time::Instant::now();
                     self.duration = self.mpv.get_f64("duration").unwrap_or(-1.0);
                     self.refresh_tracks();
                     events.push(TileEvent::Loaded { width: w, height: h, fps, codec });
@@ -396,6 +595,48 @@ impl Tile {
                 MpvEvent::EndFile { reason, error } => {
                     if error != 0 {
                         eprintln!("tile {}: stream error ({reason:?}, code {error})", self.id);
+                        // Drop the frame still on screen. It belongs to the
+                        // item this tile played *before*, and leaving it up
+                        // makes a failed load look like a freeze — the
+                        // queue has moved on and the picture has not, which
+                        // reads as the app being stuck rather than the
+                        // stream being unopenable.
+                        self.destroy_gl(gl);
+                        self.tex_w = 0;
+                        self.tex_h = 0;
+                        self.loaded = false;
+                        let why = format!(
+                            "could not open the stream ({})",
+                            tessera_mpv::error_name(error).to_lowercase().replace('_', " ")
+                        );
+                        if self.item.is_live() {
+                            // A camera is not a file that failed to open —
+                            // it is a thing that will probably be back. Keep
+                            // the slot and keep trying.
+                            let attempts =
+                                self.reconnect.as_ref().map_or(0, |r| r.attempts) + 1;
+                            let wait = reconnect_delay(attempts);
+                            self.reconnect = Some(Reconnect {
+                                attempts,
+                                next_at: std::time::Instant::now() + wait,
+                            });
+                            println!(
+                                "tile {}: \"{}\" dropped — retry {attempts} in {}s",
+                                self.id,
+                                self.item.title,
+                                wait.as_secs()
+                            );
+                            // Only the first drop is announced; the rest are
+                            // the retry loop doing its job, and a toast every
+                            // thirty seconds for an unplugged camera is noise.
+                            if attempts == 1 {
+                                events.push(TileEvent::Failed {
+                                    reason: format!("{why} — reconnecting"),
+                                });
+                            }
+                        } else {
+                            events.push(TileEvent::Failed { reason: why });
+                        }
                     }
                 }
                 MpvEvent::Shutdown => {
@@ -409,7 +650,27 @@ impl Tile {
         let flags = self.render.update();
         let t2 = std::time::Instant::now();
         if flags & tessera_mpv::MPV_RENDER_UPDATE_FRAME != 0 {
-            self.ensure_texture(gl);
+            // A live stream reports no dimensions at file-load: mpv has the
+            // container open but has not seen a frame, and the low-latency
+            // profile deliberately probes as little as possible. The first
+            // real frame is where the size actually becomes known, so a
+            // size change here re-reports the stream — otherwise the decode
+            // budget keeps the 0x0 it was told, which weighs nothing, and a
+            // wall of cameras admits itself for free.
+            if self.ensure_texture(gl) && self.tex_w > 0 && self.tex_h > 0 {
+                let fps = self
+                    .mpv
+                    .get_f64("container-fps")
+                    .or_else(|| self.mpv.get_f64("estimated-vf-fps"))
+                    .unwrap_or(30.0);
+                let codec = self.mpv.get_string("video-codec").unwrap_or_default();
+                events.push(TileEvent::Loaded {
+                    width: self.tex_w as u32,
+                    height: self.tex_h as u32,
+                    fps,
+                    codec,
+                });
+            }
             if let Some(fbo) = self.fbo {
                 // Per render_gl.h, MPV_RENDER_PARAM_OPENGL_FBO=0 means the
                 // default framebuffer — mpv binds the target itself, so we
@@ -442,10 +703,31 @@ impl Tile {
         }
 
         let tp = self.mpv.get_f64("time-pos").unwrap_or(-1.0);
-        if tp >= 0.0 && self.last_time_pos >= 0.0 {
-            let delta = tp - self.last_time_pos;
-            if delta >= 0.0 && delta < 10.0 {
-                self.min_rate = self.min_rate.min(delta);
+        // A live stream that has stopped advancing has dropped, even though
+        // it never said so. Checked only for live tiles, and the paused
+        // check — an mpv round trip — only once the threshold is already
+        // exceeded, so the common path stays free.
+        if self.item.is_live() {
+            if tp > self.last_time_pos {
+                self.progress_at = std::time::Instant::now();
+            } else if self.reconnect.is_none()
+                && self.progress_at.elapsed() > STALL_TIMEOUT
+                && !self.is_paused()
+            {
+                let wait = reconnect_delay(1);
+                self.reconnect = Some(Reconnect {
+                    attempts: 1,
+                    next_at: std::time::Instant::now() + wait,
+                });
+                println!(
+                    "tile {}: \"{}\" stopped sending — retry 1 in {}s",
+                    self.id,
+                    self.item.title,
+                    wait.as_secs()
+                );
+                events.push(TileEvent::Failed {
+                    reason: "the feed stopped — reconnecting".to_owned(),
+                });
             }
         }
         let t4 = std::time::Instant::now();
@@ -459,14 +741,17 @@ impl Tile {
         events
     }
 
-    fn ensure_texture(&mut self, gl: &glow::Context) {
+    /// Ensures the FBO matches the stream's size. Returns true when the
+    /// size changed, which the caller reports so the budget can correct
+    /// itself.
+    fn ensure_texture(&mut self, gl: &glow::Context) -> bool {
         let w = self.mpv.get_i64("width").unwrap_or(0) as i32;
         let h = self.mpv.get_i64("height").unwrap_or(0) as i32;
         if w <= 0 || h <= 0 {
-            return;
+            return false;
         }
         if self.texture.is_some() && w == self.tex_w && h == self.tex_h {
-            return;
+            return false;
         }
         unsafe {
             if let Some(t) = self.texture.take() {
@@ -493,6 +778,7 @@ impl Tile {
             self.tex_w = w;
             self.tex_h = h;
         }
+        true
     }
 
     pub fn texture(&self) -> Option<<glow::Context as HasContext>::Texture> {
@@ -569,5 +855,36 @@ impl Tile {
             gl.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
         crate::png_util::write_png_rgb(path, w, h, &buf)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconnect_backs_off_then_holds_and_never_gives_up() {
+        let s = |a: u32| reconnect_delay(a).as_secs();
+        // Quick for the first few, because most drops are a blip.
+        assert_eq!(s(1), 1);
+        assert_eq!(s(2), 2);
+        assert_eq!(s(3), 5);
+        // Then it settles, rather than hammering an unplugged camera.
+        assert_eq!(s(6), 30);
+        // And holds there forever — a camera that comes back on Monday is
+        // simply there again, with no attempt cap to have exhausted.
+        assert_eq!(s(50), 30);
+        assert_eq!(s(u32::MAX), 30);
+        // Attempt 0 should not underflow into the last slot.
+        assert_eq!(s(0), 1);
+    }
+
+    #[test]
+    fn the_backoff_never_reaches_zero() {
+        // A zero delay would turn a dead camera into a busy loop issuing
+        // loadfile as fast as the render thread ticks.
+        for a in 0..64 {
+            assert!(reconnect_delay(a).as_secs() >= 1, "attempt {a}");
+        }
     }
 }

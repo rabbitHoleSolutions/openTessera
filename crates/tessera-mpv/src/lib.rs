@@ -109,7 +109,10 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-fn error_name(code: c_int) -> &'static str {
+/// Human-readable name for an mpv error code. Public because end-of-file
+/// events carry a raw code, and a tile that failed to open needs to say
+/// why rather than just going blank.
+pub fn error_name(code: c_int) -> &'static str {
     match code {
         -1 => "EVENT_QUEUE_FULL",
         -2 => "NOMEM",
@@ -255,7 +258,11 @@ impl Mpv {
             }
             let r = (lib.initialize)(handle);
             if r < 0 {
-                (lib.terminate_destroy)(handle);
+                // No explicit terminate_destroy here: `mpv` owns the handle
+                // and its Drop does exactly that, so calling both freed it
+                // twice. mpv_initialize failing is not exotic — running out
+                // of file descriptors is one way in (see raise_fd_limit),
+                // which is precisely when a double free is least welcome.
                 return Err(Error::Mpv(r, error_name(r).into()));
             }
             Ok(mpv)
