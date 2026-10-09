@@ -362,6 +362,27 @@ impl Screen {
         // overlay auto-hides after five seconds of no input, which is the
         // steady state, and a browser window never draws any of it.
         let draws_overlay = self.role == ScreenRole::Wall && overlay.visible;
+        // HUDs (grid, reticle, readout) a client has put on tiles: drawn
+        // whether or not the chrome is showing, placed like the compositor
+        // places the picture.
+        let huds: Vec<crate::hud::Placed> = if self.role != ScreenRole::Wall {
+            Vec::new()
+        } else {
+            self.tiles
+                .iter()
+                .zip(cells.iter())
+                .filter(|(_, cell)| cell.w > 0.0 && cell.h > 0.0)
+                .filter_map(|(t, cell)| {
+                    let hud = t.hud()?.clone();
+                    let view = t.view();
+                    Some(crate::hud::Placed {
+                        picture: tessera_core::layout::fit_aspect(cell, view.aspect(t.video_aspect())),
+                        source: view.source_rect(),
+                        hud,
+                    })
+                })
+                .collect()
+        };
         let hover = if !draws_overlay
             || overlay.tile_drag.map(|d| d.window_id) == Some(self.window.id())
         {
@@ -501,6 +522,7 @@ impl Screen {
             } else if visible {
                 overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, tile_drag, overlay.track_panel, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete, empty_hint);
             }
+            crate::hud::draw(ctx, &huds);
             if help_open {
                 overlay::draw_help(ctx, &mut help_open);
             }

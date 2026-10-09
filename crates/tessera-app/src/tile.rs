@@ -142,6 +142,11 @@ pub struct Tile {
     /// next queue item would cut into a film that has no bars.
     view: tessera_core::view::View,
     view_for: Option<String>,
+    /// A move from one view to another under way: drawn part way each frame.
+    view_anim: Option<ViewAnim>,
+    /// Drawn over the picture (grid, reticle, readout), for the same item as
+    /// the view; see `crate::hud`.
+    hud: Option<crate::hud::Hud>,
     /// The resume load set mpv's `start` option; cleared on FileLoaded so
     /// the NEXT file (queue advance) starts from its own beginning.
     pending_start_reset: bool,
@@ -156,6 +161,13 @@ pub struct Tile {
 /// render context) cannot cross GL contexts, so a moved tile is rebuilt
 /// from this snapshot: same item, resumed at `start`, same volume/mute/
 /// pause and track picks.
+/// An animated move between views (see `Tile::set_view_animated`).
+struct ViewAnim {
+    from: tessera_core::view::View,
+    start: std::time::Instant,
+    secs: f32,
+}
+
 pub struct ResumeState {
     pub start: f64,
     pub paused: bool,
@@ -282,6 +294,8 @@ impl Tile {
             subtitle_tracks: Vec::new(),
             view: resume.map_or(tessera_core::view::View::FULL, |r| r.view),
             view_for: resume.map(|_| item.id.clone()),
+            view_anim: None,
+            hud: None,
             pending_start_reset,
             reconnect: None,
             progress_at: std::time::Instant::now(),
@@ -435,9 +449,26 @@ impl Tile {
         self.mpv.get_f64("time-pos").unwrap_or(-1.0)
     }
 
-    /// The crop/zoom in effect: the one set for the item now playing, else
-    /// the full picture.
+    /// The crop/zoom in effect: the one set for the item now playing (part
+    /// way through an animated move, if one is under way), else the full
+    /// picture.
     pub fn view(&self) -> tessera_core::view::View {
+        if self.view_for.as_deref() != Some(self.item.id.as_str()) {
+            return tessera_core::view::View::FULL;
+        }
+        match &self.view_anim {
+            Some(a) => {
+                let t = (a.start.elapsed().as_secs_f32() / a.secs).min(1.0);
+                // Smoothstep: eases in and out, like a camera move
+                tessera_core::view::View::between(&a.from, &self.view, t * t * (3.0 - 2.0 * t))
+            }
+            None => self.view,
+        }
+    }
+
+    /// Where the view is heading (the end of a move under way), so moves
+    /// asked for in quick succession build on each other.
+    pub fn view_target(&self) -> tessera_core::view::View {
         if self.view_for.as_deref() == Some(self.item.id.as_str()) {
             self.view
         } else {
@@ -448,7 +479,31 @@ impl Tile {
     /// Sets the crop/zoom for the item now playing.
     pub fn set_view(&mut self, view: tessera_core::view::View) {
         self.view = view;
+        self.view_anim = None;
         self.view_for = Some(self.item.id.clone());
+    }
+
+    /// Moves to `view` over `secs`, from wherever the view is right now.
+    pub fn set_view_animated(&mut self, view: tessera_core::view::View, secs: f32) {
+        let from = self.view();
+        self.view_for = Some(self.item.id.clone());
+        self.view = view;
+        self.view_anim = (secs > 0.0).then(|| ViewAnim { from, start: std::time::Instant::now(), secs });
+    }
+
+    /// The overlay drawn on the picture, for the item now playing.
+    pub fn hud(&self) -> Option<&crate::hud::Hud> {
+        (self.view_for.as_deref() == Some(self.item.id.as_str())).then_some(()).and(self.hud.as_ref())
+    }
+
+    pub fn set_hud(&mut self, hud: Option<crate::hud::Hud>) {
+        if self.view_for.as_deref() != Some(self.item.id.as_str()) {
+            // Tie it to this item, starting from the full picture
+            self.view = tessera_core::view::View::FULL;
+            self.view_anim = None;
+            self.view_for = Some(self.item.id.clone());
+        }
+        self.hud = hud;
     }
 
     /// Length in seconds, if known (not for a live stream).

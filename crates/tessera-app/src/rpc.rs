@@ -536,6 +536,10 @@ fn dispatch(
             }
             other => Err(format!("unknown sources action {other:?} — use list or add")),
         },
+        "view" => {
+            let (si, id) = resolve_tile(wall, p, cursor_over)?;
+            view(wall, si, id, p)
+        }
         "control" => {
             let (si, id) = resolve_tile(wall, p, cursor_over)?;
             let action = s("action").ok_or("give \"action\"")?;
@@ -724,6 +728,66 @@ fn dispatch(
         }
         other => Err(format!("unknown method {other:?}")),
     }
+}
+
+/// Where the zoomed window is (`x`, `y`: its centre, % of the cropped
+/// picture), how far in (`zoom`), over `duration_ms` (animated) or at once,
+/// and what is drawn over the picture (`grid`, `reticle` as [x0, y0, x1, y1] %
+/// of the whole picture or null, `readout`). Moves start from where the view
+/// is heading, so a stream of small moves glides.
+fn view(wall: &mut Wall, si: usize, id: usize, p: &Value) -> Result<Reply, String> {
+    let num = |k: &str| p.get(k).and_then(Value::as_f64).map(|v| v as f32).filter(|v| v.is_finite());
+    let s = &mut wall.screens[si];
+    let t = s.tiles.iter_mut().find(|t| t.id == id).ok_or("internal: tile vanished")?;
+    let mut next = t.view_target();
+    let mut moved = false;
+    if let Some(x) = num("x") {
+        next.pan_x = (x / 100.0).clamp(0.0, 1.0);
+        moved = true;
+    }
+    if let Some(y) = num("y") {
+        next.pan_y = (y / 100.0).clamp(0.0, 1.0);
+        moved = true;
+    }
+    if let Some(z) = num("zoom") {
+        next.zoom = z.clamp(1.0, tessera_core::view::MAX_ZOOM);
+        moved = true;
+    }
+    if moved {
+        let secs = num("duration_ms").unwrap_or(0.0).clamp(0.0, 10_000.0) / 1000.0;
+        t.set_view_animated(next, secs);
+    }
+    let mut hud = t.hud().cloned().unwrap_or_default();
+    let mut touched = false;
+    if let Some(g) = p.get("grid").and_then(Value::as_bool) {
+        hud.grid = g;
+        touched = true;
+    }
+    match p.get("reticle") {
+        Some(Value::Null) => {
+            hud.reticle = None;
+            touched = true;
+        }
+        Some(Value::Array(a)) => {
+            let v: Vec<f32> = a.iter().filter_map(Value::as_f64).map(|v| (v as f32 / 100.0).clamp(0.0, 1.0)).collect();
+            if v.len() != 4 {
+                return Err("reticle needs [x0, y0, x1, y1] in % of the picture (or null to remove it)".into());
+            }
+            hud.reticle = Some((v[0].min(v[2]), v[1].min(v[3]), v[0].max(v[2]), v[1].max(v[3])));
+            touched = true;
+        }
+        Some(_) => return Err("reticle needs [x0, y0, x1, y1] in % of the picture (or null to remove it)".into()),
+        None => {}
+    }
+    if let Some(r) = p.get("readout").and_then(Value::as_str) {
+        hud.readout = r.chars().take(80).collect();
+        touched = true;
+    }
+    if touched {
+        t.set_hud((!hud.is_empty()).then_some(hud));
+    }
+    let (si, id) = locate(wall, id).ok_or("internal: tile vanished")?;
+    Ok(ok(json!({ "tile": tile_json(wall, si, id, Some(id)) })))
 }
 
 fn control(

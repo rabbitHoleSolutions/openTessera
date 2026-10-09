@@ -2,6 +2,7 @@ mod auth;
 mod browser;
 mod catalog;
 mod compositor;
+mod hud;
 mod instance;
 mod mcp;
 mod overlay;

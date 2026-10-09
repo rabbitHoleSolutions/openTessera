@@ -177,6 +177,10 @@ impl Server {
                 let v = self.rpc("control", params, Duration::from_secs(8))?;
                 Ok(text(format!("{note}{}", tile_line(&v["tile"]))))
             }
+            "tessera_view" => {
+                let v = self.rpc("view", a.clone(), Duration::from_secs(5))?;
+                Ok(text(tile_line(&v["tile"])))
+            }
             "tessera_subtitles" => self.subtitles(a),
             "tessera_frame" => self.frame(a),
             "tessera_queue" => self.queue(a),
@@ -1142,6 +1146,32 @@ fn player_tools() -> Vec<Value> {
                     "tile": tile_prop(),
                 },
                 "required": ["action"],
+            }),
+            false,
+            false,
+        ),
+        tool(
+            "tessera_view",
+            "Pan, zoom and mark the picture",
+            "Walk around the picture and draw on it: put the zoomed window's centre at `x`, `y` (% of the picture as \
+             cropped; 50, 50 is the middle) at `zoom` (1-16), at once or animated over `duration_ms` (a smooth camera \
+             move; several in quick succession glide). Unlike tessera_control zoom it reaches the corners. `grid` draws a \
+             graticule over the picture, `reticle` brackets a region ([x0, y0, x1, y1] in % of the whole picture, so it \
+             stays on its subject as the view moves; null removes it), `readout` puts a line of text in the corner. All \
+             belong to the video now playing. Example: {\"x\": 70, \"y\": 30, \"zoom\": 4, \"duration_ms\": 800, \
+             \"reticle\": [62, 22, 78, 38]}.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "x": { "type": "number", "description": "Centre of the view across, % of the cropped picture (0-100)." },
+                    "y": { "type": "number", "description": "Centre of the view down, % of the cropped picture (0-100)." },
+                    "zoom": { "type": "number", "description": "Magnification, 1-16." },
+                    "duration_ms": { "type": "number", "description": "Animate the move over this long (0 = at once)." },
+                    "grid": { "type": "boolean", "description": "Draw a grid over the picture." },
+                    "reticle": { "type": ["array", "null"], "items": { "type": "number" }, "description": "[x0, y0, x1, y1] in % of the whole picture, or null." },
+                    "readout": { "type": "string", "description": "A line of text in the corner (\"\" clears it)." },
+                    "tile": tile_prop(),
+                },
             }),
             false,
             false,

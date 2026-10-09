@@ -5,13 +5,17 @@
 //! monitor it gets pillarboxed as well, and shows black on all four sides.
 //! Cropping the bars out makes the *picture's* aspect 2.39:1, which the
 //! compositor then fits — so the film fills the screen. Zoom is the
-//! blunter tool: a centred magnification of whatever the crop left.
+//! blunter tool: a magnification of whatever the crop left, centred unless
+//! panned (`pan_x`/`pan_y` place the zoomed window anywhere inside the crop,
+//! which is how a client walks the picture, e.g. Tia's Esper mode).
 //!
 //! All fractions are of the picture, measured from each edge, with "top"
 //! meaning the top of the image as seen (the compositor deals with the
 //! texture being stored upside down).
 
-/// Crop fractions per edge plus a zoom factor (1 = none).
+/// Crop fractions per edge, a zoom factor (1 = none), and where the zoomed
+/// window sits inside the crop (`pan_x`/`pan_y`: its centre as fractions of
+/// the crop, 0.5 = centred; kept inside the crop however far it's asked to go).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct View {
     pub left: f32,
@@ -19,12 +23,14 @@ pub struct View {
     pub top: f32,
     pub bottom: f32,
     pub zoom: f32,
+    pub pan_x: f32,
+    pub pan_y: f32,
 }
 
 /// Never crop more than this from one edge, and never zoom past this: a
 /// mis-detected crop or a runaway zoom should still leave a picture.
 const MAX_EDGE: f32 = 0.45;
-pub const MAX_ZOOM: f32 = 4.0;
+pub const MAX_ZOOM: f32 = 16.0;
 
 impl Default for View {
     fn default() -> View {
@@ -33,7 +39,7 @@ impl Default for View {
 }
 
 impl View {
-    pub const FULL: View = View { left: 0.0, right: 0.0, top: 0.0, bottom: 0.0, zoom: 1.0 };
+    pub const FULL: View = View { left: 0.0, right: 0.0, top: 0.0, bottom: 0.0, zoom: 1.0, pan_x: 0.5, pan_y: 0.5 };
 
     pub fn is_full(&self) -> bool {
         *self == View::FULL
@@ -45,19 +51,40 @@ impl View {
 
     /// This view with the crop replaced and the zoom kept.
     pub fn with_crop(self, c: Crop) -> View {
-        View { left: c.left, right: c.right, top: c.top, bottom: c.bottom, zoom: self.zoom }
+        View { left: c.left, right: c.right, top: c.top, bottom: c.bottom, ..self }
     }
 
     /// The region shown, as `(x0, y0, x1, y1)` fractions of the picture
-    /// with y running down: the crop, then shrunk about its centre by the
-    /// zoom.
+    /// with y running down: the crop, then shrunk by the zoom about the pan
+    /// point (the crop's centre unless panned), kept inside the crop.
     pub fn source_rect(&self) -> (f32, f32, f32, f32) {
         let (x0, x1) = (self.left, 1.0 - self.right);
         let (y0, y1) = (self.top, 1.0 - self.bottom);
         let z = self.zoom.clamp(1.0, MAX_ZOOM);
-        let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
         let (hw, hh) = ((x1 - x0) / (2.0 * z), (y1 - y0) / (2.0 * z));
+        let pan = |p: f32| if p.is_finite() { p.clamp(0.0, 1.0) } else { 0.5 };
+        let cx = (x0 + pan(self.pan_x) * (x1 - x0)).clamp(x0 + hw, x1 - hw);
+        let cy = (y0 + pan(self.pan_y) * (y1 - y0)).clamp(y0 + hh, y1 - hh);
         (cx - hw, cy - hh, cx + hw, cy + hh)
+    }
+
+    /// Part way from `a` to `b` (t in 0..=1): crop and pan linearly, zoom
+    /// geometrically, so a 1x→16x move feels even rather than rushing at
+    /// the end.
+    pub fn between(a: &View, b: &View, t: f32) -> View {
+        let t = t.clamp(0.0, 1.0);
+        let l = |x: f32, y: f32| x + (y - x) * t;
+        let za = a.zoom.clamp(1.0, MAX_ZOOM);
+        let zb = b.zoom.clamp(1.0, MAX_ZOOM);
+        View {
+            left: l(a.left, b.left),
+            right: l(a.right, b.right),
+            top: l(a.top, b.top),
+            bottom: l(a.bottom, b.bottom),
+            zoom: za * (zb / za).powf(t),
+            pan_x: l(a.pan_x, b.pan_x),
+            pan_y: l(a.pan_y, b.pan_y),
+        }
     }
 
     /// The aspect of what is shown, given the whole picture's. Zoom keeps
@@ -81,6 +108,9 @@ impl View {
                 s.push_str(", ");
             }
             s.push_str(&format!("zoom {:.2}x", self.zoom));
+            if (self.pan_x - 0.5).abs() > 0.005 || (self.pan_y - 0.5).abs() > 0.005 {
+                s.push_str(&format!(" at {:.0}%, {:.0}%", self.pan_x * 100.0, self.pan_y * 100.0));
+            }
         }
         if s.is_empty() {
             "full picture".into()
@@ -261,6 +291,36 @@ mod tests {
         let v = View { top: 0.1, bottom: 0.1, zoom: 2.0, ..View::FULL };
         let (x0, y0, x1, y1) = v.source_rect();
         assert!(close(x0, 0.25) && close(x1, 0.75) && close(y0, 0.3) && close(y1, 0.7));
+    }
+
+    #[test]
+    fn pan_reaches_the_corners_and_stays_inside_the_crop() {
+        // 4x into the top-left corner: the window is pushed against the edges.
+        let v = View { zoom: 4.0, pan_x: 0.0, pan_y: 0.0, ..View::FULL };
+        let (x0, y0, x1, y1) = v.source_rect();
+        assert!(close(x0, 0.0) && close(y0, 0.0) && close(x1, 0.25) && close(y1, 0.25));
+        // Panned inside a letterbox crop it never shows the bars.
+        let v = View { top: 0.13, bottom: 0.13, zoom: 8.0, pan_x: 0.9, pan_y: 1.0, ..View::FULL };
+        let (_, _, x1, y1) = v.source_rect();
+        assert!(close(y1, 0.87) && x1 <= 1.0);
+        // Centred pan is the old behaviour.
+        let v = View { zoom: 2.0, pan_x: 0.5, pan_y: 0.5, ..View::FULL };
+        assert_eq!(v.source_rect(), (0.25, 0.25, 0.75, 0.75));
+        // Garbage pan falls back to the centre.
+        let v = View { zoom: 2.0, pan_x: f32::NAN, ..View::FULL };
+        assert!(close(v.source_rect().0, 0.25));
+    }
+
+    #[test]
+    fn between_eases_zoom_geometrically() {
+        let a = View::FULL;
+        let b = View { zoom: 16.0, pan_x: 0.8, ..View::FULL };
+        let mid = View::between(&a, &b, 0.5);
+        assert!(close(mid.zoom, 4.0), "{mid:?}"); // sqrt(16)
+        assert!(close(mid.pan_x, 0.65));
+        assert_eq!(View::between(&a, &b, 1.0), b);
+        assert_eq!(View::between(&a, &b, 0.0).zoom, 1.0);
+        assert!(View { zoom: 3.0, pan_x: 0.2, ..View::FULL }.describe().contains("at 20%"));
     }
 
     #[test]

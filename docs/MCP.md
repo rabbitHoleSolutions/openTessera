@@ -41,6 +41,7 @@ back in every argument.
 | `tessera_queue` | `list`, `add` (same path rules as open), `next`, `previous` | no |
 | `tessera_close` | remove a tile (the file is untouched) | no |
 | `tessera_window` | `list` monitors (number, connector, position) and windows (monitor, fullscreen, tiles); `fullscreen` / `windowed` (the W toggle, optionally onto `monitor`); `move` to a monitor; `new` window — replies with where the window actually ended up | no |
+| `tessera_view` | pan and zoom (`x`, `y` = centre in % of the cropped picture, `zoom` 1–16), at once or animated over `duration_ms`; draw over the picture: `grid`, a `reticle` on a region ([x0, y0, x1, y1] % of the whole picture), a `readout` line | no |
 | `tessera_sources` | `list` the configured sources; `add` a folder (subfolders included) — servers and cameras need a sign-in, so they stay in the sources tab | no |
 
 A `monitor` argument (here and on `tessera_open`, and `--monitor` on the
@@ -106,6 +107,17 @@ speaks them.
 - mpv's `audio-client-name` is `Tessera`, so the sound server (and Tia)
   sees the streams by name. A single opened video starts with sound; tiles
   added beside it start muted.
+
+Views can also be panned: `tessera_view` puts the zoomed window's centre
+anywhere in the cropped picture (it is kept inside the crop, so it reaches
+the corners), up to 16x, and animates the move in the render loop (smoothstep
+easing, zoom interpolated geometrically) when given `duration_ms` — a stream
+of short moves glides, since each starts from where the previous one is
+heading. The HUD (`hud.rs`) is painted on egui's background layer: over the
+video, under the controls, never taking clicks, and drawn whether or not the
+chrome is showing. Its reticle is in picture coordinates, so it rides along
+with the subject as the view moves. Built for Tia's Esper mode; nothing in it
+is Esper-specific. View and HUD belong to the video they were set on.
 
 ## Not yet
 
