@@ -311,16 +311,34 @@ impl Server {
         }
         let mut params = a.clone();
         params["paths"] = json!(paths);
-        match self.rpc("open", params.clone(), Duration::from_secs(20)) {
-            Ok(v) => Ok(text(open_reply(&v))),
-            Err(e) if e.starts_with("tessera isn't running") => self.launch_and_open(&paths),
-            Err(e) => Err(e),
+        let reply = match self.rpc("open", params.clone(), Duration::from_secs(20)) {
+            Ok(v) => open_reply(&v),
+            Err(e) if e.starts_with("tessera isn't running") => self.launch_and_open(&paths, a)?,
+            Err(e) => return Err(e),
+        };
+        Ok(text(match self.placement(a) {
+            Some(p) => format!("{reply}\n{p}"),
+            None => reply,
+        }))
+    }
+
+    /// When a monitor or fullscreen was asked for: where the windows really
+    /// are once the window manager has had its say (a tiling WM can move a
+    /// window straight back), so a client reports what happened, not what
+    /// it asked for.
+    fn placement(&self, a: &Value) -> Option<String> {
+        if a.get("monitor").is_none() && a.get("fullscreen").is_none() {
+            return None;
         }
+        std::thread::sleep(Duration::from_millis(1500));
+        let v = self.rpc("window", json!({ "action": "list" }), Duration::from_secs(5)).ok()?;
+        Some(format!("where the windows are now (check this against what was asked):\n{}", windows_text(&v)))
     }
 
     /// Starts the app on `paths` — the same as opening them from a file
-    /// manager — after checking them against the same roots the app would.
-    fn launch_and_open(&self, paths: &[String]) -> ToolResult {
+    /// manager — after checking them against the same roots the app would,
+    /// placed on `monitor` / `fullscreen` if asked.
+    fn launch_and_open(&self, paths: &[String], a: &Value) -> Result<String, String> {
         let roots = crate::rpc::allowed_roots(&crate::load_settings().sources);
         let mut argv = Vec::new();
         for p in paths {
@@ -336,10 +354,23 @@ impl Server {
         let _ = std::fs::create_dir_all(cache_dir());
         let out = std::fs::File::create(&log).map_err(|e| format!("can't write {}: {e}", log.display()))?;
         let err = out.try_clone().map_err(|e| e.to_string())?;
+        let mut placement = Vec::new();
+        match a.get("monitor") {
+            Some(Value::String(m)) => placement.extend(["--monitor".to_string(), m.clone()]),
+            Some(Value::Number(n)) => placement.extend(["--monitor".to_string(), n.to_string()]),
+            _ => {}
+        }
+        if a.get("fullscreen").and_then(Value::as_bool) == Some(true) {
+            placement.push("--fullscreen".into());
+        }
         let mut cmd = Command::new(own_exe());
-        cmd.args(&argv).stdin(Stdio::null()).stdout(out).stderr(err);
+        cmd.args(&placement).args(&argv).stdin(Stdio::null()).stdout(out).stderr(err);
         detach(&mut cmd);
-        cmd.spawn().map_err(|e| format!("couldn't start tessera: {e}"))?;
+        let mut child = cmd.spawn().map_err(|e| format!("couldn't start tessera: {e}"))?;
+        // Reap it when it quits, or it lingers as a zombie of this (long-lived) shim
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         if !wait_until(Duration::from_secs(15), || self.rpc("status", json!({}), Duration::from_secs(1)).is_ok()) {
             return Err(format!("tessera didn't come up within 15s — is there a display? its log: {}", log.display()));
         }
@@ -352,7 +383,7 @@ impl Server {
         if let Ok(Content::Text(s)) = self.status().map(|mut c| c.remove(0)) {
             out.push(s);
         }
-        Ok(text(out.join("\n")))
+        Ok(out.join("\n"))
     }
 
     fn queue(&self, a: &Value) -> ToolResult {
