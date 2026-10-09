@@ -554,8 +554,11 @@ impl Server {
                 let uri = uri.clone();
                 std::thread::spawn(move || {
                     let mut cmd = Command::new("ffmpeg");
+                    // The limit as a fraction (24/255) so it scales with bit depth: an integer is
+                    // in the format's own levels, and 10-bit HDR's black (64 of 1023 in limited
+                    // range) is above 24, so its bars never read as black.
                     cmd.args(["-nostdin", "-hide_banner", "-ss", &format!("{t:.1}"), "-i", &uri, "-t", "2"])
-                        .args(["-vf", "cropdetect=limit=24:round=2:reset=0", "-an", "-sn", "-f", "null", "-"]);
+                        .args(["-vf", "cropdetect=limit=0.094:round=2:reset=0", "-an", "-sn", "-f", "null", "-"]);
                     run_capture(cmd, Duration::from_secs(30)).ok().and_then(|(_, log, _)| tessera_core::view::parse_cropdetect(&log))
                 })
             })
