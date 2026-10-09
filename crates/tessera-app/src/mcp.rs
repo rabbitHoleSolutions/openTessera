@@ -200,14 +200,18 @@ impl Server {
                         // Report where it really is once the window manager
                         // has had its say, not what was asked for: a tiling
                         // WM can put a moved window straight back.
-                        std::thread::sleep(Duration::from_millis(1500));
                         let wi = v["window"].as_u64();
-                        let now = self.rpc("window", json!({ "action": "list" }), Duration::from_secs(5))?;
-                        let w = now["windows"].as_array().and_then(|ws| ws.iter().find(|w| w["index"].as_u64() == wi)).cloned();
-                        let Some(w) = w else { return Ok(text("the window closed")) };
+                        let wanted_fs = match action { "fullscreen" => Some(true), "windowed" => Some(false), _ => None };
+                        let find = |now: &Value| now["windows"].as_array().and_then(|ws| ws.iter().find(|w| w["index"].as_u64() == wi)).cloned();
+                        let now = self.settled_windows(|now| {
+                            find(now).is_some_and(|w| {
+                                (!v["monitor"].is_u64() || w["monitor"] == v["monitor"])
+                                    && wanted_fs.is_none_or(|f| w["fullscreen"].as_bool() == Some(f))
+                            })
+                        })?;
+                        let Some(w) = find(&now) else { return Ok(text("the window closed")) };
                         let fs = w["fullscreen"] == json!(true);
                         let mut line = format!("window {}: {} on monitor {}", w["index"], if fs { "fullscreen" } else { "windowed" }, w["monitor"]);
-                        let wanted_fs = match action { "fullscreen" => Some(true), "windowed" => Some(false), _ => None };
                         if (v["monitor"].is_u64() && w["monitor"] != v["monitor"]) || wanted_fs.is_some_and(|f| f != fs) {
                             line.push_str(&format!(
                                 " — the window manager put it there instead of on monitor {}. A tiling window manager places \
@@ -330,9 +334,30 @@ impl Server {
         if a.get("monitor").is_none() && a.get("fullscreen").is_none() {
             return None;
         }
-        std::thread::sleep(Duration::from_millis(1500));
-        let v = self.rpc("window", json!({ "action": "list" }), Duration::from_secs(5)).ok()?;
+        let v = self.settled_windows(|v| placed_as_asked(v, a)).ok()?;
         Some(format!("where the windows are now (check this against what was asked):\n{}", windows_text(&v)))
+    }
+
+    /// The window list once the window manager has had its say: as soon as `placed` holds and keeps
+    /// holding for a moment (a tiling WM can put a moved window straight back), or after 2.5s with
+    /// wherever things are then.
+    fn settled_windows(&self, placed: impl Fn(&Value) -> bool) -> Result<Value, String> {
+        let list = || self.rpc("window", json!({ "action": "list" }), Duration::from_secs(5));
+        let deadline = Instant::now() + Duration::from_millis(2500);
+        let mut v = list()?;
+        let mut placed_since: Option<Instant> = None;
+        while Instant::now() < deadline {
+            if placed(&v) {
+                if placed_since.get_or_insert_with(Instant::now).elapsed() >= Duration::from_millis(400) {
+                    break;
+                }
+            } else {
+                placed_since = None;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            v = list()?;
+        }
+        Ok(v)
     }
 
     /// Starts the app on `paths` — the same as opening them from a file
@@ -837,6 +862,35 @@ fn open_reply(v: &Value) -> String {
 }
 
 /// Monitors, then windows, one line each.
+/// Whether some window is on the monitor and in the fullscreen state that `a` asked for. A monitor
+/// is asked for by index, connector name or position ("left", "middle", "right").
+fn placed_as_asked(v: &Value, a: &Value) -> bool {
+    let monitor = a.get("monitor").and_then(|m| {
+        let monitors = v["monitors"].as_array()?;
+        monitors
+            .iter()
+            .find(|mon| match m {
+                Value::Number(n) => mon["index"].as_u64() == n.as_u64(),
+                Value::String(s) => {
+                    s.parse::<u64>().ok() == mon["index"].as_u64()
+                        || mon["name"].as_str().is_some_and(|x| x.eq_ignore_ascii_case(s))
+                        || mon["positions"].as_array().into_iter().flatten().any(|p| p.as_str().is_some_and(|x| x.eq_ignore_ascii_case(s)))
+                }
+                _ => false,
+            })
+            .map(|mon| mon["index"].clone())
+            // An unknown monitor can't be checked: don't wait for it
+            .or(Some(Value::Null))
+    });
+    let fullscreen = a.get("fullscreen").and_then(Value::as_bool);
+    if monitor == Some(Value::Null) {
+        return true;
+    }
+    v["windows"].as_array().into_iter().flatten().any(|w| {
+        monitor.as_ref().is_none_or(|m| w["monitor"] == *m) && fullscreen.is_none_or(|f| w["fullscreen"].as_bool() == Some(f))
+    })
+}
+
 fn windows_text(v: &Value) -> String {
     let mut out = Vec::new();
     for m in v["monitors"].as_array().into_iter().flatten() {
