@@ -265,6 +265,10 @@ fn absolutize(paths: &[PathBuf]) -> Vec<PathBuf> {
     paths
         .iter()
         .map(|p| {
+            // A URL is not relative to anything.
+            if p.to_str().is_some_and(|s| s.contains("://")) {
+                return p.clone();
+            }
             std::fs::canonicalize(p).unwrap_or_else(|_| match (&cwd, p.is_absolute()) {
                 (Some(cwd), false) => cwd.join(p),
                 _ => p.clone(),

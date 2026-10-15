@@ -191,7 +191,6 @@ SECOND LAUNCH:
   against the same config (development only — it reinstates both hazards).
 
 CONTROLS:
-  Esc                Quit
   Tab                Pin/unpin the overlay UI (auto-hides after 5s idle)
   Space              Pause/resume all tiles on the focused screen
   Left click         Pause/resume the clicked tile
@@ -207,9 +206,9 @@ CONTROLS:
   - / +              Remove the tile under the cursor / add a tile (focused screen)
   F                  Fullscreen the tile under the cursor on its screen (F/Esc exits)
   W                  Toggle THIS screen (cursor's window): fullscreen wall <-> window
-  S                  Toggle the settings panel (gear) on the focused screen
-  L / Q              Browser window on the library / queue tab (opens it if
-                     there isn't one yet)
+  L / Q / S / C      Browser window on the library / queue / sources / config
+                     tab (opens it if there isn't one yet)
+  ? or /             Help panel on the focused screen
   Esc                Exit fullscreen if zoomed; otherwise quit",
         hwdec_help = platform::HWDEC_HELP
     );

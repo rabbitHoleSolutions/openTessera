@@ -162,7 +162,11 @@ pub fn collect_items(paths: &[std::path::PathBuf]) -> Vec<MediaItem> {
     let mut items = Vec::new();
     let mut visited = std::collections::HashSet::new();
     for p in paths {
-        if p.is_dir() {
+        // A stream URL given where a path was expected (the command line,
+        // a hand-off from a later launch) is one item, not a missing file.
+        if let Some(item) = p.to_str().and_then(MediaItem::from_url) {
+            items.push(item);
+        } else if p.is_dir() {
             walk(p, 0, &mut visited, &mut items);
         } else if p.is_file() {
             items.push(MediaItem::from_path(p));
@@ -267,5 +271,12 @@ mod tests {
         // Not a streaming scheme, or not a URL at all.
         assert!(MediaItem::from_url("file:///etc/passwd").is_none());
         assert!(MediaItem::from_url("/home/x/a.mkv").is_none());
+    }
+
+    #[test]
+    fn a_url_among_paths_is_an_item_not_a_missing_file() {
+        let items = collect_items(&[std::path::PathBuf::from("rtsps://nvr.local:7441/abc")]);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, SourceKind::Camera);
     }
 }

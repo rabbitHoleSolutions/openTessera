@@ -179,8 +179,13 @@ fn main() {
             sources.push(src);
         }
     };
+    // A URL plays, but is not a folder to keep as a source.
+    let mut url_items = Vec::new();
     for f in &args.files {
-        push_unique(tessera_core::sources::Source::Folder { path: f.display().to_string() });
+        match f.to_str().and_then(tessera_core::MediaItem::from_url) {
+            Some(item) => url_items.push(item),
+            None => push_unique(tessera_core::sources::Source::Folder { path: f.display().to_string() }),
+        }
     }
     if args.plex || args.jellyfin {
         let cfg = tessera_core::sources::SourceConfig::load();
@@ -220,6 +225,7 @@ fn main() {
                 Err(e) => eprintln!("warning: source {} failed: {e}", src.label()),
             }
         }
+        items.extend(url_items);
     }
     // Only an error when the user actually asked for something and it
     // yielded nothing; an empty queue is a normal state now.
