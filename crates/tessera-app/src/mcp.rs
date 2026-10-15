@@ -62,7 +62,7 @@ pub fn run(args: Vec<String>) -> i32 {
     let sandbox = dev.then(|| Sandbox::new(sandbox_dir));
     let config_dir = match &sandbox {
         Some(s) => s.home.join(".config/opentessera"),
-        None => crate::config_dir(),
+        None => crate::persist::config_dir(),
     };
     let mut server = Server { config_dir, sandbox, subs: HashMap::new() };
 
@@ -364,7 +364,7 @@ impl Server {
     /// manager — after checking them against the same roots the app would,
     /// placed on `monitor` / `fullscreen` if asked.
     fn launch_and_open(&self, paths: &[String], a: &Value) -> Result<String, String> {
-        let roots = crate::rpc::allowed_roots(&crate::load_settings().sources);
+        let roots = crate::rpc::allowed_roots(&crate::persist::load_settings().sources);
         let mut argv = Vec::new();
         for p in paths {
             if p.contains("://") {

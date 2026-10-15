@@ -22,10 +22,8 @@ use tessera_core::MediaItem;
 
 use crate::overlay::{OverlayAction, UiSettings};
 use crate::screen::{Capture, CaptureWhat, RawImage, ScreenRole};
-use crate::{
-    handle_overlay_action, monitor_under_window, open_listed, pause_and_release, remove_tile_action, resume_tile, tile_next,
-    toggle_pin, toggle_window_mode, OpenTarget, Placement, Wall,
-};
+use crate::wall::{handle_overlay_action, open_listed, pause_and_release, remove_tile_action, resume_tile, tile_next, toggle_pin, OpenTarget, Wall};
+use crate::windowing::{monitor_under_window, toggle_window_mode, Placement};
 
 /// How long a connection waits for the event loop. A frame is ~16ms; this
 /// is for a loop stalled behind something slow, which should surface as an
@@ -52,7 +50,7 @@ pub enum Reply {
 #[derive(Default)]
 pub struct Effects {
     /// Open a wall window, placed as given.
-    pub new_wall_window: Option<crate::Placement>,
+    pub new_wall_window: Option<crate::windowing::Placement>,
     pub quit: bool,
 }
 
@@ -1035,14 +1033,14 @@ fn monitor_arg(wall: &Wall, p: &Value) -> Result<Option<usize>, String> {
         Some(Value::String(s)) => s.clone(),
         Some(v) => v.to_string(),
     };
-    let infos = wall.screens.first().map(|s| crate::monitor_infos(s.window.available_monitors())).unwrap_or_default();
+    let infos = wall.screens.first().map(|s| crate::windowing::monitor_infos(s.window.available_monitors())).unwrap_or_default();
     tessera_core::monitor::resolve_monitor(&spec, &infos).map(Some)
 }
 
 /// Monitors (with which windows are on each) and windows.
 fn windows_json(wall: &Wall) -> Value {
     let Some(first) = wall.screens.first() else { return json!({ "monitors": [], "windows": [] }) };
-    let infos = crate::monitor_infos(first.window.available_monitors());
+    let infos = crate::windowing::monitor_infos(first.window.available_monitors());
     let monitors: Vec<Value> = infos
         .iter()
         .enumerate()
