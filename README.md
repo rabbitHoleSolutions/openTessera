@@ -1,286 +1,223 @@
+<p align="center"><img src="packaging/icons/tessera-128.png" alt="" width="96"></p>
+
 # openTessera
 
-Open-source desktop multi-stream video wall. A sister application to the Meta
-Quest app **Tessera**: many simultaneous video streams, arranged as tiles, with
-library curation and organization tools. Built on Linux (Pop!_OS/GNOME); also
-runs on macOS (Apple Silicon, see below).
+A desktop video wall: many videos playing at once, tiled across one window or
+every monitor you have. Local files, Plex, Jellyfin and live security cameras
+all go into one shared queue, and every tile is a slot fed from it.
 
-## Current status
+openTessera is the desktop sibling of **Tessera**, a Meta Quest app built
+around the same ideas. The two share a design, not code. It runs on Linux and
+macOS, is written in Rust on top of libmpv, and is licensed GPL-3.0-or-later.
 
-Phase 1 skeleton — playback foundation:
+> **Status: a personal project, shared as-is.** It is used every day on one
+> Linux machine and has had a first pass on one Mac. Anything outside that
+> setup is untested — see [what has been tested](#what-has-been-tested). Bug
+> reports from other setups are the most useful contribution there is.
 
-- Windows: one ordinary window by default, each with its own GL context and
-  its own tiles. The status bar's "+" opens another at any time; `W` toggles
-  any single window between windowed and borderless-fullscreen **on whichever
-  monitor it is currently on** — drag a window to another screen, hit `W`, and
-  it becomes a wall there while your other windows are untouched. Closing a
-  window closes just that window; the last one quits. `--max` is the
-  all-monitors video-wall mode (every monitor fullscreen, filled to `--tiles`)
-- N tiles per screen via libmpv render API, GPU-direct (frames never touch CPU
-  memory), hardware decode (NVDEC/VA-API/VideoToolbox via mpv)
-- Grid layout solver (coverage-scoring rows/cols search, ported from the Quest
-  app's LayoutSolver) with per-tile aspect letterboxing
-- Decode budget controller: weighted macroblocks/sec admission (shown in
-  the status bar as 1080p30-equivalent streams) with
-  codec weights, max-streams gate, real probe data fed back on load,
-  OLDEST_STARTED eviction (the oldest playing stream is paused to admit
-  a new one or to sustain the user's stream count), and an adaptive
-  ceiling driven by real decoder frame-drop telemetry (sustained drops
-  shrink the effective ceiling and evict the worst offender; clean
-  windows recover it). A single stream is always admissible alone.
-  Budget is global across screens; resuming a paused tile re-requests
-  admission and may evict.
-- Browser window (`L` library tab / `Q` queue tab, or the list icon in the
-  status bar) — one window, two tabs:
-  - **queue**: what is playing right now on every tile of every wall window
-    (pause/resume, mute, volume per tile, wherever it lives), and the shared
-    queue itself — reorder or remove any pending item, shuffle or A–Z the
-    pending tail. Items already played and the one currently playing stay
-    put, which is what `PlaybackQueue` enforces, so their controls are
-    disabled rather than misleading. "clear queue" empties it outright and
-    takes two clicks (it arms red for 4s); tiles keep playing whatever they
-    already loaded.
-  - **library**: a tab of the browser window,
-    listing each configured source on demand in the background. Live title
-    filter, name/date/size ordering, and the two ways to queue things — bulk
-    "add N to queue" (folded into the queue's current order, so a shuffled
-    queue interleaves them) and a per-row "+" (appended at the end, leaving
-    the existing order alone). Per-row "▶" plays an item immediately on the
-    first wall window's first tile; rows already in the queue are marked.
-- Queue retention (queue tab): on, the queue comes back exactly as you left
-  it, cursor included; off, every launch starts empty — or with just the file
-  you opened. Either way a bare launch no longer walks every configured
-  server at startup; the library browser lists on demand instead.
-- Settings are split by scope. Everything app-wide — sources, max concurrent
-  streams, cache per stream, audio, queue retention — lives in the browser
-  window's tabs (`S` sources, `C` config), which exists once no matter how
-  many monitors are running. The gear on any window holds only that window's
-  own settings, currently its UI scale: one scale across a 5K, an ultrawide
-  and a portrait monitor cannot be right for all three, so each window keeps
-  its own — remembered per monitor by name, so a window opened on a display
-  comes back at the scale you last chose there. The config tab lists what is
-  remembered and can forget any of it. It is a *target*: a tile's own
-  controls shrink below it (to a floor) when the tile is too small to hold
-  them at full size, so a twelve-tile wall does not bury its video under
-  chrome. The status bar and the panels do the same against the window, so a
-  narrow WM-tiled window keeps all its controls on screen.
-- One cursor-based wrapping playback queue shared by every window — a tile is
-  a slot fed from it (name/date/size/shuffle ordering, pending-tail re-sorting
-  that preserves the current item). A per-window/global choice is planned
-- Overlay UI (egui, Tab to toggle, `--overlay` to start visible): status bar
-  with live budget/stream/eviction counters and a play/pause-all button,
-  per-tile info chips (title, play state, position/duration, mute; click the
-  chip to pause/resume the tile through the budget), and an up-next queue
-  strip. UI interactions execute with the same budget-aware semantics as
-  clicks on the video itself.
-- Transport: per-tile chip transport row (prev / -10s / +10s / next buttons
-  plus a scrub bar), keyboard Left/Right seeks ±10s on the focused screen,
-  N/P load the next/previous queue item on each tile.
-- Queue management (Quest-immersive style): hovering a tile shows the
-  shared queue as a thumbnail strip along the bottom of that tile — click
-  a thumbnail to play it on that tile immediately, right-click to remove it
-  from the queue, drag to reorder, shuffle / A–Z buttons re-sort the pending tail. Hovered thumbnails highlight.
-  Thumbnails come from the media servers (Jellyfin primary art, Plex
-  thumbs) via a background fetch+decode cache; local files show a
-  placeholder.
-- Panel management: each tile's transport row has "−" (remove that tile —
-  its GL resources and stream are freed and the grid re-solves) and "+"
-  (add a tile to this window, taking the next queue item; honors the
-  decode budget, `--tiles` cap, default 12, and budget-aware eviction).
-  Other windows are unaffected. Failed actions explain themselves in a
-  transient on-screen toast (budget full, tiles cap, empty queue, ...).
-- Fullscreen: "F" (or the corner-bracket icon on a tile's transport) zooms
-  that tile to fill its screen — in windowed mode the window also goes
-  borderless-fullscreen on its monitor, so other monitors and windows keep
-  working; in multi-screen mode the other screens keep playing untouched.
-  F/Esc toggles back; Esc only quits when nothing is zoomed. (`W` is the
-  separate whole-window toggle — the wall layout, no tile zoom.)
-- An emptied screen (all tiles removed) shows a large centered "+" to add
-  a tile back.
-- Delete from transport: each tile's transport row has a 🗑 button that
-  deletes the tile's current video at its source — the local file, or the
-  server-side item (Jellyfin `DELETE /Items/{id}`, Plex
-  `/library/metadata/{id}/delete`) — and advances the tile to the next
-  queue item. Click twice to confirm (the button arms red for 4 seconds).
-- Overlay auto-hide: the UI (status bar, chips, hover queues) shows on any
-  user input and hides after 5 seconds of inactivity; Tab pins/unpins it
-  (`--overlay` starts pinned). Only the tile under the cursor shows its
-  controls — one set at a time, not a wall of them — and the scrub bar
-  takes whatever width the tile allows.
-- Click a tile to pause/resume it, Space to pause/resume a screen, Esc to quit
+## Features
 
-Phase 0 benchmarking (see git history / docs when added) measured, on a
-Ryzen 7 9800X3D + RTX 5080: 12x 4K30 H.264 streams at 1.000x realtime using
-2.4% of total machine CPU with libmpv render API + NVDEC. The alternative
-(vlcj/vmem callback path) could not hardware-decode on NVIDIA at all and
-saturated the machine at 8x 4K — hence the Rust + libmpv stack decision.
+- **Many streams, cheaply.** Every tile is its own libmpv player rendering
+  straight into a GL texture, with hardware decoding (NVDEC, VA-API or
+  VideoToolbox). On an RTX 5080, twelve 4K30 H.264 streams play in real time
+  using about 2.4% of the CPU.
+- **A decode budget.** New streams are admitted against a GPU decode ceiling,
+  measured in 1080p30-equivalents and weighted by codec. When the wall is
+  full, the oldest stream is paused to make room. The ceiling also shrinks
+  on its own if decoders start dropping frames.
+- **Windows and walls.** It starts as one ordinary window. You can open more
+  at any time. `W` turns any window into a fullscreen wall on whatever
+  monitor it is on, and `--max` fills every monitor at once.
+- **Tiles you can move.** Drag a tile onto another to swap them, or onto
+  another window to move it there. You can also pin a tile large, zoom one
+  to fill its screen, or crop the black bars out of a letterboxed film.
+- **One queue for everything.** Build it from the library browser, reorder,
+  shuffle or sort it, and choose whether it comes back after a restart.
+  Hovering a tile shows the queue as a thumbnail strip.
+- **Sources:** local folders, Plex, Jellyfin, live cameras (RTSP/RTSPS and
+  similar), and http(s) URLs. Signing in to Plex or Jellyfin doesn't need a
+  pasted token. Jellyfin servers and Ubiquiti cameras are found on the LAN.
+- **Controls scale to their tile.** On a twelve-tile wall the per-tile
+  controls shrink with the tile, so they don't bury the video. Each monitor
+  remembers its own UI scale.
+- **An assistant interface.** `tessera mcp` is an
+  [MCP](https://modelcontextprotocol.io) server. An assistant can ask what's
+  playing, control playback, search subtitles and look at a frame. See
+  [docs/MCP.md](docs/MCP.md).
+
+## What has been tested
+
+There is one maintainer and one set of hardware, so "supported" here means
+"used on that hardware". Everything else is a guess until someone reports
+otherwise.
+
+| Area | Tested on | Untested — reports welcome |
+|---|---|---|
+| **Linux** | Pop!_OS, GNOME with the pop-shell tiling extension, X11 session | Wayland sessions; other desktops and window managers (KDE, stock GNOME, i3, sway, …); other distributions |
+| **GPU (Linux)** | NVIDIA RTX 5080, NVDEC | AMD and Intel (VA-API); other NVIDIA generations |
+| **macOS** | M1 Max, macOS 26, Homebrew mpv 0.41 (first pass) | Intel Macs; older macOS; mixed Retina and non-Retina displays; much of the interactive UI (see [ROADMAP §16](docs/ROADMAP.md)) |
+| **Windows** | — | Not supported, and no plans |
+| **Plex / Jellyfin** | The maintainer's own servers | Other server versions and setups |
+| **Cameras** | Ubiquiti UniFi Protect (G4 Dome, G6 Turret) over RTSPS from the controller | Other RTSP cameras and NVRs; RTMP, SRT, HLS, MJPEG |
+
+Some notes on those rows:
+
+- **Window managers.** Window placement was tuned under pop-shell, which
+  moves tiled windows back to their slot after the app moves them. Other
+  window managers may place new windows or restore from fullscreen
+  differently.
+- **Cameras.** Cameras are plain stream URLs, so anything mpv can open
+  should play. LAN discovery only finds Ubiquiti devices; for anything else,
+  paste the stream URL. A UniFi Protect camera streams through its
+  controller, not on its own; the add-source form explains this.
+- **macOS.** There is no signed or notarized build yet. Build it from
+  source as described below.
+
+Known rough edges are listed in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
 
 ## Requirements
 
-- Rust (stable)
-- libmpv (`libmpv.so.1` or `.so.2`; on Debian/Ubuntu: `mpv` or `libmpv1`; on
-  macOS `brew install mpv`, which provides `libmpv.2.dylib`; dev headers are
-  NOT required — the C ABI is declared in `tessera-mpv` and loaded at
-  runtime). Set `TESSERA_MPV_LIB` to point at a specific library file.
-- For hardware decode: NVIDIA (NVDEC), Mesa (VA-API), or macOS (VideoToolbox).
-  The default is `--hwdec nvdec-copy` — NVDEC decoding with a frame copy
-  rather than the CUDA/OpenGL zero-copy interop, which segfaults reliably
-  (mpv 0.34 + NVIDIA: `cuGraphicsUnregisterResource` race when decoders
-  re-initialize during playback, e.g. loading a 4K HEVC file mid-wall).
-  Override with `--hwdec auto-safe` for zero-copy if you feel lucky.
-  On macOS the default is `videotoolbox` (zero-copy; that crash is NVIDIA's).
+- **Rust**, a recent stable release (it is developed on 1.90), plus a C
+  compiler (one dependency builds a little C).
+- **libmpv**, loaded at runtime, so no development headers are needed:
+  - Debian/Ubuntu: `sudo apt install libmpv2` (older releases: `libmpv1`)
+  - Fedora: `sudo dnf install mpv-libs`
+  - Arch: `sudo pacman -S mpv`
+  - macOS: `brew install mpv`
 
-## Build
+  Set `TESSERA_MPV_LIB=/path/to/libmpv.so` to use a particular copy.
+- **Hardware decoding** works through mpv. On Linux the default is
+  `--hwdec nvdec-copy`, because NVIDIA's zero-copy CUDA/GL interop crashes
+  when a decoder re-initializes mid-playback. On AMD or Intel, try
+  `--hwdec vaapi` (or `auto-safe`). On macOS the default is `videotoolbox`.
 
-```
-cargo build --release          # binary: target/release/tessera
-```
+## Build and install
 
-## Install (Linux desktop)
-
-```
-./packaging/install.sh
+```sh
+cargo build --release            # the binary is target/release/tessera
 ```
 
-Installs, for the current user only and without root: the `tessera` binary
-into `~/.local/bin`, the icon into the hicolor theme, and a desktop entry so
-it shows up in the app menu, in the dock, and under **Open With** for video
-files. `--default` additionally makes it the default video player (opt-in,
-since that takes over double-clicking every video on the machine);
-`--uninstall` reverses it. Config in `~/.config/opentessera` is never
-touched either way.
+**Linux desktop:**
 
-## Install (macOS)
-
+```sh
+./packaging/install.sh           # --default also makes it the default video player
 ```
+
+This installs for the current user only, without root. It puts `tessera` in
+`~/.local/bin`, adds the icon and a desktop entry, and lists the app under
+**Open With** for video files. `--uninstall` reverses it.
+
+**macOS:**
+
+```sh
 ./packaging/macos/build-app.sh --install
 ```
 
-Builds `Tessera.app` and copies it to `~/Applications`, where it appears under
-**Open With** for videos and folders. `--default` also makes it the default
-player for video types — macOS asks you to confirm each type, and the script
-prints what it replaced (undo: Get Info → Open with → Change All). It loads
-Homebrew's libmpv, so `brew install mpv` first. Config lives in
-`~/.config/opentessera` here too.
+This builds `Tessera.app` into `~/Applications`. `--default` also offers to
+make it the default player for video types. macOS asks you to confirm each
+one.
 
-macOS differences: fullscreen (W, F, `--max`) covers the monitor without
-creating a Space; Cmd+W closes a window, Ctrl+Cmd+F toggles fullscreen,
-Cmd+Q quits (queue saved), ctrl-click is a right-click. A file opened from
-Finder while Tessera is running plays immediately on the first tile and joins
-the queue; one that launches it replaces the queue, as on the command line.
+Configuration lives in `~/.config/opentessera/` on both systems. The
+installers never touch it.
 
-## Run
+## Usage
 
-```
-# one window, 4 tiles (the default shape)
-tessera /path/to/videos/
-
-# a single file — paths on the command line replace the saved sources, so
-# opening a video from the file manager plays that video
-tessera /path/to/file.mkv
-
-# the video wall: every monitor fullscreen, 4 tiles each
-tessera --max --tiles 4 /path/to/videos/
-
-# a window of a particular size
-tessera --windowed 1600x900 /path/to/file.mkv
-
-# a window on monitor 1 (the numbers tessera prints at startup; a
-# connector name like DP-4 or left/middle/right works too), or fullscreen
-# there from the start
-tessera --monitor 1 /path/to/file.mkv
-tessera --monitor right --fullscreen /path/to/file.mkv
-
-# only monitor 2, fullscreen, advance through a directory instead of looping
-tessera --screens 2 --advance /path/to/videos/
-
-# a dozen streams of the same source
-tessera --tiles 12 vid1.mkv vid1.mkv vid1.mkv vid1.mkv ...
-
-# everything in the Plex "Movies" library
+```sh
+tessera ~/Videos/                    # one window, four tiles, the folder queued
+tessera film.mkv                     # play this file
+tessera --max --tiles 6 ~/Videos/    # every monitor fullscreen, six tiles each
+tessera --monitor right --fullscreen film.mkv
 tessera --plex --plex-library Movies
-
-# local files plus two remote servers, one shared queue
-tessera --jellyfin --jellyfin-library Movies --plex /path/to/local/
+tessera rtsps://controller:7441/abcdef   # a camera
 ```
 
-- Adding a server without typing a token: the sources tab's add-source form
-  scans the LAN for Jellyfin servers (UDP 7359 broadcast) and signs in with
-  a username and password (the password is exchanged once for an access
-  token and never stored); Plex links through plex.tv — click "link with
-  plex.tv", enter the 4-character code it shows at plex.tv/link, and pick
-  from your account's servers, each already probed for a reachable LAN
-  address. Pasting a raw token/API key still works and is the fallback when
-  there is no internet.
-- Remote sources: Plex and Jellyfin. `--plex` / `--jellyfin` add a server's
-  movie libraries (optionally restricted with `--plex-library` /
-  `--jellyfin-library`); items stream over HTTP via each server's
-  direct-play endpoint (original file bytes, range requests — no
-  transcoding), so mpv treats them exactly like local files, seeking
-  included. Credentials live in `~/.config/opentessera/sources.conf`
-  (`plex_url`/`plex_token`/`jellyfin_url`/`jellyfin_key`) with
-  `TESSERA_*` env-var overrides. Local paths and remote sources can be
-  freely mixed in one launch.
+Files and folders on the command line replace the saved sources for that run,
+so opening a video from the file manager plays that video. Running `tessera`
+again while it is already open hands the files to the running instance
+instead of starting a second one. `tessera --help` lists every option.
 
-Controls: `W` toggle this window between windowed and fullscreen (on its
-current monitor) · the status bar's `+` opens another window · `L` / `Q`
-browser window on the library / queue tab · `S` / `C` browser window on the
-sources / config tab · the gear opens the window's own settings · `Esc` exit
-fullscreen if zoomed, otherwise quit · `Tab`
-pin/unpin the overlay UI (auto-hides after 5s idle) · `Space` pause/resume
-all tiles on the focused screen · `F` fullscreen the tile under the cursor ·
-`Left`/`Right` seek -/+10s on the tile under the cursor — hold to scan, and
-the jump accumulates and is applied in batches rather than stuttering
-through one seek per key repeat ·
-click a tile to pause/resume it · hover a tile to show its queue strip
-(click a thumbnail to play it there) · right-click a tile to unmute/mute it
-(the first tile is heard and every tile added beside it starts muted — one
-video should just play, but a wall of simultaneous streams should be
-selectively audible, not a cacophony; `--no-audio` turns audio off
-entirely), `Up`/`Down` adjust volume of unmuted tiles on the focused screen.
+### Sources
 
-Seeks and file loads are issued asynchronously (mpv's async command API), and
-quit tears down all mpv instances in parallel. Known limitation: a seek
-still briefly hitches the other tiles on its screen — mpv's render API
-blocks on the seeking core (~250ms), and tiles render sequentially on one
-thread. Fixing it needs per-tile render threads; `TESSERA_PROFILE=1` logs
-blocking render/property phases when investigating. `--status-interval N` prints a status report (playback rate per tile,
-composited fps, hwdec mode, decoder drops) every N seconds; it is off by
-default.
+Add sources in the browser window's **sources** tab (press `S`):
 
-Env vars: `TESSERA_VSYNC=1` enable vsync (off by default — an X11 swap stall
-was observed with vsync on occluded windows), `TESSERA_MPV_LIB` path to libmpv,
-`TESSERA_MPV_LOG=v` verbose mpv logs, `TESSERA_DUMP_DIR` screenshot dumps each
-status interval, every 5s unless `--status-interval` says otherwise (add `TESSERA_DUMP_OVERLAY=1` to include the overlay UI).
+- **Folder:** a local or mounted directory, scanned recursively. To use a
+  network share, mount it and add the mount point.
+- **Jellyfin:** found on the LAN. You sign in with a username and password,
+  which are exchanged once for a token and never stored.
+- **Plex:** link through plex.tv by entering the code shown at
+  plex.tv/link, then pick a server.
+- **Cameras:** a list of stream URLs. The scan button finds Ubiquiti cameras
+  on the LAN.
 
-## MCP (assistants)
+Remote videos stream as the original file over each server's direct-play
+endpoint. Nothing is transcoded, and seeking works as it does for local files.
 
-`tessera mcp` is an MCP server on stdio for the running app — what's
-playing, open, play/pause/seek/volume, read and search subtitles, grab a
-frame, manage the queue, add folder sources. Any MCP client connects with
-`{ "command": "tessera", "args": ["mcp"] }`; no port, no token. `tessera mcp
---dev` adds tools for developing tessera itself (a sandboxed instance,
-screenshots, UI state, synthetic input). See [docs/MCP.md](docs/MCP.md).
+### Controls
 
-## Workspace layout
-
-| Crate | Responsibility |
+| Key / mouse | Action |
 |---|---|
-| `tessera-mpv` | libmpv render API wrapper (dlopen, hand-declared C ABI) |
-| `tessera-core` | MediaItem/SourceKind model, PlaybackQueue, layout solver, decode budget, title/subtitle/timecode parsing |
-| `tessera-app` | Binary: screens/windows, GL compositor, tiles, CLI, the MCP server and the API behind it |
+| Click a tile | Pause / resume it |
+| Right-click a tile | Mute / unmute it (ctrl-click on macOS) |
+| Drag a tile | Swap with another tile, or move it to another window |
+| Wheel | Volume of the tile under the cursor |
+| `←` / `→` | Seek ∓10s on the tile under the cursor (hold to scan) |
+| `↑` / `↓` | Volume of the unmuted tiles in the window |
+| `Space` | Pause / resume every tile in the window |
+| `N` / `Shift+P` | Next / previous queue item |
+| `P` | Pin the tile under the cursor large |
+| `F` | Zoom the tile under the cursor to fill its screen |
+| `W` | Toggle this window between windowed and fullscreen |
+| `-` / `+` | Remove the tile under the cursor / add a tile |
+| `L` `Q` `S` `C` | Browser window: library, queue, sources, config |
+| `Tab` | Keep the overlay visible (it hides after 5s idle otherwise) |
+| `?` | Help |
+| `Esc` | Leave tile zoom; otherwise quit |
 
-## Roadmap
+On macOS, `Cmd+W` closes a window, `Ctrl+Cmd+F` toggles fullscreen, and
+`Cmd+Q` quits.
 
-1. ~~Phase 1: skeleton — multi-monitor windows, mpv tiles, GL compositor~~
-2. Phase 2: multi-tile UX — per-screen queue strips, transport controls,
-   budget-driven eviction (pause oldest on overload), egui overlay
-3. Phase 3: sources — local FS, Jellyfin, Plex, SMB (localhost range-bridge
-   pattern from the Quest app)
-4. Phase 4: library — SQLite persistence, watch state, resume points
-5. Phase 5: curation UI tiles — browser/search/tags/collections as tiles amid
-   the stream tiles
+### Diagnostics
+
+The useful switches when something misbehaves:
+
+- `--status-interval 5` prints per-tile playback rate, frame rate, decoder
+  and dropped frames every 5 seconds.
+- `TESSERA_MPV_LOG=v` turns on mpv's own verbose log.
+- `TESSERA_PROFILE=1` logs slow render and property calls.
+- `TESSERA_VSYNC=1` turns vsync on. It is off by default because of a swap
+  stall seen with occluded windows on X11.
+
+## Assistants (MCP)
+
+`tessera mcp` is an MCP server on stdio that talks to the running app. Any
+MCP client connects with:
+
+```json
+{ "command": "tessera", "args": ["mcp"] }
+```
+
+There is no port and no token. It can only open media from configured folder
+sources and `~/Videos`, and no tool deletes anything. `tessera mcp --dev`
+adds tools for developing openTessera itself. Details are in
+[docs/MCP.md](docs/MCP.md).
+
+## Contributing
+
+Bug reports and test reports from setups not in the table above are the most
+welcome thing you can send. Code is welcome too. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for how to build, test and report.
+
+The workspace is three crates:
+
+| Crate | What it holds |
+|---|---|
+| `tessera-mpv` | libmpv render-API wrapper. The library is `dlopen`ed and its C ABI declared by hand. |
+| `tessera-core` | Logic with no UI: the queue, the layout solver, the decode budget, sources, title and subtitle parsing. Most of the tests live here. |
+| `tessera-app` | The `tessera` binary: windows, GL compositing, the egui overlay, the API and the MCP server. |
+
+Feature history and plans are in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## License
 
-GPL-3.0-or-later (see LICENSE). libmpv is GPLv2+.
+GPL-3.0-or-later; see [LICENSE](LICENSE). libmpv is GPLv2+ (or LGPLv2.1+,
+depending on how it was built).

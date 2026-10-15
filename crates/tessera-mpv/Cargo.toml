@@ -3,6 +3,7 @@ name = "tessera-mpv"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "libmpv render API wrapper via dlopen (no system dev headers required)"
 
 [dependencies]
