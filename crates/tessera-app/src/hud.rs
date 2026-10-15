@@ -53,8 +53,8 @@ pub fn draw(ctx: &egui::Context, huds: &[Placed]) {
         let painter = painter.with_clip_rect(r);
         let unit = r.width().min(r.height());
         let font = egui::FontId::monospace((unit / 42.0).clamp(9.0, 22.0));
-        let faint = egui::Stroke::new(1.0, GREEN.gamma_multiply(0.22));
-        let strong = egui::Stroke::new(1.0, GREEN.gamma_multiply(0.45));
+        let faint = egui::Stroke::new(1.0_f32, GREEN.gamma_multiply(0.22));
+        let strong = egui::Stroke::new(1.0_f32, GREEN.gamma_multiply(0.45));
 
         if p.hud.grid {
             // Square cells, ten across; every fifth line stronger, marks every ten units
@@ -74,7 +74,7 @@ pub fn draw(ctx: &egui::Context, huds: &[Placed]) {
                     painter.text(egui::pos2(r.left() + 3.0, y + 2.0), egui::Align2::LEFT_TOP, format!("{label:02}"), font.clone(), GREEN.gamma_multiply(0.6));
                 }
             }
-            corners(&painter, r.shrink(4.0), unit * 0.06, egui::Stroke::new(2.0, GREEN.gamma_multiply(0.7)));
+            corners(&painter, r.shrink(4.0), unit * 0.06, egui::Stroke::new(2.0_f32, GREEN.gamma_multiply(0.7)));
         }
 
         if let Some((x0, y0, x1, y1)) = p.hud.reticle {
@@ -89,11 +89,11 @@ pub fn draw(ctx: &egui::Context, huds: &[Placed]) {
             let box_ = egui::Rect::from_two_pos(to_screen(x0, y0), to_screen(x1, y1));
             if box_.intersects(r) {
                 let len = (box_.width().min(box_.height()) * 0.22).clamp(6.0, unit * 0.08);
-                corners(&painter, box_, len, egui::Stroke::new(2.0, GREEN));
+                corners(&painter, box_, len, egui::Stroke::new(2.0_f32, GREEN));
                 let c = box_.center();
                 let tick = len * 0.5;
                 for (a, b) in [((-tick, 0.0), (tick, 0.0)), ((0.0, -tick), (0.0, tick))] {
-                    painter.line_segment([c + egui::vec2(a.0, a.1), c + egui::vec2(b.0, b.1)], egui::Stroke::new(1.0, GREEN.gamma_multiply(0.8)));
+                    painter.line_segment([c + egui::vec2(a.0, a.1), c + egui::vec2(b.0, b.1)], egui::Stroke::new(1.0_f32, GREEN.gamma_multiply(0.8)));
                 }
             }
         }

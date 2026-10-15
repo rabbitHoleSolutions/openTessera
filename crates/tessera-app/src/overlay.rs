@@ -419,7 +419,7 @@ fn scale_style(ui: &mut egui::Ui, k: f32) {
         return;
     }
     let style = ui.style_mut();
-    for (_, font) in style.text_styles.iter_mut() {
+    for font in style.text_styles.values_mut() {
         // A floor, or a very narrow window renders unreadable slivers.
         font.size = (font.size * k).max(7.0);
     }
@@ -511,7 +511,7 @@ pub fn draw(
                                 let r = rect.shrink(2.0);
                                 let bar = egui::Rect::from_min_max(r.left_top(), egui::pos2(r.right(), r.top() + 5.0));
                                 p.rect_filled(bar, egui::Rounding::same(1.5), col);
-                                p.rect_stroke(r, egui::Rounding::same(1.5), egui::Stroke::new(1.4, col));
+                                p.rect_stroke(r, egui::Rounding::same(1.5), egui::Stroke::new(1.4_f32, col));
                                 if resp.clicked() {
                                     actions.push(OverlayAction::ToggleWindowMode);
                                 }
@@ -534,7 +534,7 @@ pub fn draw(
                                     egui::Color32::from_gray(180)
                                 };
                                 let r = rect.shrink(2.0);
-                                let st = egui::Stroke::new(1.4, col);
+                                let st = egui::Stroke::new(1.4_f32, col);
                                 p.rect_stroke(r, egui::Rounding::same(1.5), st);
                                 for i in 0..3 {
                                     let y = r.top() + 3.0 + i as f32 * 3.0;
@@ -560,7 +560,7 @@ pub fn draw(
                                     egui::Color32::from_gray(180)
                                 };
                                 let r = rect.shrink(2.0);
-                                let st = egui::Stroke::new(1.4, col);
+                                let st = egui::Stroke::new(1.4_f32, col);
                                 p.rect_stroke(r, egui::Rounding::same(1.5), st);
                                 let c = r.center();
                                 p.line_segment([egui::pos2(c.x - 3.5, c.y), egui::pos2(c.x + 3.5, c.y)], st);
@@ -670,7 +670,7 @@ pub fn draw(
                     .fill(egui::Color32::from_black_alpha(170))
                     .rounding(egui::Rounding::same(4.0 * k))
                     .inner_margin(egui::Margin::symmetric(8.0 * k, 5.0 * k))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_black_alpha(120)))
+                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha(120)))
                     .show(ui, |ui| {
                         // As wide as the tile allows (minus the 8px inset on
                         // each side), so the scrub bar is a real scrub bar
@@ -1086,7 +1086,7 @@ pub fn draw(
     if let Some(drag) = tile_drag {
         let painter = ctx.debug_painter();
         let accent = egui::Color32::from_rgb(120, 190, 255);
-        let stroke = egui::Stroke::new(2.0, accent);
+        let stroke = egui::Stroke::new(2.0_f32, accent);
         if let Some((_, src)) = tiles.iter().zip(cells.iter()).find(|(t, _)| t.id == drag.from_tile) {
             let r = px_rect(src, ppp);
             painter.rect_stroke(r, egui::Rounding::same(4.0), stroke);
@@ -1128,7 +1128,7 @@ pub fn draw(
                         .fill(egui::Color32::from_black_alpha(185))
                         .rounding(egui::Rounding::same(6.0 * k))
                         .inner_margin(egui::Margin::symmetric(6.0 * k, 5.0 * k))
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_black_alpha(120)))
+                        .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha(120)))
                         .show(ui, |ui| {
                             ui.set_width(strip_w);
                             ui.horizontal(|ui| {
@@ -1186,14 +1186,14 @@ pub fn draw(
                                             painter.rect_stroke(
                                                 rect,
                                                 egui::Rounding::same(3.0),
-                                                egui::Stroke::new(2.0, egui::Color32::WHITE),
+                                                egui::Stroke::new(2.0_f32, egui::Color32::WHITE),
                                             );
                                         } else if pos == 0 {
                                             // Next-to-play highlight.
                                             painter.rect_stroke(
                                                 rect,
                                                 egui::Rounding::same(3.0),
-                                                egui::Stroke::new(1.5, egui::Color32::from_rgb(120, 190, 255)),
+                                                egui::Stroke::new(1.5_f32, egui::Color32::from_rgb(120, 190, 255)),
                                             );
                                         }
                                         if resp.hovered() {
@@ -1216,7 +1216,7 @@ pub fn draw(
                                                 painter.hline(
                                                     rect.left()..=rect.right(),
                                                     rect.bottom(),
-                                                    egui::Stroke::new(2.0, egui::Color32::LIGHT_BLUE),
+                                                    egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
                                                 );
                                             }
                                         }
@@ -1533,7 +1533,7 @@ pub fn draw_drop_hint(ctx: &egui::Context, queue_only: bool) {
         .show(ctx, |ui| {
             egui::Frame::window(ui.style())
                 .fill(egui::Color32::from_black_alpha(225))
-                .stroke(egui::Stroke::new(2.0, egui::Color32::from_rgb(120, 190, 255)))
+                .stroke(egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(120, 190, 255)))
                 .inner_margin(egui::Margin::symmetric(28.0, 20.0))
                 .show(ui, |ui| {
                     // Explicit width: `vertical_centered` claims whatever is
@@ -1576,7 +1576,7 @@ pub fn draw_notice(ctx: &egui::Context, notice: &(String, std::time::Instant)) {
                 .fill(egui::Color32::from_black_alpha((215.0 * alpha) as u8))
                 .rounding(egui::Rounding::same(6.0))
                 .inner_margin(egui::Margin::symmetric(12.0, 7.0))
-                .stroke(egui::Stroke::new(1.0, egui::Color32::from_black_alpha((120.0 * alpha) as u8)))
+                .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha((120.0 * alpha) as u8)))
                 .show(ui, |ui| {
                     ui.label(egui::RichText::new(&notice.0).color(egui::Color32::from_white_alpha((255.0 * alpha) as u8)));
                 });

@@ -426,7 +426,7 @@ fn plex_items_from_section(json: &Value, base: &str, token: &str) -> Vec<MediaIt
             source: None,
         });
     }
-    items.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    items.sort_by_key(|a| a.title.to_lowercase());
     items
 }
 
@@ -599,7 +599,7 @@ fn jellyfin_items_from_query(json: &Value, base: &str, api_key: &str) -> Vec<Med
             source: None,
         });
     }
-    items.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    items.sort_by_key(|a| a.title.to_lowercase());
     items
 }
 

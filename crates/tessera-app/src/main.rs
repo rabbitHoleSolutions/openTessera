@@ -97,7 +97,7 @@ unsafe extern "C" fn fatal_signal(sig: i32, info: *mut libc::siginfo_t, _: *mut 
 fn install_fatal_handler() {
     unsafe {
         let mut act: libc::sigaction = std::mem::zeroed();
-        act.sa_sigaction = fatal_signal as usize;
+        act.sa_sigaction = fatal_signal as *const () as usize;
         act.sa_flags = libc::SA_SIGINFO | libc::SA_NODEFER;
         libc::sigemptyset(&mut act.sa_mask);
         libc::sigaction(libc::SIGSEGV, &act, std::ptr::null_mut());

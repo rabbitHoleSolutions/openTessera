@@ -213,7 +213,7 @@ impl PlaybackQueue {
         let split = self.cursor.map_or(0, |c| (c + 1).min(self.items.len()));
         let (_, pending) = self.items.split_at_mut(split);
         match self.order {
-            QueueOrder::Name => pending.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
+            QueueOrder::Name => pending.sort_by_key(|a| a.title.to_lowercase()),
             QueueOrder::Date => pending.sort_by_key(|i| i.modified.unwrap_or(0)),
             QueueOrder::Size => pending.sort_by_key(|i| i.size.unwrap_or(0)),
             QueueOrder::Shuffle => {}
