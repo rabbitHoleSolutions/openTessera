@@ -23,6 +23,8 @@ mod linux;
 pub use linux::*;
 
 /// An OS-level keyboard shortcut that outranks the wall's own hotkeys.
+/// Only macOS has chords, so on Linux the variants are never built.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Chord {
     /// Close the focused window (the last one quits), exactly as if its

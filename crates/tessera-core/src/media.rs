@@ -245,7 +245,7 @@ mod tests {
         // A link back up the tree must not loop forever.
         std::os::unix::fs::symlink(&root, root.join("Movies/loop")).unwrap();
 
-        let titles: Vec<String> = collect_items(&[root.clone()]).into_iter().map(|m| m.title).collect();
+        let titles: Vec<String> = collect_items(std::slice::from_ref(&root)).into_iter().map(|m| m.title).collect();
         // Files before subfolders, each by name; the linked-back root is
         // already visited, so nothing appears twice.
         assert_eq!(titles, ["top", "Heat (1995)", "clip", "S01E01"]);

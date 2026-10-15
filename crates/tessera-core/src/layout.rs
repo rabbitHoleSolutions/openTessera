@@ -45,7 +45,7 @@ pub fn solve_grid(count: usize, screen_w: f32, screen_h: f32, aspect: f32, gap: 
             let empty = (rows * cols - count) as f32;
             let penalty = empty * tile_w * tile_h * 0.75;
             let score = used - penalty;
-            if best.map_or(true, |(s, _, _)| score > s) {
+            if best.is_none_or(|(s, _, _)| score > s) {
                 best = Some((score, rows, cols));
             }
         }

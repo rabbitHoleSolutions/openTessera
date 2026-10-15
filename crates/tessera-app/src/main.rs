@@ -3171,32 +3171,26 @@ fn delete_current(
 /// Loads the next (or previous) queue item onto the tile, advancing the
 /// screen's shared queue. Returns false if the tile was not found.
 fn tile_next(screens: &mut [Screen], queue: &mut PlaybackQueue, tile_id: usize, forward: bool) -> bool {
-    for screen_idx in 0..screens.len() {
-        if !screens[screen_idx].tiles.iter().any(|t| t.id == tile_id) {
-            continue;
-        }
-        let item = {
-            let queue = &mut *queue;
-            if forward { queue.advance() } else { queue.go_back() }.cloned()
-        };
-        if let Some(item) = item {
-            let monitor_index = screens[screen_idx].monitor_index;
-            if let Some(tile) = screens[screen_idx].tiles.iter_mut().find(|t| t.id == tile_id) {
-                tile.item = item.clone();
-                if let Err(e) = tile.load(&item) {
-                    eprintln!("screen {monitor_index} tile {tile_id}: load failed: {e}");
-                } else {
-                    println!(
-                        "screen {monitor_index} tile {tile_id}: {} \"{}\"",
-                        if forward { "next" } else { "prev" },
-                        item.title
-                    );
-                }
+    let Some(screen) = screens.iter_mut().find(|s| s.tiles.iter().any(|t| t.id == tile_id)) else {
+        return false;
+    };
+    let item = if forward { queue.advance() } else { queue.go_back() }.cloned();
+    if let Some(item) = item {
+        let monitor_index = screen.monitor_index;
+        if let Some(tile) = screen.tiles.iter_mut().find(|t| t.id == tile_id) {
+            tile.item = item.clone();
+            if let Err(e) = tile.load(&item) {
+                eprintln!("screen {monitor_index} tile {tile_id}: load failed: {e}");
+            } else {
+                println!(
+                    "screen {monitor_index} tile {tile_id}: {} \"{}\"",
+                    if forward { "next" } else { "prev" },
+                    item.title
+                );
             }
         }
-        return true;
     }
-    false
+    true
 }
 
 /// Seeks every tile of a screen by a relative offset.
@@ -3573,6 +3567,8 @@ fn create_screen<T>(
             },
         )
         .ok();
+    // egui_glow takes an Arc, though the context never leaves this thread.
+    #[allow(clippy::arc_with_non_send_sync)]
     let gl = Arc::new(unsafe {
         glow::Context::from_loader_function(|s| {
             let c = std::ffi::CString::new(s).unwrap();

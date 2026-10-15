@@ -6,8 +6,10 @@ use glow::HasContext;
 use glutin::prelude::*;
 use tessera_core::Rect;
 
+type GlLoader = Box<dyn Fn(&str) -> *const c_void>;
+
 thread_local! {
-    static GL_LOADER: RefCell<Option<Box<dyn Fn(&str) -> *const c_void>>> = const { RefCell::new(None) };
+    static GL_LOADER: RefCell<Option<GlLoader>> = const { RefCell::new(None) };
 }
 
 pub fn set_gl_loader(loader: impl Fn(&str) -> *const c_void + 'static) {

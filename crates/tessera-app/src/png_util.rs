@@ -8,7 +8,7 @@ pub fn write_png_rgb(path: &Path, w: i32, h: i32, bottom_up_rgb: &[u8]) -> std::
     let mut enc = png::Encoder::new(BufWriter::new(file), w as u32, h as u32);
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
-    let mut writer = enc.write_header().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let mut writer = enc.write_header().map_err(std::io::Error::other)?;
     let stride = (w as usize) * 3;
     let mut flipped = vec![0u8; bottom_up_rgb.len()];
     for row in 0..h as usize {
@@ -18,6 +18,6 @@ pub fn write_png_rgb(path: &Path, w: i32, h: i32, bottom_up_rgb: &[u8]) -> std::
     }
     writer
         .write_image_data(&flipped)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+        .map_err(std::io::Error::other)?;
     Ok(())
 }

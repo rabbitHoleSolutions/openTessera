@@ -429,7 +429,7 @@ mod tests {
         assert_eq!(q.items().iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), vec!["b", "a"]);
         // Removing the only started item leaves nothing started.
         q.advance();
-        q.remove_item(&"local|/tmp/b.mp4".to_string());
+        q.remove_item("local|/tmp/b.mp4");
         assert!(q.current().is_none());
         assert_eq!(q.advance().unwrap().title, "a");
     }
@@ -511,16 +511,16 @@ mod tests {
     fn remove_item_adjusts_cursor() {
         let mut q = filled(); // [a b c d e], cursor=1 ("b")
         // remove pending "d": cursor unchanged
-        let it = q.remove_item(&"local|/tmp/d.mp4".to_string()).map(|m| m.title).unwrap();
+        let it = q.remove_item("local|/tmp/d.mp4").map(|m| m.title).unwrap();
         assert_eq!(it, "d");
         assert_eq!(q.items().iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), vec!["a", "b", "c", "e"]);
         assert_eq!(q.current().unwrap().title, "b");
         // remove history "a": cursor shifts down
-        q.remove_item(&"local|/tmp/a.mp4".to_string());
+        q.remove_item("local|/tmp/a.mp4");
         assert_eq!(q.items().iter().map(|m| m.title.as_str()).collect::<Vec<_>>(), vec!["b", "c", "e"]);
         assert_eq!(q.current().unwrap().title, "b");
         // remove current "b": cursor points at previous, next advance -> "c"
-        q.remove_item(&"local|/tmp/b.mp4".to_string());
+        q.remove_item("local|/tmp/b.mp4");
         assert_eq!(q.advance().unwrap().title, "c");
     }
 
