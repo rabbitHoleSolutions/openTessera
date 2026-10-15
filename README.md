@@ -6,6 +6,10 @@ A desktop video wall: many videos playing at once, tiled across one window or
 every monitor you have. Local files, Plex, Jellyfin and live security cameras
 all go into one shared queue, and every tile is a slot fed from it.
 
+![Four films playing at once in one window, with the controls of the hovered tile showing](docs/screenshot.jpg)
+
+<sub>The films are fakes: single AI-generated frames, made for testing video players.</sub>
+
 openTessera is the desktop sibling of **Tessera**, a Meta Quest app built
 around the same ideas. The two share a design, not code. It runs on Linux and
 macOS, is written in Rust on top of libmpv, and is licensed GPL-3.0-or-later.
