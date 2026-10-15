@@ -1,9 +1,8 @@
 # MCP interface
 
-`tessera mcp` is an MCP server on stdio for the running app. It was built to
-the brief in `MCP_NOTES_FROM_TIA.md` (Tia, the voice assistant, is its first
-client); this page is the reference, and records which parts of that brief
-are done.
+`tessera mcp` is an MCP server on stdio for the running app. It was built
+for a voice assistant as its first client, so replies are short and
+speakable; this page is the reference, and records what is not done yet.
 
 ## Connecting
 

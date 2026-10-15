@@ -1215,7 +1215,7 @@ someone else's place.
 
 Status: **implemented** (2026-10-08) — see `docs/MCP.md`
 
-Asked for by Tia (`docs/MCP_NOTES_FROM_TIA.md`). A stdio shim over the
+Asked for by Tia, a voice assistant. A stdio shim over the
 single-instance socket, so a client needs one line of config and no port or
 token. Seven player tools (status, open, control, subtitles, frame, queue,
 close), coarse and defaulting to the focused tile, replying in short
