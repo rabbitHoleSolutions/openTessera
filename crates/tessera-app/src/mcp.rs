@@ -705,7 +705,9 @@ impl Server {
                 let size = str_arg(a, "size").unwrap_or("1400x900");
                 let mut argv: Vec<String> = vec!["--windowed".into(), size.into(), "--ui-scale".into(), "1".into(), "--overlay".into()];
                 argv.extend(string_list(a, "args"));
-                argv.extend(string_list(a, "files"));
+                // Expanded here, against the caller's HOME: the app would
+                // read `~` as the sandbox's.
+                argv.extend(string_list(a, "files").iter().map(|f| crate::rpc::expand_home(f).to_string_lossy().into_owned()));
                 let log = std::fs::File::create(&sb.log).map_err(|e| format!("can't write {}: {e}", sb.log.display()))?;
                 let err = log.try_clone().map_err(|e| e.to_string())?;
                 let mut cmd = Command::new(own_exe());

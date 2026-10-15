@@ -244,14 +244,14 @@ quit tears down all mpv instances in parallel. Known limitation: a seek
 still briefly hitches the other tiles on its screen — mpv's render API
 blocks on the seeking core (~250ms), and tiles render sequentially on one
 thread. Fixing it needs per-tile render threads; `TESSERA_PROFILE=1` logs
-blocking render/property phases when investigating. Status (playback rate per tile, composited fps, hwdec mode,
-decoder drops, budget utilization) prints every 5 seconds; adjust with
-`--status-interval`.
+blocking render/property phases when investigating. `--status-interval N` prints a status report (playback rate per tile,
+composited fps, hwdec mode, decoder drops) every N seconds; it is off by
+default.
 
 Env vars: `TESSERA_VSYNC=1` enable vsync (off by default — an X11 swap stall
 was observed with vsync on occluded windows), `TESSERA_MPV_LIB` path to libmpv,
 `TESSERA_MPV_LOG=v` verbose mpv logs, `TESSERA_DUMP_DIR` screenshot dumps each
-status interval (add `TESSERA_DUMP_OVERLAY=1` to include the overlay UI).
+status interval, every 5s unless `--status-interval` says otherwise (add `TESSERA_DUMP_OVERLAY=1` to include the overlay UI).
 
 ## MCP (assistants)
 

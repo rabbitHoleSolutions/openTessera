@@ -87,6 +87,11 @@ const WHEEL_NOTCH_INTERVAL: Duration = Duration::from_millis(50);
 /// on each one slammed it from 0 to the cap. X11 never sends these.
 const WHEEL_PIXELS_PER_NOTCH: f64 = 40.0;
 
+/// How often decoder drop counts are sampled into the adaptive budget. The
+/// budget's streak limits are counted in these windows, so changing it
+/// changes how long drops must last before a tile is evicted.
+const DROP_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+
 struct Args {
     files: Vec<PathBuf>,
     tiles: usize,
@@ -101,6 +106,8 @@ struct Args {
     max_streams: Option<usize>,
     ceiling: f64,
     advance: bool,
+    /// --status-interval: seconds between status reports; 0 (the default)
+    /// prints none.
     status_interval: u64,
     overlay: bool,
     plex: bool,
@@ -139,7 +146,7 @@ fn parse_args() -> Result<Args, String> {
         max_streams: None,
         ceiling: tessera_core::budget::DEFAULT_CEILING_EQUIVALENTS,
         advance: false,
-        status_interval: 5,
+        status_interval: 0,
         overlay: false,
         plex: false,
         jellyfin: false,
@@ -251,7 +258,8 @@ OPTIONS:
   --hwdec MODE       {hwdec_help}
   --max-streams N    Budget: max concurrent streams (default 128; also in settings)
   --ceiling N        Budget: 1080p30-equivalent decode ceiling (default 96)
-  --status-interval S  Seconds between status prints (default 5)
+  --status-interval S  Print per-tile playback stats every S seconds
+                     (default: off; 5 when TESSERA_DUMP_DIR is set)
   --overlay          Start with the overlay UI pinned on (Tab toggles pinning;
                      otherwise the UI shows on input and hides after 5s idle)
   --plex             Add the Plex server from ~/.config/opentessera/sources.conf
@@ -675,7 +683,15 @@ fn main() {
     }
 
     let start = Instant::now();
+    // The status report is a diagnostic, off unless asked for; a dump dir
+    // implies one, since the dumps ride on it.
+    let status_interval = match args.status_interval {
+        0 if dump_dir().is_some() => 5,
+        n => n,
+    };
     let mut last_status = Instant::now();
+    let mut last_drop_sample = Instant::now();
+    let mut last_adaptive = 1.0;
     let mut last_drops: std::collections::HashMap<usize, i64> = std::collections::HashMap::new();
     let vsync = std::env::var("TESSERA_VSYNC").map(|v| v != "0").unwrap_or(false);
     let frame_interval = if vsync { Duration::from_millis(15) } else { Duration::from_millis(16) };
@@ -1091,12 +1107,13 @@ fn main() {
                             }
                         }
                     }
-                    if last_status.elapsed() >= Duration::from_secs(args.status_interval) {
-                        let dt = last_status.elapsed().as_secs_f64();
-                        last_status = Instant::now();
-                        let elapsed = start.elapsed().as_secs();
-                        println!("--- t+{elapsed}s --- fds {}", platform::fd_count());
-
+                    // Adaptive decode-budget feedback runs on its own fixed
+                    // cadence: it once shared the status report's timer, so
+                    // the report could not be turned off without turning
+                    // the budget's drop detection off with it.
+                    if last_drop_sample.elapsed() >= DROP_SAMPLE_INTERVAL {
+                        let dt = last_drop_sample.elapsed().as_secs_f64();
+                        last_drop_sample = Instant::now();
                         // Adaptive decode-budget feedback: sample per-tile
                         // decoder drop rates; sustained drops shrink the
                         // effective ceiling and evict the worst offender,
@@ -1124,7 +1141,10 @@ fn main() {
                             budget.recover();
                         }
 
-                        if budget.adaptive() < 1.0 {
+                        // Only when it moves: a wall held under the ceiling
+                        // for an hour would otherwise say so every 5s.
+                        if budget.adaptive() != last_adaptive {
+                            last_adaptive = budget.adaptive();
                             println!(
                                 "budget: adaptive ceiling {:.0}% of static, {:.1}/{:.0} streams in use, {} evictions total",
                                 budget.adaptive() * 100.0,
@@ -1133,7 +1153,12 @@ fn main() {
                                 budget.total_evictions()
                             );
                         }
-
+                    }
+                    if status_interval > 0 && last_status.elapsed() >= Duration::from_secs(status_interval) {
+                        let dt = last_status.elapsed().as_secs_f64();
+                        last_status = Instant::now();
+                        let elapsed = start.elapsed().as_secs();
+                        println!("--- t+{elapsed}s --- fds {}", platform::fd_count());
                         for screen in screens.iter_mut() {
                             screen.status(dt);
                         }

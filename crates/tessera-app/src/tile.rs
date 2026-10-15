@@ -128,6 +128,9 @@ pub struct Tile {
     pub last_time_pos: f64,
     pub duration: f64,
     pub loaded: bool,
+    /// The size last sent in a `Loaded` event, so the first frame only
+    /// re-reports a stream whose size it actually changed.
+    reported_size: (u32, u32),
     /// The recorded-media cache size and loop setting this tile was built
     /// with. Kept so [`Tile::load`] can re-derive the right options for
     /// whatever it is about to play — see the comment there.
@@ -288,6 +291,7 @@ impl Tile {
             last_time_pos: -1.0,
             duration: -1.0,
             loaded: false,
+            reported_size: (0, 0),
             cache_mb: opts.cache_mb,
             loop_file: opts.loop_file,
             audio_tracks: Vec::new(),
@@ -722,6 +726,7 @@ impl Tile {
                     self.progress_at = std::time::Instant::now();
                     self.duration = self.mpv.get_f64("duration").unwrap_or(-1.0);
                     self.refresh_tracks();
+                    self.reported_size = (w, h);
                     events.push(TileEvent::Loaded { width: w, height: h, fps, codec });
                 }
                 MpvEvent::EndFile { reason: tessera_mpv::EndFileReason::Eof, .. } => {
@@ -792,7 +797,12 @@ impl Tile {
             // size change here re-reports the stream — otherwise the decode
             // budget keeps the 0x0 it was told, which weighs nothing, and a
             // wall of cameras admits itself for free.
-            if self.ensure_texture(gl) && self.tex_w > 0 && self.tex_h > 0 {
+            // A file already gave its size at load, so its first frame is
+            // only news if the size came out different.
+            let resized = self.ensure_texture(gl);
+            let size = (self.tex_w as u32, self.tex_h as u32);
+            if resized && self.tex_w > 0 && self.tex_h > 0 && size != self.reported_size {
+                self.reported_size = size;
                 let fps = self
                     .mpv
                     .get_f64("container-fps")

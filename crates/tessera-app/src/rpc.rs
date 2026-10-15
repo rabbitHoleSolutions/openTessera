@@ -215,13 +215,18 @@ fn list_requested(params: &Value, calls: &mpsc::Sender<Call>) -> Result<Vec<Medi
     Ok(items)
 }
 
+/// `~/x` as a path under `$HOME`; anything else as given.
+pub fn expand_home(p: &str) -> PathBuf {
+    match p.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME").map(|h| PathBuf::from(h).join(rest)).unwrap_or_else(|| PathBuf::from(p)),
+        None => PathBuf::from(p),
+    }
+}
+
 /// Resolves a requested local path and checks it lies under one of `roots`.
 /// Shared with the MCP shim, which checks before starting the app with it.
 pub fn check_path(p: &str, roots: &[PathBuf]) -> Result<PathBuf, String> {
-    let expanded = match p.strip_prefix("~/") {
-        Some(rest) => std::env::var_os("HOME").map(|h| PathBuf::from(h).join(rest)).unwrap_or_else(|| PathBuf::from(p)),
-        None => PathBuf::from(p),
-    };
+    let expanded = expand_home(p);
     // Canonical, so `..` and symlinks can't walk out of a root.
     let path = std::fs::canonicalize(&expanded).map_err(|_| format!("{p} doesn't exist"))?;
     if roots.iter().any(|r| path.starts_with(r)) {
@@ -243,10 +248,7 @@ pub fn check_path(p: &str, roots: &[PathBuf]) -> Result<PathBuf, String> {
 /// `tessera_open` may play from, so this is what keeps an assistant from
 /// widening that to the whole disk.
 fn check_source_folder(p: &str) -> Result<(PathBuf, usize), String> {
-    let expanded = match p.strip_prefix("~/") {
-        Some(rest) => std::env::var_os("HOME").map(|h| PathBuf::from(h).join(rest)).unwrap_or_else(|| PathBuf::from(p)),
-        None => PathBuf::from(p),
-    };
+    let expanded = expand_home(p);
     let dir = std::fs::canonicalize(&expanded).map_err(|_| format!("{p} doesn't exist"))?;
     if !dir.is_dir() {
         return Err(format!("{p} is a file — a source is a folder"));
