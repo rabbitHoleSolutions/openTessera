@@ -216,27 +216,29 @@ impl Tile {
             // Don't sit forever on a camera that has gone off the network.
             options.push(("network-timeout", "10"));
         }
-        if opts.audio {
-            // Don't pin `ao`: let mpv auto-negotiate (pulse via PipeWire on
-            // Linux, coreaudio on macOS). The caller decides `muted`: the
-            // first tile is heard — one video should just play — and every
-            // tile added beside it starts muted, since a wall of N
-            // simultaneous streams is noise; right-click unmutes one,
-            // mirroring the Quest app's per-tile mute. A resume overrides
-            // this with the tile's own state, below.
-            options.push(("mute", if muted { "yes" } else { "no" }));
-            // What the sound server calls the stream. mpv's default is
-            // "mpv", which tells a mixer — or an assistant ducking audio
-            // under its own voice — nothing about where it came from.
-            options.push(("audio-client-name", "Tessera"));
-            // The stream's media.name comes from mpv's `title`, which
-            // defaults to "<file> - mpv"; a now-playing display wants just
-            // the title.
-            options.push(("title", "${media-title}"));
-            if let Some(dev) = &opts.audio_device {
-                options.push(("audio-device", dev));
-            }
-        } else {
+        // The audio options below are set whether or not audio is on now:
+        // the config tab can turn it on under a running tile.
+        //
+        // What the sound server calls the stream. mpv's default is "mpv",
+        // which tells a mixer — or an assistant ducking audio under its own
+        // voice — nothing about where it came from.
+        options.push(("audio-client-name", "Tessera"));
+        // The stream's media.name comes from mpv's `title`, which defaults
+        // to "<file> - mpv"; a now-playing display wants just the title.
+        options.push(("title", "${media-title}"));
+        if let Some(dev) = &opts.audio_device {
+            options.push(("audio-device", dev));
+        }
+        // The caller decides `muted`: the first tile is heard — one video
+        // should just play — and every tile added beside it starts muted,
+        // since a wall of N simultaneous streams is noise; right-click
+        // unmutes one, mirroring the Quest app's per-tile mute. A resume
+        // overrides this with the tile's own state, below. Set even with
+        // audio off, so turning it on doesn't sound the whole wall at once.
+        options.push(("mute", if muted { "yes" } else { "no" }));
+        // `ao` is never pinned: mpv auto-negotiates (pulse via PipeWire on
+        // Linux, coreaudio on macOS).
+        if !opts.audio {
             options.push(("audio", "no"));
         }
         // Looping a stream with no end is meaningless, and mpv would only
@@ -649,13 +651,12 @@ impl Tile {
     /// Tiles keep their muted state either way.
     pub fn set_audio_enabled(&mut self, enabled: bool) {
         self.audio_enabled = enabled;
-        let v = if enabled { "yes" } else { "no" };
-        if let Err(e) = self.mpv.command(&["set", "audio", v]) {
-            eprintln!("tile {}: set audio failed: {e}", self.id);
-        }
-        if enabled {
-            // audio=no skipped track selection; reselect.
-            let _ = self.mpv.command(&["set", "aid", "auto"]);
+        // `audio` is mpv's alias for `aid`, which takes a track, `auto` or
+        // `no` — not `yes`. Asking for `audio=yes` failed with a raw
+        // MPV_ERROR_COMMAND on every tile.
+        let aid = if enabled { "auto" } else { "no" };
+        if let Err(e) = self.mpv.command(&["set", "aid", aid]) {
+            eprintln!("tile {}: set aid {aid} failed: {e}", self.id);
         }
     }
 
