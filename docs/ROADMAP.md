@@ -937,6 +937,13 @@ tested against a genuinely endless MPEG-TS over UDP (the Protect streams
 need an alias this build has no way to obtain): it ran at `1.00x 15.0fps
 [640x360] drops=0`, with the budget correcting itself as above.
 
+On macOS (2026-10-16), by hand: every Protect camera played over the
+`rtsps://<controller>:7441/<alias>?enableSrtp` URL copied from its Protect
+settings (Advanced → RTSP). Playback is fine; setup is the clunky part —
+one URL per camera, copied out of Protect and pasted into the scan's empty
+field, because adopted cameras serve nothing themselves and discovery
+cannot learn the alias.
+
 ### A stream that will not open must say so
 
 Found in use, and three separate defects behind one symptom — cameras

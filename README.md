@@ -62,7 +62,7 @@ otherwise.
 | **macOS** | M1 Max, macOS 26, Homebrew mpv 0.41 (first pass) | Intel Macs; older macOS; mixed Retina and non-Retina displays; much of the interactive UI (see [ROADMAP §16](docs/ROADMAP.md)) |
 | **Windows** | — | Not supported, and no plans |
 | **Plex / Jellyfin** | The maintainer's own servers | Other server versions and setups |
-| **Cameras** | Ubiquiti UniFi Protect (G4 Dome, G6 Turret) over RTSPS from the controller | Other RTSP cameras and NVRs; RTMP, SRT, HLS, MJPEG |
+| **Cameras** | Ubiquiti UniFi Protect (G4 Dome, G6 Turret) over RTSPS from the controller, on Linux and macOS | Other RTSP cameras and NVRs; RTMP, SRT, HLS, MJPEG |
 
 Some notes on those rows:
 
