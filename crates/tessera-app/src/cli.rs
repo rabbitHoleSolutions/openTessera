@@ -173,7 +173,8 @@ OPTIONS:
   --status-interval S  Print per-tile playback stats every S seconds
                      (default: off; 5 when TESSERA_DUMP_DIR is set)
   --overlay          Start with the overlay UI pinned on (Tab toggles pinning;
-                     otherwise the UI shows on input and hides after 5s idle)
+                     otherwise the UI shows on input and fades out after 1s
+                     idle; both times are in the browser's config tab)
   --plex             Add the Plex server from ~/.config/opentessera/sources.conf
                      (or TESSERA_PLEX_URL / TESSERA_PLEX_TOKEN env vars)
   --jellyfin         Add the Jellyfin server the same way
@@ -191,7 +192,7 @@ SECOND LAUNCH:
   against the same config (development only — it reinstates both hazards).
 
 CONTROLS:
-  Tab                Pin/unpin the overlay UI (auto-hides after 5s idle)
+  Tab                Pin/unpin the overlay UI (auto-hides when idle)
   Space              Pause/resume all tiles on the focused screen
   Left click         Pause/resume the clicked tile
   Drag               Rearrange: drop on another tile to swap, or onto another

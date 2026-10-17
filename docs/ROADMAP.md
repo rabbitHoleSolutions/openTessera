@@ -1279,7 +1279,7 @@ wrapping to an empty range in release builds.
 
 - Phase 2 budget: eviction (OLDEST_STARTED), adaptive ceiling, single-stream rule
 - egui overlay: status bar, chips, transport, hover queue strips + thumbnails,
-  auto-hide (5s) + Tab pin, toasts, help + settings panels
+  auto-hide (configurable: 1s idle, then a 1.5s fade) + Tab pin, toasts, help + settings panels
 - Transport: scrub, ±10s, next/prev, keyboard; async seeks/loads
 - Tile drag-to-rearrange: same-screen drag-to-swap; cross-screen drag moves
   the tile (snapshot/rebuild with position, paused, volume, tracks intact) —

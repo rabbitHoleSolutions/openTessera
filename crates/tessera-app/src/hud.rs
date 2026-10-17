@@ -4,7 +4,7 @@
 //!
 //! Painted on egui's background layer: above the video, under every control,
 //! and never in the way of a click. It is drawn whether or not the chrome is
-//! showing (that auto-hides after five seconds).
+//! showing (that auto-hides when input goes idle).
 
 use tessera_core::Rect;
 

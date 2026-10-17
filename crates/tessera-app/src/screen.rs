@@ -359,7 +359,7 @@ impl Screen {
         let monitor_index = self.monitor_index;
         // Everything below feeds `overlay::draw`, so it is built only when
         // that will run: a wall window whose chrome is on screen. The
-        // overlay auto-hides after five seconds of no input, which is the
+        // overlay auto-hides shortly after input stops, which is the
         // steady state, and a browser window never draws any of it.
         let draws_overlay = self.role == ScreenRole::Wall && overlay.visible;
         // HUDs (grid, reticle, readout) a client has put on tiles: drawn
@@ -455,6 +455,7 @@ impl Screen {
             evictions: budget.total_evictions(),
         };
         let visible = overlay.visible;
+        let opacity = overlay.opacity;
         let pinned = overlay.pinned;
         let mut queue_drag = overlay.queue_drag;
         let mut confirm_delete = overlay.confirm_delete;
@@ -520,7 +521,7 @@ impl Screen {
                 };
                 crate::browser::draw(ctx, browser_state, settings, &queue_view, &mut bctx, &mut actions);
             } else if visible {
-                overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, tile_drag, overlay.track_panel, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete, empty_hint);
+                overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, tile_drag, overlay.track_panel, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete, empty_hint, opacity);
             }
             crate::hud::draw(ctx, &huds);
             if help_open {

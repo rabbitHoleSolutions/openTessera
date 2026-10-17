@@ -173,7 +173,7 @@ endpoint. Nothing is transcoded, and seeking works as it does for local files.
 | `W` | Toggle this window between windowed and fullscreen |
 | `-` / `+` | Remove the tile under the cursor / add a tile |
 | `L` `Q` `S` `C` | Browser window: library, queue, sources, config |
-| `Tab` | Keep the overlay visible (it hides after 5s idle otherwise) |
+| `Tab` | Keep the overlay visible (otherwise it fades out after 1s idle; the browser's config tab sets both times) |
 | `?` | Help |
 | `Esc` | Leave tile zoom; otherwise quit |
 

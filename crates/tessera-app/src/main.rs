@@ -528,9 +528,20 @@ fn main() {
                         populate_startup(&mut screens, &mut budget, &mut queue, &mpv_lib, &tile_opts, &mut next_tile_id, populate_limit);
                     }
                     sync_fullscreen_chrome(&screens);
-                    // Overlay auto-hide: visible while pinned or while user
-                    // input arrived within the last 5 seconds.
-                    overlay.visible = overlay.pinned || last_input.elapsed() < Duration::from_secs(5);
+                    // Overlay auto-hide: solid while pinned or while user
+                    // input is recent, then fading out. Each frame renders
+                    // anyway (the wall is paced, not event-driven), so the
+                    // fade needs no wakeups of its own.
+                    overlay.opacity = if overlay.pinned {
+                        1.0
+                    } else {
+                        overlay::chrome_opacity(
+                            last_input.elapsed().as_secs_f32(),
+                            settings.hide_after_secs,
+                            settings.fade_secs,
+                        )
+                    };
+                    overlay.visible = overlay.opacity > 0.0;
                     // Issue any seek the user has finished spelling out.
                     flush_seek(&mut screens, &mut overlay, false);
                     // Deferred re-anchoring of displaced fullscreen walls.

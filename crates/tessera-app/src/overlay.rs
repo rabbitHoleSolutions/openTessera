@@ -3,8 +3,9 @@
 //! the bottom of the tile under the cursor; clicking an entry plays it on
 //! that tile).
 //!
-//! Visibility: the caller computes `visible` each frame (pinned via Tab, or
-//! any user input within the last few seconds). Every frame a full egui pass
+//! Visibility: the caller computes `opacity` each frame (pinned via Tab, or
+//! any user input within the last second or so, then a fade — see
+//! [`chrome_opacity`]) and `visible` is just `opacity > 0`. Every frame a full egui pass
 //! runs — with an empty UI when hidden — so egui's input state stays fresh
 //! and stale widgets can never swallow clicks while the overlay is off. UI
 //! interactions are recorded as [`OverlayAction`]s and executed by the
@@ -37,8 +38,12 @@ pub enum TrackKind {
 
 #[derive(Default)]
 pub struct OverlayState {
-    /// Computed each frame by the caller: pinned OR recent user input.
+    /// Computed each frame by the caller: pinned OR recent user input,
+    /// i.e. `opacity > 0`.
     pub visible: bool,
+    /// How much of the wall chrome shows, 1 → 0 across the fade-out
+    /// ([`chrome_opacity`]). The help and gear panels ignore it.
+    pub opacity: f32,
     /// Tab toggles; when true the overlay never auto-hides.
     pub pinned: bool,
     pub actions: Vec<OverlayAction>,
@@ -135,6 +140,12 @@ pub struct UiSettings {
     /// an empty queue — or just the file you opened — and you fill it from
     /// the library browser.
     pub retain_queue: bool,
+    /// Seconds without input before the wall's chrome (status bar, tile
+    /// controls) starts to fade. The help and gear panels are not chrome
+    /// and stay.
+    pub hide_after_secs: f32,
+    /// How long that fade takes, in seconds; 0 hides at once.
+    pub fade_secs: f32,
     /// Media sources (folders / Plex / Jellyfin). Persisted as one JSON
     /// line in settings.conf.
     pub sources: Vec<tessera_core::sources::Source>,
@@ -149,6 +160,8 @@ impl Default for UiSettings {
             max_streams: tessera_core::budget::DEFAULT_MAX_STREAMS as u32,
             audio: true,
             retain_queue: true,
+            hide_after_secs: 1.0,
+            fade_secs: 1.5,
             sources: Vec::new(),
         }
     }
@@ -385,6 +398,23 @@ fn window_scale(w_pts: f32, h_pts: f32, design_w: f32, design_h: f32, max_h_frac
 /// The width a chip lays out in, given its cell. Never wider than the cell:
 /// an `Area` is clipped to the window, so a chip that overflows its cell on
 /// the rightmost column loses whatever crosses the window edge.
+/// Opacity of the wall chrome `idle` seconds after the last input: solid
+/// for `hide_after`, then out over `fade` on a smoothstep, which leaves the
+/// first and last moments of the fade gentle instead of a linear ramp's
+/// visible start and stop. Input mid-fade puts it straight back to 1 (the
+/// caller resets `idle`), so there is no fade *in* to match.
+pub fn chrome_opacity(idle: f32, hide_after: f32, fade: f32) -> f32 {
+    let t = idle - hide_after;
+    if t <= 0.0 {
+        return 1.0;
+    }
+    if fade.is_nan() || fade <= 0.0 || t >= fade {
+        return 0.0;
+    }
+    let x = t / fade;
+    1.0 - x * x * (3.0 - 2.0 * x)
+}
+
 fn chip_width(cell_w_pts: f32) -> f32 {
     (cell_w_pts - 16.0).clamp(80.0, 900.0)
 }
@@ -455,6 +485,7 @@ pub fn draw(
     queue_drag: &mut Option<usize>,
     confirm_delete: &mut Option<(usize, std::time::Instant)>,
     empty_hint: Option<EmptyWall>,
+    opacity: f32,
 ) {
     const CONFIRM_SECS: f64 = 4.0;
     let ppp = ctx.pixels_per_point();
@@ -474,6 +505,10 @@ pub fn draw(
         .order(WALL_ORDER)
         .anchor(egui::Align2::LEFT_TOP, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
+            // Ui::set_opacity reaches every child Ui (they clone the
+            // painter), so one call at the top of each wall Area fades all
+            // of it. Not tooltips: egui paints those on their own layer.
+            ui.set_opacity(opacity);
             egui::Frame::none()
                 .fill(ui.style().visuals.panel_fill)
                 .inner_margin(egui::Margin::symmetric(8.0, 4.0))
@@ -626,6 +661,7 @@ pub fn draw(
                 .order(WALL_ORDER)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .show(ctx, |ui| {
+                    ui.set_opacity(opacity);
                     let btn = egui::Button::new(egui::RichText::new("+").size(64.0))
                         .min_size(egui::vec2(140.0, 140.0));
                     if ui.add(btn).on_hover_text("add a tile (next from queue)").clicked() {
@@ -633,7 +669,7 @@ pub fn draw(
                     }
                 });
         }
-        Some(why) => draw_empty_wall(ctx, why, actions),
+        Some(why) => draw_empty_wall(ctx, why, actions, opacity),
         None => {}
     }
 
@@ -665,6 +701,7 @@ pub fn draw(
             .order(WALL_ORDER)
             .fixed_pos(anchor)
             .show(ctx, |ui| {
+                ui.set_opacity(opacity);
                 scale_style(ui, k);
                 egui::Frame::none()
                     .fill(egui::Color32::from_black_alpha(170))
@@ -1123,6 +1160,7 @@ pub fn draw(
                 .order(WALL_ORDER)
                 .fixed_pos(pos)
                 .show(ctx, |ui| {
+                    ui.set_opacity(opacity);
                     scale_style(ui, k);
                     egui::Frame::none()
                         .fill(egui::Color32::from_black_alpha(185))
@@ -1392,11 +1430,12 @@ pub enum EmptyWall {
     AddTile,
 }
 
-fn draw_empty_wall(ctx: &egui::Context, why: EmptyWall, actions: &mut Vec<OverlayAction>) {
+fn draw_empty_wall(ctx: &egui::Context, why: EmptyWall, actions: &mut Vec<OverlayAction>, opacity: f32) {
     egui::Area::new(egui::Id::new("tessera-empty-wall"))
         .order(WALL_ORDER)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
+            ui.set_opacity(opacity);
             egui::Frame::window(ui.style())
                 .fill(egui::Color32::from_black_alpha(200))
                 .inner_margin(egui::Margin::symmetric(28.0, 20.0))
@@ -1461,7 +1500,7 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                         .show(ui, |ui| {
                             let keys: &[(&str, &str)] = &[
                                 ("Esc", "exit fullscreen; otherwise quit"),
-                                ("Tab", "pin/unpin the overlay (auto-hides after 5s idle)"),
+                                ("Tab", "pin/unpin the overlay (auto-hides when idle)"),
                                 ("Space", "pause/resume all tiles on this screen"),
                                 ("F", "fullscreen the tile under the cursor"),
                                 ("W", "toggle THIS window: fullscreen wall <-> window (on whichever monitor it is currently on — drag it, then W)"),
@@ -1625,7 +1664,27 @@ fn fmt_time(t: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{chip_scale, chip_width, CHIP_CONTROL_H, CHIP_DESIGN_W, CHIP_MIN_CONTROL_PX};
+    use super::{chip_scale, chip_width, chrome_opacity, CHIP_CONTROL_H, CHIP_DESIGN_W, CHIP_MIN_CONTROL_PX};
+
+    #[test]
+    fn chrome_holds_then_fades_out_smoothly() {
+        // Solid through the hold, gone once the fade has run.
+        assert_eq!(chrome_opacity(0.0, 1.0, 1.5), 1.0);
+        assert_eq!(chrome_opacity(1.0, 1.0, 1.5), 1.0);
+        assert_eq!(chrome_opacity(2.5, 1.0, 1.5), 0.0);
+        assert_eq!(chrome_opacity(9.0, 1.0, 1.5), 0.0);
+        // Halfway through, half there; and never rising on the way down.
+        assert!((chrome_opacity(1.75, 1.0, 1.5) - 0.5).abs() < 1e-6);
+        let mut last = 1.0;
+        for i in 0..=30 {
+            let o = chrome_opacity(1.0 + i as f32 * 0.05, 1.0, 1.5);
+            assert!(o <= last && (0.0..=1.0).contains(&o));
+            last = o;
+        }
+        // No fade (or a nonsense one) is the old hard hide.
+        assert_eq!(chrome_opacity(1.01, 1.0, 0.0), 0.0);
+        assert_eq!(chrome_opacity(1.01, 1.0, f32::NAN), 0.0);
+    }
 
     #[test]
     fn chip_scales_down_only_when_the_cell_is_small() {

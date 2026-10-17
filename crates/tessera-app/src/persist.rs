@@ -117,6 +117,18 @@ pub fn load_settings() -> overlay::UiSettings {
                     }
                     "audio" => s.audio = v == "true" || v == "yes" || v == "on",
                     "retain_queue" => s.retain_queue = v == "true" || v == "yes" || v == "on",
+                    "hide_after_secs" => {
+                        // `is_finite`: "nan" parses, survives clamp, and
+                        // Duration::from_secs_f32 panics on it.
+                        if let Some(n) = v.parse::<f32>().ok().filter(|n| n.is_finite()) {
+                            s.hide_after_secs = n.clamp(0.5, 60.0);
+                        }
+                    }
+                    "fade_secs" => {
+                        if let Some(n) = v.parse::<f32>().ok().filter(|n| n.is_finite()) {
+                            s.fade_secs = n.clamp(0.0, 10.0);
+                        }
+                    }
                     "sources" => match serde_json::from_str::<Vec<tessera_core::sources::Source>>(v) {
                         Ok(list) => s.sources = list,
                         Err(e) => eprintln!("warning: bad sources line in settings.conf: {e}"),
@@ -141,8 +153,9 @@ pub fn save_settings(s: &overlay::UiSettings) {
     let text = format!(
         "# openTessera settings (also editable at runtime: S sources, C config)\n\
          # ui_scale is the fallback; monitor_scale remembers each display by name.\n\
-         ui_scale = {}\nmonitor_scale = {}\ncache_mb = {}\nmax_streams = {}\naudio = {}\nretain_queue = {}\nsources = {}\n",
-        s.ui_scale, scales_json, s.cache_mb, s.max_streams, s.audio, s.retain_queue, sources_json
+         ui_scale = {}\nmonitor_scale = {}\ncache_mb = {}\nmax_streams = {}\naudio = {}\nretain_queue = {}\nhide_after_secs = {}\nfade_secs = {}\nsources = {}\n",
+        s.ui_scale, scales_json, s.cache_mb, s.max_streams, s.audio, s.retain_queue, s.hide_after_secs, s.fade_secs,
+        sources_json
     );
     // Private: the sources line holds Plex tokens and Jellyfin API keys.
     let path = dir.join("settings.conf");

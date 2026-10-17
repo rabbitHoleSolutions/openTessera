@@ -68,6 +68,32 @@ pub fn draw(ctx: &egui::Context, settings: &mut UiSettings) {
                         ui.weak("for a monitor with nothing remembered");
                     });
                     ui.end_row();
+
+                    ui.label("hide controls after");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut settings.hide_after_secs)
+                                .clamp_range(0.5..=60.0)
+                                .speed(0.1)
+                                .fixed_decimals(1)
+                                .suffix(" s"),
+                        );
+                        ui.weak("of no mouse or key input (Tab pins them on)");
+                    });
+                    ui.end_row();
+
+                    ui.label("then fade out over");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut settings.fade_secs)
+                                .clamp_range(0.0..=10.0)
+                                .speed(0.1)
+                                .fixed_decimals(1)
+                                .suffix(" s"),
+                        );
+                        ui.weak("0 hides them at once");
+                    });
+                    ui.end_row();
                 });
 
             if settings.monitor_scale.is_empty() {
