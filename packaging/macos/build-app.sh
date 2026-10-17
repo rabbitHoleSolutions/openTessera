@@ -74,16 +74,15 @@ cp "$BIN" "$APP/Contents/MacOS/tessera"
 sed "s/@VERSION@/$VERSION/g" "$REPO/packaging/macos/Info.plist" > "$APP/Contents/Info.plist"
 plutil -lint -s "$APP/Contents/Info.plist"
 
-# The icon, from the same PNGs the Linux install uses. iconutil wants the
-# retina sizes as @2x of the size below; there is no 1024 master, so the
-# 512@2x slot is left empty.
+# The icon, from the rounded-rect set (packaging/icons/make-icons.swift):
+# macOS doesn't mask app icons, so the full-bleed Linux PNGs would sit in
+# the Dock as hard-edged squares. iconutil wants the retina sizes as @2x of
+# the size below.
 ICONSET="$(mktemp -d)/tessera.iconset"
 mkdir -p "$ICONSET"
 for s in 16 32 128 256 512; do
-  cp "$REPO/packaging/icons/tessera-$s.png" "$ICONSET/icon_${s}x${s}.png"
-done
-for s in 16 32 128 256; do
-  cp "$REPO/packaging/icons/tessera-$((s * 2)).png" "$ICONSET/icon_${s}x${s}@2x.png"
+  cp "$REPO/packaging/icons/macos/icon-$s.png" "$ICONSET/icon_${s}x${s}.png"
+  cp "$REPO/packaging/icons/macos/icon-$((s * 2)).png" "$ICONSET/icon_${s}x${s}@2x.png"
 done
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/tessera.icns"
 rm -rf "$(dirname "$ICONSET")"
