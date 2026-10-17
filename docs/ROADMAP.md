@@ -1125,6 +1125,19 @@ here; it depends on the toolkit and WM delivering motion during the drag,
 so it is a refinement rather than a guarantee — the drop still lands
 somewhere sensible either way.
 
+**macOS needed the pointer asked for.** A Finder drag sends no mouse-moved
+events at all: AppKit runs a drag session, and winit 0.29 implements
+`draggingEntered`/`performDragOperation` but not `draggingUpdated`. The
+cursor was wherever it was before the drag — usually outside the window —
+so every drop landed on the first tile. `platform::pointer_in_window` asks
+AppKit instead (`mouseLocationOutsideOfEventStream`, into the content view,
+scaled to physical pixels), each frame while a drag hovers and once more as
+it lands; on Linux it returns None and the tracked cursor stands. The hint
+now outlines the tile a drop will replace and sits inside it ("plays in
+this tile"), rather than centred over the corners of a 2×2. Tested by hand
+on macOS (2026-10-16): a file dropped on the lower-left tile of a four-tile
+wall played there.
+
 winit delivers one event per file with no grouping, so drops are
 accumulated per window as they arrive and acted on together in the frame
 block: a multi-file drop is one gesture and behaves like one.

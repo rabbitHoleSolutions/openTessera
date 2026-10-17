@@ -100,10 +100,10 @@ pub fn take_opened_paths() -> Vec<PathBuf> {
 }
 
 /// Where the pointer is over `window` right now, asked of the OS. Not
-/// implemented here yet: the event loop's own cursor is used instead, which
-/// goes stale during an XDND drag (the source holds the pointer grab, so no
-/// motion reaches us) — a drop then lands on the first tile rather than the
-/// one under the pointer. XQueryPointer would answer it.
+/// needed here: under X11 the event loop's own cursor keeps up during an
+/// XDND drag (ROADMAP §21 — tested with a real GTK source, drops landed on
+/// the tile under the pointer), so None leaves it alone. If a toolkit or WM
+/// turns out to withhold motion mid-drag, XQueryPointer would answer this.
 pub fn pointer_in_window(_window: &Window) -> Option<(f32, f32)> {
     None
 }
