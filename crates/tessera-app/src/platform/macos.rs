@@ -261,3 +261,72 @@ unsafe extern "C" fn open_urls(_this: *mut AnyObject, _cmd: Sel, _app: *mut AnyO
 pub fn take_opened_paths() -> Vec<PathBuf> {
     OPENED.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
 }
+
+/// AppKit's point/size/rect, laid out as CoreGraphics declares them (all
+/// `f64` on 64-bit). Declared here because objc2 0.4 has no Foundation
+/// types of its own, and these are the only three we need.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGPoint {
+    x: f64,
+    y: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGSize {
+    width: f64,
+    height: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGRect {
+    origin: CGPoint,
+    size: CGSize,
+}
+
+unsafe impl objc2::Encode for CGPoint {
+    const ENCODING: objc2::Encoding = objc2::Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
+}
+
+unsafe impl objc2::Encode for CGSize {
+    const ENCODING: objc2::Encoding = objc2::Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]);
+}
+
+unsafe impl objc2::Encode for CGRect {
+    const ENCODING: objc2::Encoding = objc2::Encoding::Struct("CGRect", &[CGPoint::ENCODING, CGSize::ENCODING]);
+}
+
+/// Where the pointer is over `window` right now, in physical pixels from
+/// the top-left of its content — the frame `CursorMoved` reports in — asked
+/// of AppKit rather than remembered from the last event.
+///
+/// A file dragged in from Finder crosses the window without a single
+/// mouse-moved event: AppKit is running a drag session, and winit 0.29
+/// implements `draggingEntered`/`performDragOperation` but not
+/// `draggingUpdated`, so `DroppedFile` arrives with no position and the
+/// event loop's cursor is wherever the pointer was before the drag — often
+/// outside the window. Without this a drop always landed on the first tile.
+pub fn pointer_in_window(window: &Window) -> Option<(f32, f32)> {
+    use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
+    let RawWindowHandle::AppKit(handle) = window.raw_window_handle() else { return None };
+    let view = handle.ns_view as *mut AnyObject;
+    if view.is_null() {
+        return None;
+    }
+    unsafe {
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if ns_window.is_null() {
+            return None;
+        }
+        // Window coordinates (origin bottom-left), then the content view's.
+        let p: CGPoint = msg_send![ns_window, mouseLocationOutsideOfEventStream];
+        let p: CGPoint = msg_send![view, convertPoint: p, fromView: std::ptr::null_mut::<AnyObject>()];
+        let bounds: CGRect = msg_send![view, bounds];
+        let flipped: bool = msg_send![view, isFlipped];
+        let y = if flipped { p.y } else { bounds.size.height - p.y };
+        let scale = window.scale_factor();
+        Some(((p.x * scale) as f32, (y * scale) as f32))
+    }
+}

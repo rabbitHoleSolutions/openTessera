@@ -1565,14 +1565,24 @@ const DROP_HINT_W: f32 = 320.0;
 /// "Drop it here" banner, shown while a file drag hovers the window.
 /// Centred and unmissable, because the alternative is dropping a file and
 /// wondering whether anything caught it.
-pub fn draw_drop_hint(ctx: &egui::Context, queue_only: bool) {
+pub fn draw_drop_hint(ctx: &egui::Context, queue_only: bool, cell: Option<Rect>) {
+    let accent = egui::Color32::from_rgb(120, 190, 255);
+    // With a tile to land on, the hint sits in that tile and outlines it,
+    // so on a busy wall it is plain which one is about to be replaced.
+    // Centred on the window it covered the corner of every tile in a 2x2.
+    let target = cell.map(|c| px_rect(&c, ctx.pixels_per_point()));
+    if let Some(r) = target {
+        ctx.layer_painter(egui::LayerId::new(PANEL_ORDER, egui::Id::new("tessera-drop-cell")))
+            .rect_stroke(r.shrink(2.0), egui::Rounding::same(4.0), egui::Stroke::new(3.0_f32, accent));
+    }
+    let offset = target.map_or(egui::Vec2::ZERO, |r| r.center() - ctx.screen_rect().center());
     egui::Area::new(egui::Id::new("tessera-drop-hint"))
         .order(PANEL_ORDER)
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .anchor(egui::Align2::CENTER_CENTER, offset)
         .show(ctx, |ui| {
             egui::Frame::window(ui.style())
                 .fill(egui::Color32::from_black_alpha(225))
-                .stroke(egui::Stroke::new(2.0_f32, egui::Color32::from_rgb(120, 190, 255)))
+                .stroke(egui::Stroke::new(2.0_f32, accent))
                 .inner_margin(egui::Margin::symmetric(28.0, 20.0))
                 .show(ui, |ui| {
                     // Explicit width: `vertical_centered` claims whatever is
@@ -1586,6 +1596,8 @@ pub fn draw_drop_hint(ctx: &egui::Context, queue_only: bool) {
                         ui.add_space(4.0);
                         ui.weak(if queue_only {
                             "dropped files are appended to the queue"
+                        } else if target.is_some() {
+                            "plays in this tile; anything extra joins the queue"
                         } else {
                             "plays here; anything extra joins the queue"
                         });

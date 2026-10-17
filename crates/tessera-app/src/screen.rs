@@ -454,6 +454,18 @@ impl Screen {
             max_streams: budget.max_streams(),
             evictions: budget.total_evictions(),
         };
+        // The tile a drop will replace, picked as `open_listed` will pick it:
+        // the one under the pointer, else the first. (None on an empty wall,
+        // where a drop makes a tile, and on the browser, where it queues.)
+        let drop_cell = if overlay.drop_target != Some(self.window.id()) || self.role != ScreenRole::Wall {
+            None
+        } else {
+            let cells = self.effective_layout();
+            let visible = || cells.iter().copied().filter(|c| c.w > 0.0 && c.h > 0.0);
+            self.cursor
+                .and_then(|(x, y)| visible().find(|c| c.contains(x, y)))
+                .or_else(|| cells.first().copied().filter(|c| c.w > 0.0 && c.h > 0.0))
+        };
         let visible = overlay.visible;
         let opacity = overlay.opacity;
         let pinned = overlay.pinned;
@@ -531,7 +543,7 @@ impl Screen {
                 overlay::draw_settings(ctx, &mut ui_scale, &mut scale_drag, &mut scale_committed, &mut settings_open, &mut actions);
             }
             if drop_hint {
-                overlay::draw_drop_hint(ctx, role == ScreenRole::Browser);
+                overlay::draw_drop_hint(ctx, role == ScreenRole::Browser, drop_cell);
             }
             if let Some(n) = &notice {
                 overlay::draw_notice(ctx, n);

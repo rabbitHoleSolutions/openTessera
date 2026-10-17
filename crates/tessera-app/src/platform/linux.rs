@@ -98,3 +98,12 @@ pub fn install_open_handler() {}
 pub fn take_opened_paths() -> Vec<PathBuf> {
     Vec::new()
 }
+
+/// Where the pointer is over `window` right now, asked of the OS. Not
+/// implemented here yet: the event loop's own cursor is used instead, which
+/// goes stale during an XDND drag (the source holds the pointer grab, so no
+/// motion reaches us) — a drop then lands on the first tile rather than the
+/// one under the pointer. XQueryPointer would answer it.
+pub fn pointer_in_window(_window: &Window) -> Option<(f32, f32)> {
+    None
+}

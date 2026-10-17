@@ -581,6 +581,20 @@ fn main() {
                     // gesture and should behave like one. The tile under
                     // the pointer is read now, not when the listing lands,
                     // by which time the pointer has moved on.
+                    //
+                    // An OS drag sends no motion while it crosses a window
+                    // (see `platform::pointer_in_window`), so the cursor is
+                    // asked of the OS instead: each frame while a drag
+                    // hovers — the drop hint marks the tile it will take —
+                    // and once more as it lands.
+                    for s in screens.iter_mut() {
+                        let id = s.window.id();
+                        if overlay.drop_target == Some(id) || dropped.iter().any(|(w, _)| *w == id) {
+                            if let Some(p) = platform::pointer_in_window(&s.window) {
+                                s.cursor = Some(p);
+                            }
+                        }
+                    }
                     for (window, paths) in std::mem::take(&mut dropped) {
                         let tile = screens
                             .iter()
