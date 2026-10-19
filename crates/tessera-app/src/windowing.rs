@@ -251,9 +251,11 @@ pub fn toggle_window_mode(screens: &mut [Screen], idx: usize) -> bool {
         // window would sit over the next app you switch to. Its missing
         // title bar is left alone here (see above) and comes back with the
         // rest of the window on the way out of fullscreen.
+        let mut remapped = false;
         if screen.floating {
             screen.floating = false;
-            window.set_window_level(winit::window::WindowLevel::Normal);
+            remapped = platform::set_floating(&window, false);
+            screen.refocus_at = Some(std::time::Instant::now() + FLOAT_REFOCUS);
         }
         if screen.windowed_restore.is_none() {
             if let Ok(pos) = window.outer_position() {
@@ -273,6 +275,13 @@ pub fn toggle_window_mode(screens: &mut [Screen], idx: usize) -> bool {
             .map(|(_, m)| m)
             .or_else(|| screen.intended_monitor.clone())
             .or_else(|| window.current_monitor());
+        if remapped && screen.intended_monitor.is_some() {
+            // The WM is still taking the window back from unfloating and
+            // would drop a fullscreen request made now. `should_fullscreen`
+            // is set, so `fix_displaced_walls` makes it once the WM settles.
+            println!("screen {}: fullscreen wall, once the window is back", screen.monitor_index);
+            return true;
+        }
         platform::enter_fullscreen(&window, monitor);
         println!("screen {}: fullscreen wall", screen.monitor_index);
     }
@@ -312,6 +321,13 @@ pub fn toggle_fullscreen(screens: &mut [Screen], idx: usize, tile_id: Option<usi
     }
 }
 
+/// How long after floating a window asks for focus back. Floating can make
+/// the WM let go of the window and take it back (it does under X11; see
+/// `platform::set_floating`), and focus goes elsewhere meanwhile. Asked for
+/// at once, the WM refuses: the window isn't on screen again until it has
+/// drawn a frame. Long enough for that, short enough to beat the next key.
+const FLOAT_REFOCUS: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Toggles one window between its ordinary self and floating: no title
 /// bar, above every other window, still movable and resizable —
 /// picture-in-picture for a wall. With the OS frame gone, the status bar's
@@ -323,11 +339,18 @@ pub fn toggle_fullscreen(screens: &mut [Screen], idx: usize, tile_id: Option<usi
 /// the WM needs watching afterwards, as [`toggle_window_mode`] does.
 pub fn toggle_floating(screens: &mut [Screen], idx: usize) -> bool {
     let mut settle = false;
+    // Where a window coming out of fullscreen is headed. Read here, not off
+    // the window afterwards: the WM may not have moved it yet, and under
+    // X11 a floating window that read its geometry too soon came back as
+    // a monitor-sized float in the monitor's corner.
+    let mut headed = None;
     if !screens[idx].floating {
-        if screens[idx].zoom_restore.is_some() {
+        if let Some(r) = screens[idx].zoom_restore {
+            headed = Some(r);
             toggle_fullscreen(screens, idx, None);
         }
         if platform::is_fullscreen(&screens[idx].window) {
+            headed = headed.or(screens[idx].windowed_restore);
             settle = toggle_window_mode(screens, idx);
         }
     }
@@ -337,13 +360,13 @@ pub fn toggle_floating(screens: &mut [Screen], idx: usize) -> bool {
     // The picture keeps its size: macOS keeps the *frame* when the title
     // bar goes, so the content would otherwise grow by the bar's height
     // (and shrink by it on the way back).
-    let size = window.inner_size();
+    let size = headed.map_or_else(|| window.inner_size(), |(_, size)| size);
     window.set_decorations(!screen.floating);
-    window.set_window_level(if screen.floating {
-        winit::window::WindowLevel::AlwaysOnTop
-    } else {
-        winit::window::WindowLevel::Normal
-    });
+    platform::set_floating(&window, screen.floating);
+    screen.refocus_at = Some(std::time::Instant::now() + FLOAT_REFOCUS);
+    if let Some((pos, _)) = headed {
+        window.set_outer_position(pos);
+    }
     let _ = window.request_inner_size(size);
     println!(
         "screen {}: {}",

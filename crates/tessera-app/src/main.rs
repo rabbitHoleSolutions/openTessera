@@ -418,6 +418,10 @@ fn main() {
     // Held as a WindowId, not an index: screen indices shift when a window
     // is closed.
     let mut cursor_over: Option<winit::window::WindowId> = None;
+    // A T (or W on a floating window) press and the window it aimed at,
+    // acted on when the key comes back up (see the release handling for
+    // why not on the press).
+    let mut on_release: Option<(char, winit::window::WindowId)> = None;
     // Left mouse button currently held (drag-threshold tracking).
     let mut left_held = false;
     // Files dropped on a window this frame, per window. winit delivers one
@@ -552,6 +556,14 @@ fn main() {
                             } else {
                                 wm_settle_at = None;
                             }
+                        }
+                    }
+                    // Focus back to a window that has just floated or
+                    // unfloated (see `Screen::refocus_at`).
+                    for s in screens.iter_mut() {
+                        if s.refocus_at.is_some_and(|at| Instant::now() >= at) {
+                            s.refocus_at = None;
+                            s.window.focus_window();
                         }
                     }
                     let settings_before = settings.clone();
@@ -1302,6 +1314,30 @@ fn main() {
                                 // already up — that delay would be felt.
                                 flush_seek(&mut screens, &mut overlay, true);
                             }
+                            // T floats on the release, not the press, and so
+                            // does W when it unfloats. Either can make the WM
+                            // let go of the window and take it back
+                            // (platform::set_floating), which moves focus while
+                            // the key is still down; the release is lost, X
+                            // keeps repeating, and with the focus change each
+                            // repeat looks new, so T toggled ~40 times a second.
+                            // Once the key is up there is nothing to lose.
+                            if key_event.state == ElementState::Released {
+                                if let (Some((k, w)), Key::Character(c)) = (on_release, &key_event.logical_key) {
+                                    if c.eq_ignore_ascii_case(&k.to_string()) {
+                                        on_release = None;
+                                        if let Some(target) = screens.iter().position(|s| s.window.id() == w) {
+                                            let settle = match k {
+                                                't' => screens[target].role == ScreenRole::Wall && toggle_floating(&mut screens, target),
+                                                _ => toggle_window_mode(&mut screens, target),
+                                            };
+                                            if settle {
+                                                wm_settle_at = Some((Instant::now() + Duration::from_millis(600), 4));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             if key_event.state == ElementState::Pressed
                                 && (!key_event.repeat || repeatable)
                                 && !screens[idx].egui.egui_ctx.wants_keyboard_input()
@@ -1356,18 +1392,17 @@ fn main() {
                                         let target = cursor_over
                                             .and_then(|w| screens.iter().position(|s| s.window.id() == w))
                                             .unwrap_or(idx);
-                                        if toggle_window_mode(&mut screens, target) {
+                                        if screens[target].floating {
+                                            // Unfloats first: on the release, as T.
+                                            on_release = Some(('w', screens[target].window.id()));
+                                        } else if toggle_window_mode(&mut screens, target) {
                                             wm_settle_at = Some((Instant::now() + Duration::from_millis(600), 4));
                                         }
                                     }
                                     Key::Character(ref c) if c.eq_ignore_ascii_case("t") => {
-                                        // Same target rule as W.
-                                        let target = cursor_over
-                                            .and_then(|w| screens.iter().position(|s| s.window.id() == w))
-                                            .unwrap_or(idx);
-                                        if screens[target].role == ScreenRole::Wall && toggle_floating(&mut screens, target) {
-                                            wm_settle_at = Some((Instant::now() + Duration::from_millis(600), 4));
-                                        }
+                                        // Same target rule as W; acted on when
+                                        // T is released (above).
+                                        on_release = Some(('t', cursor_over.unwrap_or(screens[idx].window.id())));
                                     }
                                     Key::Character(ref c) if !mods.shift_key() && c.eq_ignore_ascii_case("f") => {
                                         if screens[idx].zoomed.is_some() {

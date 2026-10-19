@@ -1326,8 +1326,41 @@ floats the window (CGWindow layer 0 → 3, title bar gone, content still
 700×450pt) and unfloats it to exactly the frame it had; zooming a tile
 while floating stays inside the window. Not testable that way: the move and
 resize drags themselves (synthetic input is not a real mouse-down, which
-AppKit's window drag needs), and Linux — where pop-shell may tile a
-borderless window, and `drag_resize_window` is the only resize there is.
+AppKit's window drag needs).
+
+**Linux needed the WM talked out of tiling it** (2026-10-19). Above-level
+and no decorations were not enough under pop-shell: it kept the window in
+its tile, which just grew into the space the title bar left. Pop-shell
+decides whether to tile when a window is mapped (NORMAL and not transient
+are tiled) and offers a client no way to ask otherwise, so
+`platform::set_floating` withdraws the window through winit's own Xlib
+Display, retypes it `_NET_WM_WINDOW_TYPE_DIALOG` (floated by every EWMH WM;
+unlike UTILITY, mutter keeps it in the dock and Alt-Tab), and maps it
+again where it was (a USPosition hint, or mutter centres it); unfloating
+maps it back as NORMAL and pop-shell tiles it again. What that cost:
+
+- Mapping again only counts once the WM has unmanaged the window and
+  reparented it to the root, so the withdraw is waited on (bounded; a few
+  ms in practice).
+- Focus goes elsewhere while the window is away, and an activation sent
+  at once is dropped (the window isn't on screen until it draws a frame),
+  so `Screen::refocus_at` asks again 250ms later from the event loop.
+- That focus change mid-keypress lost T's release, X kept repeating, and
+  each repeat looked new: T toggled ~40 times a second. T now acts on the
+  release, as does W on a floating window.
+- W from floating would ask for fullscreen before the WM had the window
+  back, which it drops; `should_fullscreen` is set and
+  `fix_displaced_walls` makes the request once it settles.
+- Floating out of fullscreen or a zoom used to read a geometry the WM
+  hadn't applied yet and float a monitor-sized window; it takes the
+  restore rect instead.
+
+Tested on Pop!_OS (GNOME, pop-shell, X11) with real key events: float,
+unfloat back into the tile, W from floating and back, T from fullscreen
+and from an F zoom, the gear checkbox, and the frameless corner resize and
+status-bar move (`drag_resize_window` / `drag_window` both work under
+mutter). Not tested: other X11 WMs, and Wayland, where the window can't be
+retyped and only the level is set (which winit doesn't do there either).
 
 **Effort**: S
 

@@ -92,6 +92,10 @@ pub struct Screen {
     /// bar's text, in physical pixels, as last drawn. None while the bar is
     /// hidden or the window isn't floating.
     move_handle: Option<egui::Rect>,
+    /// When to ask for keyboard focus again after floating or unfloating:
+    /// the WM may have handed it elsewhere (see
+    /// [`crate::windowing::toggle_floating`]). Served by the event loop.
+    pub refocus_at: Option<std::time::Instant>,
     last_status_tp: Vec<f64>,
     pub frames_drawn: u64,
     pub thumbs: ThumbCache,
@@ -155,6 +159,7 @@ impl Screen {
             zoom_restore: None,
             floating: false,
             move_handle: None,
+            refocus_at: None,
             last_status_tp: Vec::new(),
             frames_drawn: 0,
             thumbs: ThumbCache::new(),

@@ -11,7 +11,7 @@ ideas, no shared code. See `README.md` for the user-facing feature list and
 cargo build --release          # binary: target/release/tessera
 ./packaging/install.sh         # user-local install (bin + icon + .desktop)
 cargo check --workspace        # fast loop while editing
-cargo test --workspace         # 116 tests, mostly tessera-core (layout, budget, queue, sources)
+cargo test --workspace         # 117 tests, mostly tessera-core (layout, budget, queue, sources)
 cargo clippy --workspace --all-targets   # clean; keep it that way
 cargo +1.99.0 clippy --workspace --all-targets -- -D warnings   # exactly what CI runs
 ./scripts/check-macos.sh       # type-check + lint the macOS build from Linux
@@ -323,7 +323,11 @@ tiled window back to its slot ~0.3s after the app moves it, and restores
 the slot when fullscreen ends (so a fullscreen "hop" doesn't move it
 either). Placement at creation sticks, and so does fullscreen on a monitor
 (re-asserted by `fix_displaced_walls`). Report where a window *is*
-(`monitor_under_window`), never where it was asked to go.
+(`monitor_under_window`), never where it was asked to go. Floating (T) is
+the one way out of the tile: `platform::set_floating` withdraws the window
+and maps it back as a DIALOG, which pop-shell leaves alone. The window is
+away from the WM for a moment, so anything else asked of the WM right
+after (fullscreen, focus) has to wait for it — see ROADMAP §24.
 
 **`ctx.set_pixels_per_point()` takes effect on the *next* frame** (it routes
 through `set_zoom_factor`). Any UI-scale logic has to account for that one-frame

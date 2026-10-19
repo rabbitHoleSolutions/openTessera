@@ -107,3 +107,101 @@ pub fn take_opened_paths() -> Vec<PathBuf> {
 pub fn pointer_in_window(_window: &Window) -> Option<(f32, f32)> {
     None
 }
+
+/// Floats a window above every other one (true) or puts it back among
+/// them. The caller has already set its decorations, which this keeps.
+/// Returns whether the WM let go of the window and is taking it back, in
+/// which case anything else asked of the WM (fullscreen) has to wait.
+///
+/// `_NET_WM_STATE_ABOVE` alone isn't enough under a tiling WM: pop-shell
+/// keeps an "above" window in its tile, so a floating wall just grew into
+/// the space its title bar left. Pop-shell has no way for a client to ask
+/// to float; it decides when a window is mapped, and tiles only NORMAL,
+/// non-transient ones. So the window is withdrawn and mapped again as a
+/// DIALOG, which every EWMH WM floats (and, unlike UTILITY, mutter keeps
+/// in the dock and Alt-Tab), and back as NORMAL to unfloat — pop-shell
+/// then tiles it again. On Wayland the handle isn't Xlib and only the
+/// level is set (which winit doesn't do there either).
+pub fn set_floating(window: &Window, floating: bool) -> bool {
+    let remapped = retype(window, if floating { "_NET_WM_WINDOW_TYPE_DIALOG" } else { "_NET_WM_WINDOW_TYPE_NORMAL" });
+    // After the remap: a withdrawn window's state is the WM's to clear,
+    // and it does.
+    window.set_window_level(if floating {
+        winit::window::WindowLevel::AlwaysOnTop
+    } else {
+        winit::window::WindowLevel::Normal
+    });
+    remapped
+}
+
+/// Withdraws `window`, sets its `_NET_WM_WINDOW_TYPE`, and maps it again
+/// where it was. Through winit's own Display, so these requests stay in
+/// order with the ones winit sends. False if there is no X11 window to do
+/// it to.
+fn retype(window: &Window, type_atom: &str) -> bool {
+    use raw_window_handle::{HasRawDisplayHandle, HasRawWindowHandle, RawDisplayHandle, RawWindowHandle};
+    use std::ffi::CString;
+    use x11_dl::xlib;
+    let (RawDisplayHandle::Xlib(d), RawWindowHandle::Xlib(w)) = (window.raw_display_handle(), window.raw_window_handle())
+    else {
+        return false;
+    };
+    let dpy = d.display as *mut xlib::Display;
+    let xwin = w.window;
+    if dpy.is_null() || xwin == 0 {
+        return false;
+    }
+    let Ok(x) = xlib::Xlib::open() else { return false };
+    // Where the WM has it now, frame included — what a NorthWest-gravity
+    // client position means once it is managed again.
+    let pos = window.outer_position().ok();
+    unsafe {
+        let root = (x.XDefaultRootWindow)(dpy);
+        (x.XWithdrawWindow)(dpy, xwin, d.screen);
+        // Mapping again only counts as a new window once the WM has let go
+        // of this one (unmanaged it and reparented it back to the root);
+        // mapped any earlier, it reappears inside the dying frame. That
+        // takes the WM a few ms; it is a keypress, so wait for it, bounded.
+        for _ in 0..100 {
+            (x.XSync)(dpy, xlib::False);
+            let (mut r, mut parent, mut kids, mut n) = (0, 0, std::ptr::null_mut(), 0);
+            if (x.XQueryTree)(dpy, xwin, &mut r, &mut parent, &mut kids, &mut n) != 0 && !kids.is_null() {
+                (x.XFree)(kids as *mut _);
+            }
+            if parent == root {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let name = |s: &str| {
+            let c = CString::new(s).unwrap();
+            (x.XInternAtom)(dpy, c.as_ptr(), xlib::False)
+        };
+        let value = name(type_atom);
+        (x.XChangeProperty)(
+            dpy,
+            xwin,
+            name("_NET_WM_WINDOW_TYPE"),
+            xlib::XA_ATOM,
+            32,
+            xlib::PropModeReplace,
+            &value as *const xlib::Atom as *const u8,
+            1,
+        );
+        // Without a position hint mutter places a newly mapped window
+        // itself (centred on the monitor), so it would jump on every T.
+        if let Some(p) = pos {
+            let mut hints: xlib::XSizeHints = std::mem::zeroed();
+            let mut supplied = 0;
+            (x.XGetWMNormalHints)(dpy, xwin, &mut hints, &mut supplied);
+            hints.flags |= xlib::USPosition | xlib::PPosition;
+            hints.x = p.x;
+            hints.y = p.y;
+            (x.XSetWMNormalHints)(dpy, xwin, &mut hints);
+            (x.XMoveWindow)(dpy, xwin, p.x, p.y);
+        }
+        (x.XMapRaised)(dpy, xwin);
+        (x.XFlush)(dpy);
+    }
+    true
+}

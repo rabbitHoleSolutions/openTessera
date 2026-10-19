@@ -33,3 +33,9 @@ raw-window-handle = { workspace = true }
 # the build.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.4.1"
+
+# Xlib calls winit 0.29 doesn't wrap (retyping a window to float it; see
+# platform::set_floating). The version winit itself uses, so again nothing
+# new is built, and it drives winit's own Display connection.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+x11-dl = "2.21"

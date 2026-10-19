@@ -1752,6 +1752,7 @@ dependencies = [
  "tessera-mpv",
  "ureq",
  "winit",
+ "x11-dl",
 ]
 
 [[package]]

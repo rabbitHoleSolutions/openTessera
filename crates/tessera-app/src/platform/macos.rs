@@ -330,3 +330,16 @@ pub fn pointer_in_window(window: &Window) -> Option<(f32, f32)> {
         Some(((p.x * scale) as f32, (y * scale) as f32))
     }
 }
+
+/// Floats a window above every other one (true) or puts it back among
+/// them. The caller has already set its decorations. A window level is
+/// the whole story here: there is no tiling WM to talk out of tiling it,
+/// so the window never leaves and nothing has to wait (false).
+pub fn set_floating(window: &Window, floating: bool) -> bool {
+    window.set_window_level(if floating {
+        winit::window::WindowLevel::AlwaysOnTop
+    } else {
+        winit::window::WindowLevel::Normal
+    });
+    false
+}
