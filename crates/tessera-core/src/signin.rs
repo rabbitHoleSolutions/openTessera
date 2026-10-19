@@ -123,7 +123,7 @@ pub fn parse_discovery_reply(body: &str) -> Option<DiscoveredServer> {
 /// A camera (or other Ubiquiti device) that answered the discovery probe.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscoveredCamera {
-    /// The device's own name — "Front", "Carport" — which is exactly what
+    /// The device's own name — "Front", "Driveway" — which is exactly what
     /// the user calls it, so it becomes the item title.
     pub name: String,
     pub address: String,
@@ -683,10 +683,10 @@ mod camera_tests {
 
     #[test]
     fn a_truncated_record_keeps_what_was_already_read_instead_of_panicking() {
-        let mut body = tlv(&[(0x0b, b"Carport".to_vec())]);
+        let mut body = tlv(&[(0x0b, b"Driveway".to_vec())]);
         body.extend_from_slice(&[0x0c, 0xff, 0xff]); // claims 65535 bytes, sends none
         let d = parse_ubiquiti_reply(&body, "10.0.0.9").unwrap();
-        assert_eq!(d.name, "Carport");
+        assert_eq!(d.name, "Driveway");
         assert_eq!(d.address, "10.0.0.9");
         // And pure junk must not panic either.
         assert!(parse_ubiquiti_reply(&[], "10.0.0.9").is_some());

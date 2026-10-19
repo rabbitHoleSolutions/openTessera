@@ -956,7 +956,7 @@ mod camera_source_tests {
             label: "Outside".into(),
             streams: vec![
                 CameraStream { name: "Front".into(), url: "rtsps://192.168.1.1:7441/abc?enableSrtp".into() },
-                CameraStream { name: "Carport".into(), url: "rtsp://192.168.1.36:554/s0".into() },
+                CameraStream { name: "Driveway".into(), url: "rtsp://192.168.1.50:554/s0".into() },
             ],
         }
     }
@@ -974,7 +974,7 @@ mod camera_source_tests {
         assert_eq!(items[0].source.as_deref(), Some("cameras Outside (2)"));
         // Ids key on the URL, so renaming a camera keeps its place in a
         // saved queue.
-        assert_eq!(items[1].id, "camera|rtsp://192.168.1.36:554/s0");
+        assert_eq!(items[1].id, "camera|rtsp://192.168.1.50:554/s0");
     }
 
     #[test]

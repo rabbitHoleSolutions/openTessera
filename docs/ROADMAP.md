@@ -955,7 +955,7 @@ sat there:
    `eprintln!`d and otherwise dropped. The tile kept its old texture, so a
    failure was indistinguishable from a freeze — the queue had moved on and
    the picture had not. Now the frame is cleared and the reason is said out
-   loud: *"Carport: could not open the stream (unknown format)"*.
+   loud: *"Driveway: could not open the stream (unknown format)"*.
    `tessera_mpv::error_name` is public for this.
 2. **`load()` did not re-apply per-item options.** They were set once, at
    tile *creation*, from whatever that tile first held — but one queue
@@ -1235,7 +1235,7 @@ someone else's place.
 
 Status: **implemented** (2026-10-08) — see `docs/MCP.md`
 
-Asked for by Tia, a voice assistant. A stdio shim over the
+Asked for by a voice assistant, its first client. A stdio shim over the
 single-instance socket, so a client needs one line of config and no port or
 token. Seven player tools (status, open, control, subtitles, frame, queue,
 close), coarse and defaulting to the focused tile, replying in short
@@ -1246,7 +1246,7 @@ pointer input through the real event path — which replace the
 
 Monitors are also named by connector (`DP-4`) or position (`left`,
 `middle`, `right`; `top`/`bottom` only when stacked) — `tessera_core::
-monitor`, suggested by Tia's agent so clients don't each keep a table. A
+monitor`, suggested by that assistant so clients don't each keep a table. A
 windowed *move* doesn't stick under pop-shell (tried: plain move, and a
 fullscreen hop — both snapped back to the tile slot); `tessera_window`
 reports where the window really is.

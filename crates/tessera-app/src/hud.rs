@@ -1,5 +1,5 @@
 //! What a client can draw over a tile's picture: a graticule, a reticle on
-//! a region of the picture, and a line of readout. Built for Tia's Esper
+//! a region of the picture, and a line of readout. Built for a voice assistant's Esper
 //! mode (Deckard's photo analyser), but nothing in it is Esper-specific.
 //!
 //! Painted on egui's background layer: above the video, under every control,

@@ -7,7 +7,7 @@
 //! compositor then fits — so the film fills the screen. Zoom is the
 //! blunter tool: a magnification of whatever the crop left, centred unless
 //! panned (`pan_x`/`pan_y` place the zoomed window anywhere inside the crop,
-//! which is how a client walks the picture, e.g. Tia's Esper mode).
+//! which is how a client walks the picture, e.g. a voice assistant's Esper mode).
 //!
 //! All fractions are of the picture, measured from each edge, with "top"
 //! meaning the top of the image as seen (the compositor deals with the

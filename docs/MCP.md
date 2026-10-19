@@ -70,8 +70,8 @@ edges (`top,bottom[,left,right]` in %), or `off`. Zoom takes a factor
 what the crop leaves. Both belong to the video they were set on: the next
 queue item starts uncropped; moving the tile to another screen keeps them.
 
-Replies are short sentences and `[HH:MM:SS] line` lists, not JSON — Tia
-speaks them.
+Replies are short sentences and `[HH:MM:SS] line` lists, not JSON — a voice
+assistant speaks them.
 
 ## Safety
 
@@ -103,7 +103,7 @@ speaks them.
 - Subtitles: text tracks only (SRT, ASS, WebVTT, mov_text — ffmpeg converts
   them all to SRT); image tracks (PGS, VobSub) are reported as unreadable.
   Indexing an embedded track reads the file once (~1s for 2.6GB locally).
-- mpv's `audio-client-name` is `Tessera`, so the sound server (and Tia)
+- mpv's `audio-client-name` is `Tessera`, so the sound server (and any assistant listening)
   sees the streams by name. A single opened video starts with sound; tiles
   added beside it start muted.
 
@@ -115,7 +115,7 @@ of short moves glides, since each starts from where the previous one is
 heading. The HUD (`hud.rs`) is painted on egui's background layer: over the
 video, under the controls, never taking clicks, and drawn whether or not the
 chrome is showing. Its reticle is in picture coordinates, so it rides along
-with the subject as the view moves. Built for Tia's Esper mode; nothing in it
+with the subject as the view moves. Built for a voice assistant's Esper mode; nothing in it
 is Esper-specific. View and HUD belong to the video they were set on.
 
 ## Not yet

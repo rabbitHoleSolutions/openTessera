@@ -1,8 +1,8 @@
 //! What a file name says about what it is: show, season and episode for TV,
 //! title and year for a film.
 //!
-//! Release names are a convention, not a format — `House.Of.Lies.S01E02.
-//! MULTi.1080p.WEB.H264-AMB3R`, `Heat (1995).mkv`, `the_wire_1x05.avi` — so
+//! Release names are a convention, not a format — `Some.Show.S01E02.
+//! MULTi.1080p.WEB.H264-GROUP`, `Heat (1995).mkv`, `the_wire_1x05.avi` — so
 //! this is a tolerant scan rather than a grammar: tokens up to the first
 //! marker (SxxEyy, a year, or a release tag) are the title. Anything it
 //! can't place is simply left out; a wrong guess would be worse than none,
@@ -18,7 +18,7 @@ pub struct ParsedTitle {
 }
 
 impl ParsedTitle {
-    /// One line a person (or a voice) can use: "House Of Lies S01E02",
+    /// One line a person (or a voice) can use: "Some Show S01E02",
     /// "Heat (1995)".
     pub fn display(&self) -> String {
         let mut s = self.title.clone();
@@ -134,10 +134,10 @@ mod tests {
 
     #[test]
     fn scene_episode_names() {
-        let t = p("/home/x/Videos/House.Of.Lies.S01E02.MULTi.1080p.WEB.H264-AMB3R.mkv");
-        assert_eq!(t.title, "House Of Lies");
+        let t = p("/home/x/Videos/Some.Show.S01E02.MULTi.1080p.WEB.H264-GROUP.mkv");
+        assert_eq!(t.title, "Some Show");
         assert_eq!((t.season, t.episode, t.year), (Some(1), Some(2), None));
-        assert_eq!(t.display(), "House Of Lies S01E02");
+        assert_eq!(t.display(), "Some Show S01E02");
         let t = p("the_wire_1x05.avi");
         assert_eq!((t.title.as_str(), t.season, t.episode), ("the wire", Some(1), Some(5)));
         let t = p("Show Name - s3e12 - Episode Title.mp4");
