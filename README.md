@@ -37,6 +37,8 @@ macOS, is written in Rust on top of libmpv, and is licensed GPL-3.0-or-later.
 - **Tiles you can move.** Drag a tile onto another to swap them, or onto
   another window to move it there. You can also pin a tile large, zoom one
   to fill its screen, or crop the black bars out of a letterboxed film.
+  Pinning or zooming a tile gives it the sound and mutes the rest, unless
+  everything was muted already (a setting in the config tab, on by default).
 - **One queue for everything.** Build it from the library browser, reorder,
   shuffle or sort it, and choose whether it comes back after a restart.
   Hovering a tile shows the queue as a thumbnail strip.
@@ -170,8 +172,8 @@ endpoint. Nothing is transcoded, and seeking works as it does for local files.
 | `↑` / `↓` | Volume of the unmuted tiles in the window |
 | `Space` | Pause / resume every tile in the window |
 | `N` / `Shift+P` | Next / previous queue item |
-| `P` | Pin the tile under the cursor large |
-| `F` | Zoom the tile under the cursor to fill its screen |
+| `P` | Pin the tile under the cursor large (its sound plays, the rest mute) |
+| `F` | Zoom the tile under the cursor to fill its screen (likewise) |
 | `W` | Toggle this window between windowed and fullscreen |
 | `T` | Float this window on top of everything, without a title bar (drag the status bar to move it, the edges to resize) |
 | `-` / `+` | Remove the tile under the cursor / add a tile |

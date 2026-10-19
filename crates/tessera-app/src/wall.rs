@@ -38,6 +38,8 @@ pub struct Wall<'a> {
     pub next_tile_id: &'a mut usize,
     /// The --tiles cap, per window.
     pub max_tiles: usize,
+    /// `UiSettings::audio_follows`: pinning or zooming a tile solos it.
+    pub audio_follows: bool,
     /// Deferred WM re-anchor check; armed by anything that moves a window.
     pub wm_settle_at: &'a mut Option<(Instant, u32)>,
 }
@@ -75,36 +77,8 @@ pub fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx:
             }
         }
         OverlayAction::Solo { tile_id } => {
-            // Audio focus: unmute this tile, mute every other stream on
-            // every screen.
-            let mut target_ok = false;
-            let mut muted_others = 0usize;
-            for screen in wall.screens.iter_mut() {
-                for tile in screen.tiles.iter_mut() {
-                    if !tile.audio_enabled() {
-                        continue;
-                    }
-                    if tile.id == tile_id {
-                        target_ok = true;
-                        tile.set_muted(false);
-                        println!(
-                            "screen {} tile {tile_id}: solo — audio on (vol {}%)",
-                            screen.monitor_index,
-                            tile.volume()
-                        );
-                    } else if !tile.is_muted() {
-                        tile.set_muted(true);
-                        muted_others += 1;
-                    }
-                }
-            }
-            if !target_ok {
+            if !solo(wall.screens, wall.overlay, tile_id) {
                 notify(wall.overlay, "audio is off — turn it on in the config tab (C)".into());
-            } else {
-                if muted_others > 0 {
-                    println!("solo: muted {muted_others} other stream(s)");
-                }
-                wall.overlay.solo_id = Some(tile_id);
             }
         }
         OverlayAction::GoLive { tile_id } => {
@@ -119,6 +93,9 @@ pub fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx:
         OverlayAction::TogglePin { tile_id } => {
             if let Some(si) = wall.screens.iter().position(|s| s.tiles.iter().any(|t| t.id == tile_id)) {
                 toggle_pin(wall.screens, si, tile_id);
+                if wall.audio_follows && wall.screens[si].pinned == Some(tile_id) {
+                    follow_audio(wall.screens, wall.overlay, tile_id);
+                }
             }
         }
         OverlayAction::SetVolume { tile_id, volume } => {
@@ -341,6 +318,9 @@ pub fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx:
                 toggle_fullscreen(wall.screens, screen_idx, None);
             } else {
                 toggle_fullscreen(wall.screens, screen_idx, Some(tile_id));
+                if wall.audio_follows {
+                    follow_audio(wall.screens, wall.overlay, tile_id);
+                }
             }
         }
         OverlayAction::DeleteCurrent { tile_id } => {
@@ -594,6 +574,52 @@ pub fn raw_tile_click(screens: &mut [Screen], budget: &mut DecodeBudget, pc: ove
         } else {
             resume_tile(screens, budget, id);
         }
+    }
+}
+
+/// Audio focus: unmutes this tile and mutes every other stream on every
+/// screen (the solo button). False if the tile has no audio to give it —
+/// the pipeline is off.
+pub fn solo(screens: &mut [Screen], overlay: &mut OverlayState, tile_id: usize) -> bool {
+    let mut target_ok = false;
+    let mut muted_others = 0usize;
+    for screen in screens.iter_mut() {
+        for tile in screen.tiles.iter_mut() {
+            if !tile.audio_enabled() {
+                continue;
+            }
+            if tile.id == tile_id {
+                target_ok = true;
+                tile.set_muted(false);
+                println!(
+                    "screen {} tile {tile_id}: solo — audio on (vol {}%)",
+                    screen.monitor_index,
+                    tile.volume()
+                );
+            } else if !tile.is_muted() {
+                tile.set_muted(true);
+                muted_others += 1;
+            }
+        }
+    }
+    if target_ok {
+        if muted_others > 0 {
+            println!("solo: muted {muted_others} other stream(s)");
+        }
+        overlay.solo_id = Some(tile_id);
+    }
+    target_ok
+}
+
+/// Audio follows the eye: a tile just pinned or zoomed to fill its screen
+/// takes the sound — if there is any. With every stream muted the wall is
+/// silent on purpose, and pinning a tile to look at it closely is no
+/// reason to start making noise. Paused but unmuted counts as sound: the
+/// user left it on.
+pub fn follow_audio(screens: &mut [Screen], overlay: &mut OverlayState, tile_id: usize) {
+    let audible = screens.iter().flat_map(|s| s.tiles.iter()).any(|t| t.audio_enabled() && !t.is_muted());
+    if audible {
+        solo(screens, overlay, tile_id);
     }
 }
 

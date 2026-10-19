@@ -39,9 +39,9 @@ use screen::{Screen, ScreenRole};
 use seek::{flush_seek, queue_seek};
 use tile::{Tile, TileOptions};
 use wall::{
-    add_tile_action, close_screen, finish_tile_drag, handle_overlay_action, list_off_thread, open_listed,
-    pause_and_release, raw_tile_click, remove_tile_action, request_admission, resume_tile, shutdown, tile_next,
-    toggle_pin, Listed, OpenTarget, Wall,
+    add_tile_action, close_screen, finish_tile_drag, follow_audio, handle_overlay_action, list_off_thread,
+    open_listed, pause_and_release, raw_tile_click, remove_tile_action, request_admission, resume_tile, shutdown,
+    tile_next, toggle_pin, Listed, OpenTarget, Wall,
 };
 use windowing::{
     create_screen, fix_displaced_walls, monitor_infos, monitor_under_window, open_window, raise_front,
@@ -625,6 +625,7 @@ fn main() {
                             tile_opts: &tile_opts,
                             next_tile_id: &mut next_tile_id,
                             max_tiles: args.tiles,
+                            audio_follows: settings.audio_follows,
                             wm_settle_at: &mut wm_settle_at,
                         };
                         if open_listed(&mut wall, target, items) {
@@ -644,6 +645,7 @@ fn main() {
                             tile_opts: &tile_opts,
                             next_tile_id: &mut next_tile_id,
                             max_tiles: args.tiles,
+                            audio_follows: settings.audio_follows,
                             wm_settle_at: &mut wm_settle_at,
                         };
                         rpc::handle(call, &mut wall, &mut settings, cursor_over, &mut fx);
@@ -735,6 +737,7 @@ fn main() {
                                 tile_opts: &tile_opts,
                                 next_tile_id: &mut next_tile_id,
                                 max_tiles: args.tiles,
+                            audio_follows: settings.audio_follows,
                                 wm_settle_at: &mut wm_settle_at,
                             };
                             handle_overlay_action(&mut wall, action, screen_idx);
@@ -756,6 +759,7 @@ fn main() {
                                     tile_opts: &tile_opts,
                                     next_tile_id: &mut next_tile_id,
                                     max_tiles: args.tiles,
+                            audio_follows: settings.audio_follows,
                                     wm_settle_at: &mut wm_settle_at,
                                 };
                                 add_tile_action(&mut wall, si);
@@ -840,6 +844,7 @@ fn main() {
                                 tile_opts: &tile_opts,
                                 next_tile_id: &mut next_tile_id,
                                 max_tiles: args.tiles,
+                            audio_follows: settings.audio_follows,
                                 wm_settle_at: &mut wm_settle_at,
                             };
                             add_tile_action(&mut wall, idx);
@@ -1410,6 +1415,9 @@ fn main() {
                                         } else if let Some((x, y)) = screens[idx].cursor {
                                             if let Some(t) = screens[idx].tile_at(x, y) {
                                                 toggle_fullscreen(&mut screens, idx, Some(t));
+                                                if settings.audio_follows {
+                                                    follow_audio(&mut screens, &mut overlay, t);
+                                                }
                                             } else {
                                                 println!("F: no tile under the cursor");
                                             }
@@ -1455,6 +1463,7 @@ fn main() {
                                 tile_opts: &tile_opts,
                                 next_tile_id: &mut next_tile_id,
                                 max_tiles: args.tiles,
+                            audio_follows: settings.audio_follows,
                                 wm_settle_at: &mut wm_settle_at,
                             };
                                         add_tile_action(&mut wall, idx);
@@ -1473,6 +1482,9 @@ fn main() {
                                         if let Some((x, y)) = screens[idx].cursor {
                                             if let Some(tile_id) = screens[idx].tile_at(x, y) {
                                                 toggle_pin(&mut screens, idx, tile_id);
+                                                if settings.audio_follows && screens[idx].pinned == Some(tile_id) {
+                                                    follow_audio(&mut screens, &mut overlay, tile_id);
+                                                }
                                             }
                                         }
                                     }

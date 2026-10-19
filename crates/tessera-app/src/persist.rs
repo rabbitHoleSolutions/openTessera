@@ -116,6 +116,7 @@ pub fn load_settings() -> overlay::UiSettings {
                         }
                     }
                     "audio" => s.audio = v == "true" || v == "yes" || v == "on",
+                    "audio_follows" => s.audio_follows = v == "true" || v == "yes" || v == "on",
                     "retain_queue" => s.retain_queue = v == "true" || v == "yes" || v == "on",
                     "hide_after_secs" => {
                         // `is_finite`: "nan" parses, survives clamp, and
@@ -153,8 +154,8 @@ pub fn save_settings(s: &overlay::UiSettings) {
     let text = format!(
         "# openTessera settings (also editable at runtime: S sources, C config)\n\
          # ui_scale is the fallback; monitor_scale remembers each display by name.\n\
-         ui_scale = {}\nmonitor_scale = {}\ncache_mb = {}\nmax_streams = {}\naudio = {}\nretain_queue = {}\nhide_after_secs = {}\nfade_secs = {}\nsources = {}\n",
-        s.ui_scale, scales_json, s.cache_mb, s.max_streams, s.audio, s.retain_queue, s.hide_after_secs, s.fade_secs,
+         ui_scale = {}\nmonitor_scale = {}\ncache_mb = {}\nmax_streams = {}\naudio = {}\naudio_follows = {}\nretain_queue = {}\nhide_after_secs = {}\nfade_secs = {}\nsources = {}\n",
+        s.ui_scale, scales_json, s.cache_mb, s.max_streams, s.audio, s.audio_follows, s.retain_queue, s.hide_after_secs, s.fade_secs,
         sources_json
     );
     // Private: the sources line holds Plex tokens and Jellyfin API keys.

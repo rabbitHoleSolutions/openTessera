@@ -203,7 +203,9 @@ CONTROLS:
   Left/Right arrows  Seek -/+10s on the tile under the cursor
   N / Shift+P        Next / previous queue item on each tile of the focused screen
   P                  Pin the tile under the cursor: it takes most of the screen,
-                     the others share a bottom strip (P again unpins)
+                     the others share a bottom strip (P again unpins). P and F
+                     also solo the tile's audio unless everything is muted
+                     ('audio follows pin and fullscreen' in the config tab)
   - / +              Remove the tile under the cursor / add a tile (focused screen)
   F                  Fullscreen the tile under the cursor on its screen (F/Esc exits)
   W                  Toggle THIS screen (cursor's window): fullscreen wall <-> window

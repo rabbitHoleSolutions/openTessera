@@ -136,6 +136,10 @@ pub struct UiSettings {
     pub max_streams: u32,
     /// Audio pipeline enabled (tiles still start muted).
     pub audio: bool,
+    /// Pinning a tile (P) or filling the screen with it (F) solos its
+    /// audio — but only while something is audible: an all-muted wall
+    /// stays silent.
+    pub audio_follows: bool,
     /// Remember the queue between runs. Off means every launch starts with
     /// an empty queue — or just the file you opened — and you fill it from
     /// the library browser.
@@ -159,6 +163,7 @@ impl Default for UiSettings {
             cache_mb: 512,
             max_streams: tessera_core::budget::DEFAULT_MAX_STREAMS as u32,
             audio: true,
+            audio_follows: true,
             retain_queue: true,
             hide_after_secs: 1.0,
             fade_secs: 1.5,
@@ -1523,13 +1528,13 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                                 ("Esc", "exit fullscreen; otherwise quit"),
                                 ("Tab", "pin/unpin the overlay (auto-hides when idle)"),
                                 ("Space", "pause/resume all tiles on this screen"),
-                                ("F", "fullscreen the tile under the cursor"),
+                                ("F", "fullscreen the tile under the cursor (its sound plays, the rest mute, unless all are muted)"),
                                 ("W", "toggle THIS window: fullscreen wall <-> window (on whichever monitor it is currently on — drag it, then W)"),
                                 ("T", "float THIS window on top, no title bar — drag the status bar to move it, the edges to resize"),
                                 ("Left / Right", "seek -/+10s on the tile under the cursor; hold to scan (the jump adds up and is applied in batches, so it doesn't stutter)"),
                                 ("Up / Down", "volume -/+5 on unmuted tiles of this screen"),
                                 ("N / Shift+P", "next / previous queue item on each tile"),
-                                ("P", "pin the tile under the cursor: it takes most of the screen, the rest share a bottom strip"),
+                                ("P", "pin the tile under the cursor: it takes most of the screen, the rest share a bottom strip (sound follows, as F)"),
                                 ("- / +", "remove tile under cursor / add a tile"),
                                 ("L / Q", "browser window, library / queue tab (opens it if there isn't one)"),
                                 ("S / C", "browser window, sources / config tab — everything app-wide"),

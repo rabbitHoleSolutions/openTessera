@@ -1383,6 +1383,31 @@ URLs, not a client playback depends on. Credentials would follow §9
 
 ---
 
+## 26. Audio follows pin and fullscreen
+
+Status: **implemented** (2026-10-19)
+
+Pinning a tile (P, or its pin button) or zooming it to fill its screen (F,
+or its fullscreen button) solos its audio — the solo button's effect, so
+every other stream on every window mutes. Only when something is audible:
+if every tile is muted the wall is silent on purpose, and looking closely
+at one tile is no reason to start making noise. An unmuted but paused tile
+counts as audible, since the user left its sound on. Unpinning and leaving
+the zoom change nothing. On by default; "audio follows pin and fullscreen"
+in the config tab (`audio_follows` in settings.conf) turns it off.
+
+One helper, `wall::follow_audio`, called wherever a tile becomes pinned or
+zoomed: the P and F keys, the `TogglePin` / `FullscreenToggle` actions
+(the tile buttons), and the API's `pin` / `fullscreen` (which now go
+through those actions). Tested in the sandbox through the API and real
+key presses: the sound moves to the pinned or zoomed tile, stays put on
+unpin and zoom exit, an all-muted wall stays muted, and with the setting
+off nothing moves.
+
+**Effort**: S
+
+---
+
 ## Implemented features (for context)
 
 - Phase 2 budget: eviction (OLDEST_STARTED), adaptive ceiling, single-stream rule

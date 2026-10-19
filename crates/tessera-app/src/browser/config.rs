@@ -40,6 +40,11 @@ pub fn draw(ctx: &egui::Context, settings: &mut UiSettings) {
                     ui.checkbox(&mut settings.audio, "enabled (tiles after the first start muted)")
                         .on_hover_text("without this the audio pipeline is off entirely and the mute buttons do nothing");
                     ui.end_row();
+
+                    ui.label("");
+                    ui.checkbox(&mut settings.audio_follows, "audio follows pin and fullscreen")
+                        .on_hover_text("pinning a tile (P) or filling the screen with it (F) plays its sound and mutes the rest — unless everything is muted, which stays muted");
+                    ui.end_row();
                 });
 
             ui.add_space(6.0);

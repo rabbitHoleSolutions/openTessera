@@ -22,7 +22,7 @@ use tessera_core::MediaItem;
 
 use crate::overlay::{OverlayAction, UiSettings};
 use crate::screen::{Capture, CaptureWhat, RawImage, ScreenRole};
-use crate::wall::{handle_overlay_action, open_listed, pause_and_release, remove_tile_action, resume_tile, tile_next, toggle_pin, OpenTarget, Wall};
+use crate::wall::{handle_overlay_action, open_listed, pause_and_release, remove_tile_action, resume_tile, tile_next, OpenTarget, Wall};
 use crate::windowing::{monitor_under_window, toggle_window_mode, Placement};
 
 /// How long a connection waits for the event loop. A frame is ~16ms; this
@@ -872,7 +872,7 @@ fn control(
             t.set_view(next);
             println!("screen {} tile {id}: {}", s.monitor_index, next.describe());
         }
-        "pin" => toggle_pin(wall.screens, si, id),
+        "pin" => handle_overlay_action(wall, OverlayAction::TogglePin { tile_id: id }, si),
         "fullscreen" => handle_overlay_action(wall, OverlayAction::FullscreenToggle { tile_id: id }, si),
         other => {
             return Err(format!(
