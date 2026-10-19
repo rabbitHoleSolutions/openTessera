@@ -85,6 +85,13 @@ pub struct Screen {
     /// fullscreen; restored when the zoom exits. Kept separate so W and F
     /// never clobber each other's restore state.
     pub zoom_restore: Option<(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>)>,
+    /// Floating (T): no title bar, above every other window. Per window
+    /// and not persisted — see [`crate::windowing::toggle_floating`].
+    pub floating: bool,
+    /// Where a floating window can be picked up and moved: the status
+    /// bar's text, in physical pixels, as last drawn. None while the bar is
+    /// hidden or the window isn't floating.
+    move_handle: Option<egui::Rect>,
     last_status_tp: Vec<f64>,
     pub frames_drawn: u64,
     pub thumbs: ThumbCache,
@@ -146,6 +153,8 @@ impl Screen {
             should_fullscreen: false,
             windowed_restore: None,
             zoom_restore: None,
+            floating: false,
+            move_handle: None,
             last_status_tp: Vec::new(),
             frames_drawn: 0,
             thumbs: ThumbCache::new(),
@@ -468,6 +477,12 @@ impl Screen {
         };
         let visible = overlay.visible;
         let opacity = overlay.opacity;
+        let floating = self.floating;
+        // Read before the egui pass borrows half of `self`: what the
+        // pointer is over decides the cursor shape on a floating window,
+        // which has no frame of its own to show resize arrows.
+        let float_grab = self.floating_grab();
+        let mut move_handle = None;
         let pinned = overlay.pinned;
         let mut queue_drag = overlay.queue_drag;
         let mut confirm_delete = overlay.confirm_delete;
@@ -533,14 +548,26 @@ impl Screen {
                 };
                 crate::browser::draw(ctx, browser_state, settings, &queue_view, &mut bctx, &mut actions);
             } else if visible {
-                overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, tile_drag, overlay.track_panel, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete, empty_hint, opacity);
+                let ppp = ctx.pixels_per_point();
+                move_handle = overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, tile_drag, overlay.track_panel, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete, empty_hint, opacity, floating)
+                    .map(|r| egui::Rect::from_min_max((r.min.to_vec2() * ppp).to_pos2(), (r.max.to_vec2() * ppp).to_pos2()));
             }
             crate::hud::draw(ctx, &huds);
+            if let Some(grab) = float_grab {
+                use winit::window::ResizeDirection as D;
+                ctx.set_cursor_icon(match grab {
+                    crate::screen::FloatGrab::Move => egui::CursorIcon::Grab,
+                    crate::screen::FloatGrab::Resize(D::North | D::South) => egui::CursorIcon::ResizeVertical,
+                    crate::screen::FloatGrab::Resize(D::East | D::West) => egui::CursorIcon::ResizeHorizontal,
+                    crate::screen::FloatGrab::Resize(D::NorthWest | D::SouthEast) => egui::CursorIcon::ResizeNwSe,
+                    crate::screen::FloatGrab::Resize(D::NorthEast | D::SouthWest) => egui::CursorIcon::ResizeNeSw,
+                });
+            }
             if help_open {
                 overlay::draw_help(ctx, &mut help_open);
             }
             if settings_open {
-                overlay::draw_settings(ctx, &mut ui_scale, &mut scale_drag, &mut scale_committed, &mut settings_open, &mut actions);
+                overlay::draw_settings(ctx, &mut ui_scale, &mut scale_drag, &mut scale_committed, &mut settings_open, floating, &mut actions);
             }
             if drop_hint {
                 overlay::draw_drop_hint(ctx, role == ScreenRole::Browser, drop_cell);
@@ -563,6 +590,7 @@ impl Screen {
         });
         self.ui_scale = ui_scale;
         self.scale_drag = scale_drag;
+        self.move_handle = move_handle;
         if scale_committed {
             // Keyed on the monitor the window is on *now*, not the one it
             // was created on: drag a window to another display and adjust
@@ -814,5 +842,51 @@ impl Screen {
         self.compositor.destroy(&self.gl);
         self.egui.destroy();
         std::mem::take(&mut self.tiles)
+    }
+}
+
+/// What a left press on a floating window grabs instead of the wall.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloatGrab {
+    Move,
+    Resize(winit::window::ResizeDirection),
+}
+
+/// How close to a floating window's edge a press resizes it, in points.
+/// Inside the window, since there is no frame outside it to grab.
+const FLOAT_EDGE_PTS: f64 = 6.0;
+
+impl Screen {
+    /// What a left press at the cursor would grab on a floating window: an
+    /// edge resizes, the status bar's text moves. None for anything else,
+    /// and always None on a window that isn't floating.
+    pub fn floating_grab(&self) -> Option<FloatGrab> {
+        use winit::window::ResizeDirection as D;
+        if !self.floating {
+            return None;
+        }
+        let (x, y) = self.cursor?;
+        let (x, y) = (x as f64, y as f64);
+        let size = self.window.inner_size();
+        let (w, h) = (size.width as f64, size.height as f64);
+        let e = FLOAT_EDGE_PTS * self.window.scale_factor();
+        let (l, r, t, b) = (x < e, x >= w - e, y < e, y >= h - e);
+        let dir = match (l, r, t, b) {
+            (true, _, true, _) => Some(D::NorthWest),
+            (_, true, true, _) => Some(D::NorthEast),
+            (true, _, _, true) => Some(D::SouthWest),
+            (_, true, _, true) => Some(D::SouthEast),
+            (true, ..) => Some(D::West),
+            (_, true, ..) => Some(D::East),
+            (_, _, true, _) => Some(D::North),
+            (.., true) => Some(D::South),
+            _ => None,
+        };
+        if let Some(d) = dir {
+            return Some(FloatGrab::Resize(d));
+        }
+        self.move_handle
+            .filter(|r| r.contains(egui::pos2(x as f32, y as f32)))
+            .map(|_| FloatGrab::Move)
     }
 }

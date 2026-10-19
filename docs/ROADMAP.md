@@ -1295,6 +1295,61 @@ wrapping to an empty range in release builds.
 
 ---
 
+## 24. Floating on top (picture-in-picture)
+
+Status: **implemented** (2026-10-16)
+
+`T` (or "float on top" in the gear) takes a window's title bar away and
+puts it above every other window; again puts both back. Per window, not
+persisted — like W's fullscreen, it is something you do to a window, not a
+preference. It is a window-sized thing, so floating a fullscreen wall makes
+it a window first and undoes a zoom that took over the monitor; F on a
+floating window zooms within it; W from floating goes fullscreen and stops
+floating (a wall above every other app would sit over whatever you switch
+to). The picture keeps its size across the toggle: macOS keeps the *frame*
+when the title bar goes, so the content would grow by the bar's height.
+
+**Moving and resizing without a frame.** A left press within 6pt of an edge
+resizes; one on the status bar's text (the part with no controls) moves.
+Both are decided at event time in the event loop, before egui or the click
+router see the press, and handed to the OS (`drag_window` /
+`drag_resize_window`): macOS starts a window drag from the event being
+handled, so the usual frame-late click verdict is too late, and a press the
+OS consumes never sends a release, which egui would wait for forever. macOS
+refuses `drag_resize_window` but resizes a borderless window from its edges
+itself, so a refused grab just falls through as an ordinary press. The
+cursor shows the grab (resize arrows at the edges, a hand on the bar),
+since there is no frame to show it.
+
+Tested on macOS (2026-10-16) through `tessera mcp --dev`: the checkbox
+floats the window (CGWindow layer 0 → 3, title bar gone, content still
+700×450pt) and unfloats it to exactly the frame it had; zooming a tile
+while floating stays inside the window. Not testable that way: the move and
+resize drags themselves (synthetic input is not a real mouse-down, which
+AppKit's window drag needs), and Linux — where pop-shell may tile a
+borderless window, and `drag_resize_window` is the only resize there is.
+
+**Effort**: S
+
+---
+
+## 25. Protect cameras without copying URLs
+
+Status: **not started** — noted 2026-10-16
+
+Camera setup works but is clunky (§19): every Protect camera's RTSPS URL is
+copied out of Protect's settings by hand. Protect's local API, with a
+Protect user's sign-in, lists every camera with its RTSP alias — and can
+turn RTSP on for a channel — so setup could be "sign in to the controller,
+tick the cameras". §19 deliberately chose plain streams over a vendor
+client; this would be a sign-in step that *produces* those plain stream
+URLs, not a client playback depends on. Credentials would follow §9
+(exchanged once, not stored, if Protect allows a token).
+
+**Effort**: M
+
+---
+
 ## Implemented features (for context)
 
 - Phase 2 budget: eviction (OLDEST_STARTED), adaptive ceiling, single-stream rule

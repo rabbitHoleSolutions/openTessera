@@ -207,6 +207,8 @@ CONTROLS:
   - / +              Remove the tile under the cursor / add a tile (focused screen)
   F                  Fullscreen the tile under the cursor on its screen (F/Esc exits)
   W                  Toggle THIS screen (cursor's window): fullscreen wall <-> window
+  T                  Float THIS window on top, without a title bar (again: back);
+                     drag its status bar to move it, its edges to resize it
   L / Q / S / C      Browser window on the library / queue / sources / config
                      tab (opens it if there isn't one yet)
   ? or /             Help panel on the focused screen

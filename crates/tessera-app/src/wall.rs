@@ -11,7 +11,7 @@ use crate::overlay::{self, OverlayAction, OverlayState};
 use crate::screen::{Screen, ScreenRole};
 use crate::seek::fmt_time;
 use crate::tile::{Tile, TileOptions};
-use crate::windowing::{toggle_fullscreen, toggle_window_mode, window_rect};
+use crate::windowing::{toggle_floating, toggle_fullscreen, toggle_window_mode, window_rect};
 use crate::notify;
 
 /// Everything a wall action mutates, in one place.
@@ -322,6 +322,11 @@ pub fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx:
         }
         OverlayAction::ToggleWindowMode => {
             if toggle_window_mode(wall.screens, screen_idx) {
+                *wall.wm_settle_at = Some((Instant::now() + Duration::from_millis(600), 4));
+            }
+        }
+        OverlayAction::ToggleFloating => {
+            if toggle_floating(wall.screens, screen_idx) {
                 *wall.wm_settle_at = Some((Instant::now() + Duration::from_millis(600), 4));
             }
         }

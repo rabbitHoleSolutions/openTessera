@@ -1184,6 +1184,7 @@ fn dev_state(wall: &Wall, settings: &UiSettings, cursor_over: Option<winit::wind
                 "monitor": monitor_of(s),
                 "position": s.window.outer_position().ok().map(|p| [p.x, p.y]),
                 "fullscreen": crate::platform::is_fullscreen(&s.window),
+                "floating": s.floating,
                 "ui_scale": s.ui_scale,
                 "cursor": s.cursor.map(|(x, y)| [x, y]),
                 "pointer_here": cursor_over == Some(s.window.id()),

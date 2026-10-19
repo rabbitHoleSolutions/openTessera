@@ -31,7 +31,9 @@ macOS, is written in Rust on top of libmpv, and is licensed GPL-3.0-or-later.
   on its own if decoders start dropping frames.
 - **Windows and walls.** It starts as one ordinary window. You can open more
   at any time. `W` turns any window into a fullscreen wall on whatever
-  monitor it is on, and `--max` fills every monitor at once.
+  monitor it is on, and `--max` fills every monitor at once. `T` floats
+  a window above everything else without a title bar, picture-in-picture
+  style.
 - **Tiles you can move.** Drag a tile onto another to swap them, or onto
   another window to move it there. You can also pin a tile large, zoom one
   to fill its screen, or crop the black bars out of a letterboxed film.
@@ -171,6 +173,7 @@ endpoint. Nothing is transcoded, and seeking works as it does for local files.
 | `P` | Pin the tile under the cursor large |
 | `F` | Zoom the tile under the cursor to fill its screen |
 | `W` | Toggle this window between windowed and fullscreen |
+| `T` | Float this window on top of everything, without a title bar (drag the status bar to move it, the edges to resize) |
 | `-` / `+` | Remove the tile under the cursor / add a tile |
 | `L` `Q` `S` `C` | Browser window: library, queue, sources, config |
 | `Tab` | Keep the overlay visible (otherwise it fades out after 1s idle; the browser's config tab sets both times) |

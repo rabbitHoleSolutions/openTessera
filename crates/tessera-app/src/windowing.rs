@@ -247,6 +247,14 @@ pub fn toggle_window_mode(screens: &mut [Screen], idx: usize) -> bool {
         // winit moves the window there and grabs focus, which pop-shell
         // needs before it honors fullscreen for a window it has tiled.
         screen.should_fullscreen = true;
+        // A floating window stops floating: a wall above every other
+        // window would sit over the next app you switch to. Its missing
+        // title bar is left alone here (see above) and comes back with the
+        // rest of the window on the way out of fullscreen.
+        if screen.floating {
+            screen.floating = false;
+            window.set_window_level(winit::window::WindowLevel::Normal);
+        }
         if screen.windowed_restore.is_none() {
             if let Ok(pos) = window.outer_position() {
                 let size = window.inner_size();
@@ -290,7 +298,9 @@ pub fn toggle_fullscreen(screens: &mut [Screen], idx: usize, tile_id: Option<usi
         }
     } else if let Some(id) = tile_id {
         screen.zoomed = Some(id);
-        if !platform::is_fullscreen(&screen.window) {
+        // A floating window zooms within itself: it is a small window on
+        // purpose, and taking the monitor over would undo that.
+        if !platform::is_fullscreen(&screen.window) && !screen.floating {
             // Windowed window: also take over the whole monitor.
             if let Ok(pos) = screen.window.outer_position() {
                 let size = screen.window.inner_size();
@@ -300,6 +310,47 @@ pub fn toggle_fullscreen(screens: &mut [Screen], idx: usize, tile_id: Option<usi
             platform::enter_fullscreen(&screen.window, monitor);
         }
     }
+}
+
+/// Toggles one window between its ordinary self and floating: no title
+/// bar, above every other window, still movable and resizable —
+/// picture-in-picture for a wall. With the OS frame gone, the status bar's
+/// text moves it and its edges resize it (`Screen::floating_grab`, handled
+/// in the event loop before egui sees the press).
+///
+/// Floating is a window-sized thing, so a fullscreen wall becomes a window
+/// first and a zoom that took over the monitor is undone. Returns whether
+/// the WM needs watching afterwards, as [`toggle_window_mode`] does.
+pub fn toggle_floating(screens: &mut [Screen], idx: usize) -> bool {
+    let mut settle = false;
+    if !screens[idx].floating {
+        if screens[idx].zoom_restore.is_some() {
+            toggle_fullscreen(screens, idx, None);
+        }
+        if platform::is_fullscreen(&screens[idx].window) {
+            settle = toggle_window_mode(screens, idx);
+        }
+    }
+    let screen = &mut screens[idx];
+    screen.floating = !screen.floating;
+    let window = screen.window.clone();
+    // The picture keeps its size: macOS keeps the *frame* when the title
+    // bar goes, so the content would otherwise grow by the bar's height
+    // (and shrink by it on the way back).
+    let size = window.inner_size();
+    window.set_decorations(!screen.floating);
+    window.set_window_level(if screen.floating {
+        winit::window::WindowLevel::AlwaysOnTop
+    } else {
+        winit::window::WindowLevel::Normal
+    });
+    let _ = window.request_inner_size(size);
+    println!(
+        "screen {}: {}",
+        screen.monitor_index,
+        if screen.floating { "floating on top" } else { "ordinary window" }
+    );
+    settle
 }
 
 /// Snaps the walls back onto their intended monitors. Two displacements

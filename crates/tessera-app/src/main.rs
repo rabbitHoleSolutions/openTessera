@@ -45,7 +45,7 @@ use wall::{
 };
 use windowing::{
     create_screen, fix_displaced_walls, monitor_infos, monitor_under_window, open_window, raise_front,
-    sync_fullscreen_chrome, toggle_fullscreen, toggle_window_mode, window_builder, Placement,
+    sync_fullscreen_chrome, toggle_floating, toggle_fullscreen, toggle_window_mode, window_builder, Placement,
 };
 
 /// Size of the initial window, and of windows opened at runtime, when no
@@ -1002,6 +1002,29 @@ fn main() {
                             return;
                         }
                     }
+                    // A floating window has no frame, so a left press on its
+                    // edge or its status text is the OS's to resize or move
+                    // it with — taken here, at event time, before egui or
+                    // the click router see it. macOS's window drag starts
+                    // from the event being handled, so a frame later is too
+                    // late; and a press the OS consumes never gets its
+                    // release, which egui would otherwise wait for forever.
+                    // macOS resizes a borderless window from its edges
+                    // itself and refuses drag_resize_window; a refused
+                    // grab falls through to the wall as an ordinary press.
+                    if let WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } = &event {
+                        if !platform::is_secondary_click(MouseButton::Left, mods) {
+                            let taken = match screens[idx].floating_grab() {
+                                Some(screen::FloatGrab::Move) => screens[idx].window.drag_window().is_ok(),
+                                Some(screen::FloatGrab::Resize(d)) => screens[idx].window.drag_resize_window(d).is_ok(),
+                                None => false,
+                            };
+                            if taken {
+                                last_input = Instant::now();
+                                return;
+                            }
+                        }
+                    }
                     // Forward everything to egui so its input state stays
                     // fresh. Event-time consumption is NOT used to gate raw
                     // input: egui's pointer position lags one frame, so
@@ -1334,6 +1357,15 @@ fn main() {
                                             .and_then(|w| screens.iter().position(|s| s.window.id() == w))
                                             .unwrap_or(idx);
                                         if toggle_window_mode(&mut screens, target) {
+                                            wm_settle_at = Some((Instant::now() + Duration::from_millis(600), 4));
+                                        }
+                                    }
+                                    Key::Character(ref c) if c.eq_ignore_ascii_case("t") => {
+                                        // Same target rule as W.
+                                        let target = cursor_over
+                                            .and_then(|w| screens.iter().position(|s| s.window.id() == w))
+                                            .unwrap_or(idx);
+                                        if screens[target].role == ScreenRole::Wall && toggle_floating(&mut screens, target) {
                                             wm_settle_at = Some((Instant::now() + Duration::from_millis(600), 4));
                                         }
                                     }

@@ -192,6 +192,9 @@ pub enum OverlayAction {
     /// "W" key or status-bar window button: toggle THIS screen's window
     /// between a fullscreen wall and a normal decorated window.
     ToggleWindowMode,
+    /// Float this window on top without a title bar, or bring it back
+    /// (T, or the gear).
+    ToggleFloating,
     /// Gear button: show/hide the settings panel.
     ToggleSettings,
     /// Library browser: add these items to the shared queue, folded into
@@ -486,8 +489,13 @@ pub fn draw(
     confirm_delete: &mut Option<(usize, std::time::Instant)>,
     empty_hint: Option<EmptyWall>,
     opacity: f32,
-) {
+    floating: bool,
+) -> Option<egui::Rect> {
     const CONFIRM_SECS: f64 = 4.0;
+    // A floating window's move handle: the status text's share of the bar,
+    // which holds no controls. Returned in points for the caller to hit-test
+    // presses against (see `Screen::floating_grab`).
+    let mut move_handle = None;
     let ppp = ctx.pixels_per_point();
 
 
@@ -615,6 +623,9 @@ pub fn draw(
                             }
                             // Status text, in the space the controls left.
                             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                if floating {
+                                    move_handle = Some(ui.max_rect());
+                                }
                                 ui.set_clip_rect(ui.available_rect_before_wrap());
                                 ui.strong(format!("Tessera — screen {monitor_index}"));
                                 if pinned {
@@ -1281,6 +1292,7 @@ pub fn draw(
                 });
         }
     }
+    move_handle
 }
 
 /// The gear icon, painter-drawn rather than a glyph: egui's bundled fonts
@@ -1327,6 +1339,7 @@ pub fn draw_settings(
     drag: &mut Option<f32>,
     committed: &mut bool,
     open: &mut bool,
+    floating: bool,
     actions: &mut Vec<OverlayAction>,
 ) {
     let win = ctx.screen_rect();
@@ -1373,6 +1386,14 @@ pub fn draw_settings(
                     ui.weak("remembered for this monitor, so each display keeps its own");
                     ui.weak("a target, not a fixed size: a tile's controls shrink below it");
                     ui.weak("when the tile is too small to hold them at full size");
+
+                    ui.add_space(10.0);
+                    let mut float = floating;
+                    if ui.checkbox(&mut float, "float on top (T)").changed() {
+                        actions.push(OverlayAction::ToggleFloating);
+                    }
+                    ui.weak("no title bar, above every other window; drag the status");
+                    ui.weak("bar to move it, and its edges to resize it");
 
                     ui.add_space(12.0);
                     ui.separator();
@@ -1504,6 +1525,7 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                                 ("Space", "pause/resume all tiles on this screen"),
                                 ("F", "fullscreen the tile under the cursor"),
                                 ("W", "toggle THIS window: fullscreen wall <-> window (on whichever monitor it is currently on — drag it, then W)"),
+                                ("T", "float THIS window on top, no title bar — drag the status bar to move it, the edges to resize"),
                                 ("Left / Right", "seek -/+10s on the tile under the cursor; hold to scan (the jump adds up and is applied in batches, so it doesn't stutter)"),
                                 ("Up / Down", "volume -/+5 on unmuted tiles of this screen"),
                                 ("N / Shift+P", "next / previous queue item on each tile"),
