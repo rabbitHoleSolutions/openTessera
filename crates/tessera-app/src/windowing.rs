@@ -251,14 +251,7 @@ pub fn toggle_window_mode(screens: &mut [Screen], idx: usize) -> bool {
         // window would sit over the next app you switch to. Its missing
         // title bar is left alone here (see above) and comes back with the
         // rest of the window on the way out of fullscreen.
-        let mut remapped = false;
-        if screen.floating {
-            screen.floating = false;
-            remapped = platform::set_floating(&window, false);
-            if remapped {
-                screen.refocus_at = Some(std::time::Instant::now() + FLOAT_REFOCUS);
-            }
-        }
+        let remapped = unfloat_for_fullscreen(screen);
         if screen.windowed_restore.is_none() {
             if let Ok(pos) = window.outer_position() {
                 let size = window.inner_size();
@@ -321,6 +314,23 @@ pub fn toggle_fullscreen(screens: &mut [Screen], idx: usize, tile_id: Option<usi
             platform::enter_fullscreen(&screen.window, monitor);
         }
     }
+}
+
+/// Stops a window floating on its way to fullscreen (W, or the API's
+/// fullscreen). Its missing title bar is left alone, as it comes back with
+/// the rest of the window on the way out of fullscreen. Returns whether the
+/// WM let go of the window to do it, in which case a fullscreen request
+/// made now would be dropped: the caller leaves it to `fix_displaced_walls`.
+pub fn unfloat_for_fullscreen(screen: &mut Screen) -> bool {
+    if !screen.floating {
+        return false;
+    }
+    screen.floating = false;
+    let remapped = platform::set_floating(&screen.window, false);
+    if remapped {
+        screen.refocus_at = Some(std::time::Instant::now() + FLOAT_REFOCUS);
+    }
+    remapped
 }
 
 /// How long after floating a window asks for focus back. Floating can make

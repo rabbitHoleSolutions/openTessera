@@ -23,7 +23,7 @@ use tessera_core::MediaItem;
 use crate::overlay::{OverlayAction, UiSettings};
 use crate::screen::{Capture, CaptureWhat, RawImage, ScreenRole};
 use crate::wall::{handle_overlay_action, open_listed, pause_and_release, remove_tile_action, resume_tile, tile_next, OpenTarget, Wall};
-use crate::windowing::{monitor_under_window, toggle_window_mode, Placement};
+use crate::windowing::{monitor_under_window, toggle_window_mode, unfloat_for_fullscreen, Placement};
 
 /// How long a connection waits for the event loop. A frame is ~16ms; this
 /// is for a loop stalled behind something slow, which should surface as an
@@ -1105,8 +1105,14 @@ fn place_window(wall: &mut Wall, wi: usize, monitor: Option<usize>, fullscreen: 
             s.monitor_index = *n;
             s.intended_monitor = Some(m.clone());
         }
+        // A floating wall stops floating, as with W. If the WM let go of
+        // it to do that, the fullscreen request waits for
+        // `fix_displaced_walls` (`should_fullscreen` is set).
+        let remapped = unfloat_for_fullscreen(s);
         s.should_fullscreen = true;
-        crate::platform::enter_fullscreen(&window, m.map(|(_, m)| m).or_else(|| s.intended_monitor.clone()));
+        if !(remapped && s.intended_monitor.is_some()) {
+            crate::platform::enter_fullscreen(&window, m.map(|(_, m)| m).or_else(|| s.intended_monitor.clone()));
+        }
         settle = true;
     } else {
         if is_fs {
