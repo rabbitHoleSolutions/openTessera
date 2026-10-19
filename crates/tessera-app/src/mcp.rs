@@ -809,7 +809,7 @@ fn string_list(a: &Value, k: &str) -> Vec<String> {
     a.get(k).and_then(Value::as_array).map(|v| v.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default()
 }
 
-/// One tile, as a sentence: "tile 0: House Of Lies S01E02 — playing at
+/// One tile, as a sentence: "tile 0: Some Show S01E02 — playing at
 /// 00:12:03 of 00:29:00, chapter 3 of 8 "Act Two", volume 100% (focused)".
 fn tile_line(t: &Value) -> String {
     if t.is_null() {
@@ -1184,7 +1184,7 @@ fn player_tools() -> Vec<Value> {
             "What tessera is playing right now, per tile: title (show + season/episode, or film + year), position and \
              duration (HH:MM:SS), chapter, paused/muted/volume, the file, and which tile is focused — the one every other \
              tool acts on when you don't name a tile. Cheap enough to call before any ambiguous request. \
-             Example line: `tile 0: House Of Lies S01E02 — playing at 00:12:03 of 00:29:00, volume 100% (focused)`.",
+             Example line: `tile 0: Some Show S01E02 — playing at 00:12:03 of 00:29:00, volume 100% (focused)`.",
             json!({ "type": "object", "properties": {} }),
             true,
             true,
