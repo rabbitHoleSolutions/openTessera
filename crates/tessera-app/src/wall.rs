@@ -640,6 +640,7 @@ pub fn toggle_pin(screens: &mut [Screen], screen_idx: usize, tile_id: usize) {
 /// move the tile there. Released over its own screen: swap the dragged
 /// tile with the tile under the pointer. Dropping on empty space, outside
 /// the grid, or back on the source cell is a no-op.
+#[allow(clippy::too_many_arguments)]
 pub fn finish_tile_drag(
     screens: &mut [Screen],
     budget: &mut DecodeBudget,
@@ -648,6 +649,7 @@ pub fn finish_tile_drag(
     overlay: &mut overlay::OverlayState,
     drag: overlay::TileDrag,
     max_tiles: usize,
+    audio_follows: bool,
 ) {
     let Some(src) = screens.iter().position(|s| s.window.id() == drag.window_id) else {
         return;
@@ -684,8 +686,12 @@ pub fn finish_tile_drag(
     let monitor_index = screens[src].monitor_index;
     // Dropping a strip tile onto the pinned cell features the dragged tile
     // instead of swapping Vec positions (the big cell follows the pin id).
+    // It is a pin like P's, so the sound follows it as P's does.
     if screens[src].pinned == Some(to) {
         toggle_pin(screens, src, drag.from_tile);
+        if audio_follows {
+            follow_audio(screens, overlay, drag.from_tile);
+        }
         return;
     }
     if screens[src].swap_tiles(drag.from_tile, to) {

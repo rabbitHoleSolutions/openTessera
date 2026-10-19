@@ -1222,6 +1222,7 @@ fn main() {
                                         &mut overlay,
                                         drag,
                                         args.tiles,
+                                        settings.audio_follows,
                                     );
                                 } else if let Some(pc) =
                                     overlay.pending_click.take().filter(|pc| !pc.right)

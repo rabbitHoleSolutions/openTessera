@@ -1398,8 +1398,10 @@ in the config tab (`audio_follows` in settings.conf) turns it off.
 
 One helper, `wall::follow_audio`, called wherever a tile becomes pinned or
 zoomed: the P and F keys, the `TogglePin` / `FullscreenToggle` actions
-(the tile buttons), and the API's `pin` / `fullscreen` (which now go
-through those actions). Tested in the sandbox through the API and real
+(the tile buttons), the API's `pin` / `fullscreen` (which now go
+through those actions), and dropping a strip tile on the pinned cell
+(`finish_tile_drag`), which pins it without going through P — missed at
+first, found in use on macOS. Tested in the sandbox through the API and real
 key presses: the sound moves to the pinned or zoomed tile, stays put on
 unpin and zoom exit, an all-muted wall stays muted, and with the setting
 off nothing moves.
