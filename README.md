@@ -14,6 +14,15 @@ openTessera is the desktop sibling of **Tessera**, a Meta Quest app built
 around the same ideas. The two share a design, not code. It runs on Linux and
 macOS, is written in Rust on top of libmpv, and is licensed GPL-3.0-or-later.
 
+**Built with AI.** Most of the code and documentation were written by
+Claude (Anthropic's model) through Claude Code, with a person directing the
+design, testing on real hardware, and deciding what ships. Many commits
+carry a `Co-Authored-By: Claude` line; one without it wasn't necessarily
+written by hand, since the early history predates the habit.
+[CLAUDE.md](CLAUDE.md) is the working notes it was given, and
+[docs/ROADMAP.md](docs/ROADMAP.md) records why things were built the way
+they are.
+
 > **Status: a personal project, shared as-is.** It is used every day on one
 > Linux machine and has had a first pass on one Mac. Anything outside that
 > setup is untested — see [what has been tested](#what-has-been-tested). Bug
