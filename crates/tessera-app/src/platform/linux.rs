@@ -30,6 +30,12 @@ pub const WM_SETTLE: bool = true;
 /// wait for the first tick, which is when Finder's open-file arrives.)
 pub const DEFER_STARTUP_TILES: bool = false;
 
+/// T (and W on a floating window) act on the key's release. Floating can
+/// make the WM let go of the window and take it back (`set_floating`),
+/// which moves focus while the key is still down: the release is lost, X
+/// repeats, and T toggled ~40 times a second.
+pub const FLOAT_ON_RELEASE: bool = true;
+
 /// WM_CLASS, and the name the desktop entry matches with StartupWMClass.
 /// Set explicitly rather than left to default from the binary name, so
 /// renaming the binary can't silently break the dock association.

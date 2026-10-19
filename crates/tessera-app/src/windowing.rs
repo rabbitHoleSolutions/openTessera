@@ -255,7 +255,9 @@ pub fn toggle_window_mode(screens: &mut [Screen], idx: usize) -> bool {
         if screen.floating {
             screen.floating = false;
             remapped = platform::set_floating(&window, false);
-            screen.refocus_at = Some(std::time::Instant::now() + FLOAT_REFOCUS);
+            if remapped {
+                screen.refocus_at = Some(std::time::Instant::now() + FLOAT_REFOCUS);
+            }
         }
         if screen.windowed_restore.is_none() {
             if let Ok(pos) = window.outer_position() {
@@ -362,8 +364,12 @@ pub fn toggle_floating(screens: &mut [Screen], idx: usize) -> bool {
     // (and shrink by it on the way back).
     let size = headed.map_or_else(|| window.inner_size(), |(_, size)| size);
     window.set_decorations(!screen.floating);
-    platform::set_floating(&window, screen.floating);
-    screen.refocus_at = Some(std::time::Instant::now() + FLOAT_REFOCUS);
+    // Only a window the WM let go of needs focus back. Where floating is a
+    // window level (macOS, Wayland) focus never left, and asking again
+    // would pull it back from an app clicked in the meantime.
+    if platform::set_floating(&window, screen.floating) {
+        screen.refocus_at = Some(std::time::Instant::now() + FLOAT_REFOCUS);
+    }
     if let Some((pos, _)) = headed {
         window.set_outer_position(pos);
     }

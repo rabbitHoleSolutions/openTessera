@@ -1319,26 +1319,16 @@ fn main() {
                                 // already up — that delay would be felt.
                                 flush_seek(&mut screens, &mut overlay, true);
                             }
-                            // T floats on the release, not the press, and so
-                            // does W when it unfloats. Either can make the WM
-                            // let go of the window and take it back
-                            // (platform::set_floating), which moves focus while
-                            // the key is still down; the release is lost, X
-                            // keeps repeating, and with the focus change each
-                            // repeat looks new, so T toggled ~40 times a second.
+                            // Where floating can move focus mid-press, T floats
+                            // on the release, not the press, and so does W when
+                            // it unfloats (see platform::FLOAT_ON_RELEASE).
                             // Once the key is up there is nothing to lose.
                             if key_event.state == ElementState::Released {
                                 if let (Some((k, w)), Key::Character(c)) = (on_release, &key_event.logical_key) {
                                     if c.eq_ignore_ascii_case(&k.to_string()) {
                                         on_release = None;
-                                        if let Some(target) = screens.iter().position(|s| s.window.id() == w) {
-                                            let settle = match k {
-                                                't' => screens[target].role == ScreenRole::Wall && toggle_floating(&mut screens, target),
-                                                _ => toggle_window_mode(&mut screens, target),
-                                            };
-                                            if settle {
-                                                wm_settle_at = Some((Instant::now() + Duration::from_millis(600), 4));
-                                            }
+                                        if float_key(&mut screens, k, w) {
+                                            wm_settle_at = Some((Instant::now() + Duration::from_millis(600), 4));
                                         }
                                     }
                                 }
@@ -1397,7 +1387,7 @@ fn main() {
                                         let target = cursor_over
                                             .and_then(|w| screens.iter().position(|s| s.window.id() == w))
                                             .unwrap_or(idx);
-                                        if screens[target].floating {
+                                        if screens[target].floating && platform::FLOAT_ON_RELEASE {
                                             // Unfloats first: on the release, as T.
                                             on_release = Some(('w', screens[target].window.id()));
                                         } else if toggle_window_mode(&mut screens, target) {
@@ -1405,9 +1395,13 @@ fn main() {
                                         }
                                     }
                                     Key::Character(ref c) if c.eq_ignore_ascii_case("t") => {
-                                        // Same target rule as W; acted on when
-                                        // T is released (above).
-                                        on_release = Some(('t', cursor_over.unwrap_or(screens[idx].window.id())));
+                                        // Same target rule as W.
+                                        let w = cursor_over.unwrap_or(screens[idx].window.id());
+                                        if platform::FLOAT_ON_RELEASE {
+                                            on_release = Some(('t', w));
+                                        } else if float_key(&mut screens, 't', w) {
+                                            wm_settle_at = Some((Instant::now() + Duration::from_millis(600), 4));
+                                        }
                                     }
                                     Key::Character(ref c) if !mods.shift_key() && c.eq_ignore_ascii_case("f") => {
                                         if screens[idx].zoomed.is_some() {
@@ -1679,6 +1673,19 @@ fn browser_tab_key(c: &str) -> Option<browser::Tab> {
 fn notify(overlay: &mut overlay::OverlayState, msg: String) {
     println!("{msg}");
     overlay.notice = Some((msg, Instant::now()));
+}
+
+/// T (float) or W on a floating window (unfloat to a wall), aimed at the
+/// window `w` — on the press or the release, per
+/// `platform::FLOAT_ON_RELEASE`. Returns whether the WM needs watching.
+fn float_key(screens: &mut [Screen], key: char, w: winit::window::WindowId) -> bool {
+    let Some(target) = screens.iter().position(|s| s.window.id() == w) else {
+        return false;
+    };
+    match key {
+        't' => screens[target].role == ScreenRole::Wall && toggle_floating(screens, target),
+        _ => toggle_window_mode(screens, target),
+    }
 }
 
 #[cfg(test)]

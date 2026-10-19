@@ -39,6 +39,10 @@ pub const WM_SETTLE: bool = false;
 /// "just this file".
 pub const DEFER_STARTUP_TILES: bool = true;
 
+/// Floating is only a window level here (`set_floating`): focus stays put,
+/// so T acts on the press like every other toggle.
+pub const FLOAT_ON_RELEASE: bool = false;
+
 /// Nothing to add: a bundle's identity lives in its Info.plist, and
 /// per-window icons don't exist on macOS (the Dock shows the bundle's).
 pub fn window_builder(wb: WindowBuilder) -> WindowBuilder {
