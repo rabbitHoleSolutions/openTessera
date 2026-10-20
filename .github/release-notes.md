@@ -1,7 +1,7 @@
 ## macOS
 
 Download the `.dmg`, open it, and drag **Tessera** into **Applications**.
-Apple Silicon only. It carries its own copy of libmpv, so it needs nothing
+Apple Silicon, macOS 15 or newer. It carries its own copy of libmpv, so it needs nothing
 else installed.
 
 **This build isn't signed by Apple yet**, so the first time you open it,

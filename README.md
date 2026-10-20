@@ -89,7 +89,7 @@ Some notes on those rows:
   controller, not on its own; the add-source form explains this.
 - **macOS.** The DMG on the [releases page](https://github.com/rabbitHoleSolutions/openTessera/releases)
   is not signed by Apple yet, so macOS asks you to approve it once (the
-  release notes say how). It is built for Apple Silicon only.
+  release notes say how). It needs Apple Silicon and macOS 15 or newer.
 
 Known rough edges are listed in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
 
