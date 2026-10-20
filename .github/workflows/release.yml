@@ -16,8 +16,9 @@ jobs:
   macos:
     # Apple Silicon. The bundled Homebrew libraries set the oldest macOS
     # the DMG runs on (build-app.sh writes it into Info.plist), and that is
-    # the runner's: an older runner image is how to reach older Macs.
-    runs-on: macos-latest
+    # the runner's: macos-latest (26) made a DMG Sequoia refused. Move this
+    # on when GitHub retires the image, and the oldest supported Mac with it.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99.0
