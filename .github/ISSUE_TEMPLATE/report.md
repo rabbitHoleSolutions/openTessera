@@ -14,8 +14,8 @@ about: Something broke, or a report of how openTessera runs on your setup
 - OS and version:
 - Desktop / window manager, and X11 or Wayland:
 - GPU and driver:
-- libmpv version (`mpv --version`):
-- How you installed (built from source, `install.sh`, `build-app.sh`):
+- `tessera --version` (on a Mac: `/Applications/Tessera.app/Contents/MacOS/tessera --version`):
+- How you installed (the DMG, built from source, `install.sh`, `build-app.sh`):
 - Sources involved (local, Plex, Jellyfin, camera make/model):
 
 **Log**

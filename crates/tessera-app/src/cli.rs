@@ -109,6 +109,7 @@ pub fn parse_args() -> Result<Args, String> {
                 print_usage();
                 std::process::exit(0);
             }
+            "-V" | "--version" => std::process::exit(print_version()),
             // Launch Services' process serial number, which older macOS
             // passes to apps opened from Finder. Not ours to parse.
             s if s.starts_with("-psn_") => {}
@@ -135,6 +136,26 @@ pub fn parse_args() -> Result<Args, String> {
         return Err("--fullscreen is for the one window; --screens/--max are already fullscreen".into());
     }
     Ok(args)
+}
+
+/// `--version`: the app's version, and the libmpv it would play with —
+/// loaded for real, so a broken install fails here rather than at the
+/// first video. Needs no display, which is what makes it the release
+/// build's smoke test (a DMG's bundled libmpv, with Homebrew hidden).
+/// Returns the exit code: 1 when libmpv won't load.
+fn print_version() -> i32 {
+    println!("tessera {}", env!("CARGO_PKG_VERSION"));
+    match tessera_mpv::MpvLib::load() {
+        Ok(l) => {
+            let v = l.client_api_version();
+            println!("libmpv client API {}.{} from {}", v >> 16, v & 0xFFFF, l.path());
+            0
+        }
+        Err(e) => {
+            println!("libmpv: {e}");
+            1
+        }
+    }
 }
 
 pub fn print_usage() {
@@ -181,6 +202,7 @@ OPTIONS:
                      (TESSERA_JELLYFIN_URL / TESSERA_JELLYFIN_KEY)
   --plex-library N         Only list this Plex library (by title)
   --jellyfin-library N     Only list this Jellyfin library (by name)
+  --version          Print the version and which libmpv it loads, then exit
 
 SECOND LAUNCH:
   Running tessera again does not start a second app: it hands its files to

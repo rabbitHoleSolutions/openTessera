@@ -15,7 +15,13 @@ cargo test --workspace         # 117 tests, mostly tessera-core (layout, budget,
 cargo clippy --workspace --all-targets   # clean; keep it that way
 cargo +1.99.0 clippy --workspace --all-targets -- -D warnings   # exactly what CI runs
 ./scripts/check-macos.sh       # type-check + lint the macOS build from Linux
+tessera --version              # app version + which libmpv loads; needs no display
 ```
+
+Releases: bump `version` in Cargo.toml, tag `vX.Y.Z`, push the tag. CI
+(`release.yml`) builds the macOS DMG (`build-app.sh --dmg`, libmpv bundled)
+and attaches it to a draft release to publish by hand. `rust-version`
+(1.90) is held by CI's `msrv` job.
 
 Running it needs a display, libmpv, and media. **The first choice for
 checking a change is the `tessera-dev` MCP server** (`.mcp.json`; build

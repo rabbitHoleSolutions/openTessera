@@ -140,6 +140,10 @@ pub fn error_name(code: c_int) -> &'static str {
 
 pub struct MpvLib {
     _lib: Library,
+    /// The candidate it was loaded from, as written (`@executable_path/...`
+    /// unexpanded): whether an app bundle used its own copy or a package
+    /// manager's is the first question about a broken install.
+    path: String,
     create: unsafe extern "C" fn() -> MpvHandlePtr,
     initialize: unsafe extern "C" fn(MpvHandlePtr) -> c_int,
     terminate_destroy: unsafe extern "C" fn(MpvHandlePtr),
@@ -198,14 +202,14 @@ impl MpvLib {
         let mut failures = Vec::new();
         for path in library_candidates() {
             match unsafe { Library::new(&path) } {
-                Ok(lib) => return Self::from_library(lib),
+                Ok(lib) => return Self::from_library(lib, path),
                 Err(e) => failures.push(format!("{path}: {e}")),
             }
         }
         Err(Error::LibraryOpen(failures.join("; ")))
     }
 
-    fn from_library(lib: Library) -> Result<Arc<Self>, Error> {
+    fn from_library(lib: Library, path: String) -> Result<Arc<Self>, Error> {
         unsafe {
             let this = MpvLib {
                 create: sym!(lib, mpv_create),
@@ -223,6 +227,7 @@ impl MpvLib {
                 render_context_render: sym!(lib, mpv_render_context_render),
                 render_context_free: sym!(lib, mpv_render_context_free),
                 _lib: lib,
+                path,
             };
             let version = (this.client_api_version)();
             if version < (1u64 << 16) {
@@ -234,6 +239,11 @@ impl MpvLib {
 
     pub fn client_api_version(&self) -> u64 {
         unsafe { (self.client_api_version)() }
+    }
+
+    /// Where it was loaded from: see the field.
+    pub fn path(&self) -> &str {
+        &self.path
     }
 }
 

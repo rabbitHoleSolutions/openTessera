@@ -87,20 +87,21 @@ Some notes on those rows:
   should play. LAN discovery only finds Ubiquiti devices; for anything else,
   paste the stream URL. A UniFi Protect camera streams through its
   controller, not on its own; the add-source form explains this.
-- **macOS.** There is no signed or notarized build yet. Build it from
-  source as described below.
+- **macOS.** The DMG on the [releases page](https://github.com/rabbitHoleSolutions/openTessera/releases)
+  is not signed by Apple yet, so macOS asks you to approve it once (the
+  release notes say how). It is built for Apple Silicon only.
 
 Known rough edges are listed in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
 
 ## Requirements
 
-- **Rust**, a recent stable release (it is developed on 1.90), plus a C
-  compiler (one dependency builds a little C).
+- **Rust** 1.90 or newer, plus a C compiler (one dependency builds a
+  little C). Not needed for the macOS DMG.
 - **libmpv**, loaded at runtime, so no development headers are needed:
   - Debian/Ubuntu: `sudo apt install libmpv2` (older releases: `libmpv1`)
   - Fedora: `sudo dnf install mpv-libs`
   - Arch: `sudo pacman -S mpv`
-  - macOS: `brew install mpv`
+  - macOS: `brew install mpv` (the DMG carries its own)
 
   Set `TESSERA_MPV_LIB=/path/to/libmpv.so` to use a particular copy.
 - **Hardware decoding** works through mpv. On Linux the default is
@@ -124,15 +125,18 @@ This installs for the current user only, without root. It puts `tessera` in
 `~/.local/bin`, adds the icon and a desktop entry, and lists the app under
 **Open With** for video files. `--uninstall` reverses it.
 
-**macOS:**
+**macOS:** download the DMG from the
+[releases page](https://github.com/rabbitHoleSolutions/openTessera/releases)
+and drag Tessera into Applications. To build it yourself instead:
 
 ```sh
 ./packaging/macos/build-app.sh --install
 ```
 
-This builds `Tessera.app` into `~/Applications`. `--default` also offers to
-make it the default player for video types. macOS asks you to confirm each
-one.
+This builds `Tessera.app` into `~/Applications`, using Homebrew's libmpv.
+`--default` also offers to make it the default player for video types.
+macOS asks you to confirm each one. `--dmg` builds the release DMG instead,
+with libmpv and its libraries copied into the app.
 
 Configuration lives in `~/.config/opentessera/` on both systems. The
 installers never touch it.

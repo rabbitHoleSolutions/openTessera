@@ -12,7 +12,8 @@ Ubiquiti. A report that says "it works" is useful too. Open an issue with
 the **Bug or test report** template. It asks for what matters:
 
 - the OS and version, the desktop or window manager, and X11 or Wayland
-- the GPU and driver, and the libmpv version (`mpv --version`)
+- the GPU and driver, and what `tessera --version` prints (the app's
+  version and which libmpv it loads)
 - what you did, what you expected, and what happened
 - the log, ideally with `--status-interval 5`. Add `TESSERA_MPV_LOG=v` for
   playback problems.

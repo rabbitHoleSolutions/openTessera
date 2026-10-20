@@ -252,7 +252,7 @@ fn main() {
             // MPV_MAKE_VERSION packs major in the high 16 bits and minor
             // in the low 16 — splitting the minor into two bytes printed
             // API 2.2 (0x20002) as "2.0.2".
-            println!("libmpv client API 0x{:X} ({}.{})", v, v >> 16, v & 0xFFFF);
+            println!("libmpv client API 0x{:X} ({}.{}) from {}", v, v >> 16, v & 0xFFFF, l.path());
             l
         }
         Err(e) => {

@@ -610,9 +610,8 @@ Found on the way, fixed for both:
 
 Next:
 
-- Distribution: copy libmpv and its dylib closure into `Contents/Frameworks`
-  (e.g. dylibbundler), sign with a Developer ID, notarize. The loader already
-  looks there first.
+- Distribution: signing with a Developer ID and notarizing. Bundling
+  libmpv is done (§27).
 - Untested by hand so far: W/F/`--max` interactively, cross-window tile drag,
   Cmd+W / Ctrl+Cmd+F, ctrl-click, trackpad volume, mixed Retina + 1x
   displays (window placement converts through each monitor's scale factor;
@@ -1407,6 +1406,52 @@ unpin and zoom exit, an all-muted wall stays muted, and with the setting
 off nothing moves.
 
 **Effort**: S
+
+---
+
+## 27. Releases: a macOS DMG
+
+Status: **implemented, untested on a Mac** (2026-10-20)
+
+A tag `vX.Y.Z` runs `.github/workflows/release.yml` on an Apple Silicon
+runner: Homebrew's mpv, a release build, then `build-app.sh --dmg`, and the
+DMG goes up on a *draft* release (published by hand, with
+`.github/release-notes.md` as its notes). The tag must match Cargo.toml's
+version. Run from the Actions tab instead, it builds the same DMG as an
+artifact and releases nothing.
+
+`--bundle-mpv` (which `--dmg` implies) copies libmpv into
+`Contents/Frameworks` and follows its load commands — `@rpath`,
+`@loader_path`, Homebrew's opt/ and Cellar/ paths — copying each library
+once, flat, and pointing every reference at
+`@executable_path/../Frameworks/`. Done by hand with otool and
+install_name_tool rather than dylibbundler, whose `@rpath` handling needs
+search paths fed to it, and so that the rules are readable in one place.
+It fails the build if anything still points outside the app, writes the
+newest `minos` among the libraries into `LSMinimumSystemVersion` (bottles
+need the macOS they were built on, and Finder then refuses an older Mac
+with a reason instead of a crash), and ad-hoc signs each library before
+the app.
+
+`tessera --version` was added for this: it loads libmpv for real and says
+which copy it loaded, with no display. The workflow runs it with
+`/opt/homebrew` moved aside, which is the Mac the DMG is for.
+
+Not done:
+
+- **Signing and notarization** (Apple Developer Program, $99/year). The
+  bundle is already signed library by library; the change is a Developer
+  ID identity, `--options runtime --timestamp`, then `notarytool` and
+  `stapler` on the DMG, with the certificate and an app-specific password
+  as Actions secrets. The hardened runtime will need entitlements checked
+  against what libmpv does — LuaJIT, for one, wants
+  `com.apple.security.cs.allow-jit`.
+- **Intel Macs**: an x86_64 runner and a second DMG, or a universal build
+  (which means universal libraries too).
+- **Linux**: no binary release; distributions differ in libmpv's soname,
+  and building from source is one command.
+
+**Effort**: M
 
 ---
 
