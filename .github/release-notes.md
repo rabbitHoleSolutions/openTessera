@@ -1,3 +1,10 @@
+**An early release, not 1.0.** openTessera is used every day on one Linux
+machine and has been tried on a couple of Macs. This is the first build
+shared outside that, to find out how it does elsewhere. Expect rough edges;
+[docs/KNOWN_ISSUES.md](https://github.com/rabbitHoleSolutions/openTessera/blob/main/docs/KNOWN_ISSUES.md)
+lists the ones already known. Reports of what works are as useful as
+reports of what doesn't. Open an issue; the template asks for what helps.
+
 ## macOS
 
 Download the `.dmg`, open it, and drag **Tessera** into **Applications**.
@@ -21,7 +28,6 @@ xattr -dr com.apple.quarantine /Applications/Tessera.app
 Build from source; see the README. It takes a Rust toolchain and the
 distribution's libmpv.
 
-Bug reports and "works on my setup" reports are both welcome; the issue
-template asks for what helps, and `tessera --version` (on a Mac:
-`/Applications/Tessera.app/Contents/MacOS/tessera --version`) says which
-libmpv it is using.
+In a report, include what `tessera --version` (on a Mac:
+`/Applications/Tessera.app/Contents/MacOS/tessera --version`) prints: the
+version, and which libmpv it is using.
