@@ -167,8 +167,9 @@ USAGE:
 
 OPTIONS:
   --tiles N          Max tiles per screen (default 12)
-  --populate N       Tiles to open per screen at startup (default: same as
-                     --tiles; e.g. --tiles 10 --populate 8 loads 8, max 10)
+  --populate N       Tiles to open per screen at startup (default: 1 when
+                     given paths, 4 for a bare launch, --tiles with --max;
+                     e.g. --tiles 10 --populate 8 loads 8, max 10)
   --max              Every monitor, borderless fullscreen, filled to --tiles
                      (the video-wall mode; without it you get one window)
   --screens SPEC     Monitors to use fullscreen: 'all' or comma-separated

@@ -52,10 +52,17 @@ use windowing::{
 /// `--windowed WxH` is given. Clamped to the target monitor.
 const DEFAULT_WINDOW: (u32, u32) = (1600, 900);
 
-/// Tiles a plain (non---max) window opens with. `--max` fills to --tiles
-/// instead; `--populate` overrides both. Matches the Quest app's dock
-/// default (DockGridManager.INITIAL_TILES).
+/// Tiles a plain (non---max) window opens with on a bare launch, from the
+/// saved queue. `--max` fills to --tiles instead; `--populate` overrides
+/// both. Matches the Quest app's dock default (DockGridManager.INITIAL_TILES).
 const DEFAULT_WINDOW_TILES: usize = 4;
+
+/// Tiles a plain window opens with when the launch said what to play —
+/// paths on the command line, or a Finder open that started the app.
+/// That is a video player being asked to open something: a folder plays
+/// its first film with the rest queued behind it, not four at once, and
+/// the wall starts when + is pressed.
+const OPENED_WINDOW_TILES: usize = 1;
 
 /// Tiles a window opened at runtime starts with. Deliberately not
 /// DEFAULT_WINDOW_TILES: at startup nothing is playing yet so filling is
@@ -463,14 +470,20 @@ fn main() {
     // Startup population. --max is the video-wall mode: fill every
     // screen to the --tiles cap. A plain window starts at
     // DEFAULT_WINDOW_TILES instead — a wall of 12 streams is not what
-    // you want from a bare `tessera`. --populate overrides either.
-    let default_populate = match args.screens {
-        ScreenSel::Windowed(_, _) => DEFAULT_WINDOW_TILES.min(args.tiles),
-        _ => args.tiles,
+    // you want from a bare `tessera` — or OPENED_WINDOW_TILES when it
+    // was opened with something to play. --populate overrides all three.
+    let populate_limit = |opened: bool| match (args.populate, &args.screens) {
+        (Some(p), _) => p.min(args.tiles),
+        (None, ScreenSel::Windowed(_, _)) if opened => OPENED_WINDOW_TILES.min(args.tiles),
+        (None, ScreenSel::Windowed(_, _)) => DEFAULT_WINDOW_TILES.min(args.tiles),
+        (None, _) => args.tiles,
     };
-    let populate_limit = args.populate.map_or(default_populate, |p| p.min(args.tiles));
+    // Both answers now: the closure borrows `args`, which the event loop
+    // takes by move.
+    let (populate_bare, populate_opened) = (populate_limit(false), populate_limit(true));
     if !platform::DEFER_STARTUP_TILES {
-        populate_startup(&mut screens, &mut budget, &mut queue, &mpv_lib, &tile_opts, &mut next_tile_id, populate_limit);
+        let limit = if args.files.is_empty() { populate_bare } else { populate_opened };
+        populate_startup(&mut screens, &mut budget, &mut queue, &mpv_lib, &tile_opts, &mut next_tile_id, limit);
     }
 
     let start = Instant::now();
@@ -518,6 +531,7 @@ fn main() {
                         // the command line mean: play this, not the saved
                         // queue — so it replaces sources and queue alike.
                         let launched_with = platform::take_opened_paths();
+                        let mut limit = populate_bare;
                         if !launched_with.is_empty() {
                             let (opened_sources, items) = list_paths(&launched_with);
                             if items.is_empty() {
@@ -527,9 +541,10 @@ fn main() {
                                 queue.clear();
                                 queue.add_items(items);
                                 println!("opened: {} item(s) replace the queue", queue.len());
+                                limit = populate_opened;
                             }
                         }
-                        populate_startup(&mut screens, &mut budget, &mut queue, &mpv_lib, &tile_opts, &mut next_tile_id, populate_limit);
+                        populate_startup(&mut screens, &mut budget, &mut queue, &mpv_lib, &tile_opts, &mut next_tile_id, limit);
                     }
                     sync_fullscreen_chrome(&screens);
                     // Overlay auto-hide: solid while pinned or while user

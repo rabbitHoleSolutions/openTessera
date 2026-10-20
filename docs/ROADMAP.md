@@ -216,7 +216,11 @@ default; `--max` is the opt-in all-monitors-fullscreen video-wall mode
   `current_monitor()` stays unusable under pop-shell.)
 - Closing a window closes just that window; the last one quits.
 - A plain window starts at `DEFAULT_WINDOW_TILES` (4, matching the Quest
-  dock) rather than filling to `--tiles`; `--max` still fills.
+  dock) rather than filling to `--tiles`; `--max` still fills. Opened with
+  something to play — paths on the command line, or a Finder open that
+  launched it — it starts at `OPENED_WINDOW_TILES` (1) instead (2026-10-20):
+  a folder plays its first video with the rest queued, as any player
+  would, and + grows it into a wall.
 
 ### Queue model
 

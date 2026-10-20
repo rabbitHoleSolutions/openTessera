@@ -144,7 +144,7 @@ installers never touch it.
 ## Usage
 
 ```sh
-tessera ~/Videos/                    # one window, four tiles, the folder queued
+tessera ~/Videos/                    # play the first video, the rest queued (+ adds tiles)
 tessera film.mkv                     # play this file
 tessera --max --tiles 6 ~/Videos/    # every monitor fullscreen, six tiles each
 tessera --monitor right --fullscreen film.mkv
