@@ -424,7 +424,14 @@ fn plex(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserCtx) 
                     .size(24.0)
                     .color(egui::Color32::from_rgb(230, 180, 80)),
             );
-            ui.weak("enter this at plex.tv/link, then wait here");
+            // One run of text with a link in it: no item spacing, or the
+            // comma after the link floats free of it.
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.weak("enter this at ");
+                ui.hyperlink_to("plex.tv/link", "https://plex.tv/link");
+                ui.weak(", then wait here");
+            });
         } else if services.auth.state.busy {
             ui.weak("working…");
         }

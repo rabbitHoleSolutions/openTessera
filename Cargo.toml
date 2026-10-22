@@ -25,7 +25,9 @@ egui = "0.27"
 # to an in-app clipboard, so Ctrl+V returns whatever was last copied *inside*
 # Tessera and the system clipboard is never consulted. Pasting a camera URL
 # from a browser silently produced an unrelated string.
-egui_glow = { version = "0.27", features = ["winit", "clipboard"] }
+# "links" likewise: without it egui-winit drops every clicked Hyperlink
+# with a log warning, so a link renders and does nothing.
+egui_glow = { version = "0.27", features = ["winit", "clipboard", "links"] }
 raw-window-handle = "0.5"
 ureq = { version = "2", features = ["json"] }
 libc = "0.2"
