@@ -16,6 +16,8 @@ use crate::tile::{Tile, TileEvent};
 /// the event loop each frame.
 pub struct Services<'a> {
     pub catalog: &'a mut crate::catalog::SourceCatalog,
+    /// Audio and subtitle picks to put back as each file opens.
+    pub tracks: &'a tessera_core::tracks::TrackMemory,
     pub wall_tiles: &'a [crate::browser::WallTile],
     pub auth: &'a mut crate::auth::Auth,
     /// Stable plex.tv device identifier for this install.
@@ -267,6 +269,20 @@ impl Screen {
             for ev in tile.tick(&self.gl) {
                 match ev {
                     TileEvent::EndOfFile => ended.push(tile.id),
+                    TileEvent::TracksKnown => {
+                        use tessera_core::tracks::Kind;
+                        for (kind, name) in [(Kind::Audio, "audio"), (Kind::Subtitle, "subtitles")] {
+                            let Some(choice) = services.tracks.recall(&tile.item.id, kind) else {
+                                continue;
+                            };
+                            if let Some(what) = tile.apply_choice(kind, choice) {
+                                println!(
+                                    "screen {} tile {}: {name} -> {what} (as last picked for \"{}\")",
+                                    self.monitor_index, tile.id, tile.item.title
+                                );
+                            }
+                        }
+                    }
                     TileEvent::Reconnected => {
                         println!(
                             "screen {} tile {}: \"{}\" is back",

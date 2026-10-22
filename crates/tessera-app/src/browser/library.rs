@@ -226,6 +226,29 @@ pub fn draw(
     });
 }
 
+/// A play button the size of the "+" beside it, its triangle painted.
+///
+/// "▶" as text comes from egui's emoji fallback font, whose advance and
+/// baseline don't match the UI font's: it sat low and right of centre in
+/// its button, and wider than the "+".
+fn play_button(ui: &mut egui::Ui, size: egui::Vec2) -> egui::Response {
+    let resp = ui.add(egui::Button::new("").small().min_size(size));
+    let col = ui.style().interact(&resp).fg_stroke.color;
+    let r = resp.rect;
+    let h = r.height() * 0.5;
+    let w = h * 0.87;
+    // Centred on the triangle's centroid, which is a third of the way in
+    // from its flat side; centring the bounding box looks left-heavy.
+    let c = r.center();
+    let left = c.x - w / 3.0;
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![egui::pos2(left, c.y - h / 2.0), egui::pos2(left + w, c.y), egui::pos2(left, c.y + h / 2.0)],
+        col,
+        egui::Stroke::NONE,
+    ));
+    resp
+}
+
 /// One item row: poster, title, size, and the two queue actions.
 fn row(
     ui: &mut egui::Ui,
@@ -241,9 +264,18 @@ fn row(
         let (rect, _) = ui.allocate_exact_size(egui::vec2(64.0, 36.0), egui::Sense::hover());
         match thumbs.get(ui.ctx(), m) {
             Some(tex) => {
+                // Fitted inside the slot, not stretched to it: a server
+                // poster is 2:3 and a frame from a file is the film's own
+                // shape, so filling a 16:9 slot squashed every poster. The
+                // slot stays fixed so titles still line up row to row.
+                let size = tex.size_vec2();
+                let s = (rect.width() / size.x.max(1.0)).min(rect.height() / size.y.max(1.0));
+                let img = egui::Rect::from_center_size(rect.center(), size * s);
+                ui.painter()
+                    .rect_filled(rect, egui::Rounding::same(3.0), egui::Color32::from_gray(18));
                 ui.painter().image(
                     tex.id(),
-                    rect,
+                    img,
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
@@ -255,16 +287,14 @@ fn row(
         }
 
         let queued = queue.contains(&m.id);
-        if ui
+        let plus = ui
             .add(egui::Button::new("+").small())
-            .on_hover_text("append to the end of the queue")
-            .clicked()
-        {
+            .on_hover_text("append to the end of the queue");
+        if plus.clicked() {
             *flash = Some(format!("queued \"{}\"", m.title));
             actions.push(OverlayAction::QueueAppend { item: m.clone() });
         }
-        if ui
-            .add(egui::Button::new("▶").small())
+        if play_button(ui, plus.rect.size())
             .on_hover_text("play now on the first tile of the first wall window")
             .clicked()
         {

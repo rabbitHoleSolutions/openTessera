@@ -1,4 +1,5 @@
 use glow::HasContext;
+use tessera_core::tracks::{Choice, Kind};
 use tessera_core::MediaItem;
 use tessera_mpv::{Mpv, MpvEvent, RenderContext};
 
@@ -18,6 +19,10 @@ pub enum TileEvent {
     Failed { reason: String },
     /// A live stream that had dropped came back on its own.
     Reconnected,
+    /// A file has opened and its track list is read: the moment to put
+    /// back remembered audio and subtitle picks. Separate from `Loaded`, which also
+    /// fires again when the first frame reports a different size.
+    TracksKnown,
 }
 
 /// A live stream that dropped, and when to try it again.
@@ -74,6 +79,16 @@ pub struct TrackInfo {
 }
 
 impl TrackInfo {
+    /// The fields a remembered pick is matched on.
+    pub fn core(&self) -> tessera_core::tracks::Track {
+        tessera_core::tracks::Track {
+            id: self.id,
+            lang: self.lang.clone(),
+            title: self.title.clone(),
+            codec: self.codec.clone(),
+        }
+    }
+
     /// Short chip label: language, else title, else "?".
     pub fn short_label(&self) -> String {
         let base = self
@@ -344,6 +359,13 @@ impl Tile {
             // Looping a stream with no end would only ever act on an EOF
             // that never arrives.
             ("loop-file", if self.loop_file && !live { "inf" } else { "no" }),
+            // A pick made on the last item (or restored by a screen move)
+            // is an mpv option and would carry over to this one. Each item
+            // starts from its own default; a remembered pick for *this*
+            // one goes back on at TracksKnown. Audio stays "no" while the
+            // config tab has it off.
+            ("sid", "auto"),
+            ("aid", if self.audio_enabled { "auto" } else { "no" }),
         ] {
             if let Err(e) = self.mpv.command(&["set", key, value]) {
                 eprintln!("tile {}: set {key} failed: {e}", self.id);
@@ -633,6 +655,50 @@ impl Tile {
         self.refresh_tracks();
     }
 
+    /// Puts back a remembered track pick, if this file still has the track
+    /// it names. Returns what changed, for the log.
+    pub fn apply_choice(&mut self, kind: Kind, choice: &Choice) -> Option<String> {
+        // With audio off in the config tab, `aid` is "no" on purpose; a
+        // remembered language must not turn the sound back on.
+        if kind == Kind::Audio && !self.audio_enabled {
+            return None;
+        }
+        let list = match kind {
+            Kind::Audio => &self.audio_tracks,
+            Kind::Subtitle => &self.subtitle_tracks,
+        };
+        let tracks: Vec<_> = list.iter().map(TrackInfo::core).collect();
+        let want = tessera_core::tracks::pick(choice, &tracks)?;
+        if want == list.iter().find(|t| t.selected).map(|t| t.id) {
+            return None;
+        }
+        match kind {
+            Kind::Audio => self.set_audio_track(want),
+            Kind::Subtitle => self.set_subtitle_track(want),
+        }
+        let list = match kind {
+            Kind::Audio => &self.audio_tracks,
+            Kind::Subtitle => &self.subtitle_tracks,
+        };
+        Some(match want {
+            Some(id) => list.iter().find(|t| t.id == id).map_or_else(|| format!("#{id}"), TrackInfo::describe),
+            None => "off".into(),
+        })
+    }
+
+    /// What to remember about the track of `kind` now playing, or that
+    /// none is.
+    pub fn choice(&self, kind: Kind) -> Choice {
+        let list = match kind {
+            Kind::Audio => &self.audio_tracks,
+            Kind::Subtitle => &self.subtitle_tracks,
+        };
+        match list.iter().find(|t| t.selected) {
+            Some(t) => Choice::Track { id: t.id, lang: t.lang.clone(), title: t.title.clone(), codec: t.codec.clone() },
+            None => Choice::Off,
+        }
+    }
+
     /// Selects a subtitle track (None = off, mpv "sid=no"). Subtitles render
     /// through the existing render-API path (baked into the video frame).
     pub fn set_subtitle_track(&mut self, track: Option<i64>) {
@@ -729,6 +795,7 @@ impl Tile {
                     self.refresh_tracks();
                     self.reported_size = (w, h);
                     events.push(TileEvent::Loaded { width: w, height: h, fps, codec });
+                    events.push(TileEvent::TracksKnown);
                 }
                 MpvEvent::EndFile { reason: tessera_mpv::EndFileReason::Eof, .. } => {
                     events.push(TileEvent::EndOfFile);

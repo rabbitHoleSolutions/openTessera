@@ -97,6 +97,23 @@ impl SourceCatalog {
         self.listings.get(&key).unwrap_or(&Listing::Loading)
     }
 
+    /// Takes one item out of every listing — it was deleted. Cheaper and
+    /// quieter than re-listing the source, which for a big server is a
+    /// round trip and a "listing…" flash in the library tab.
+    pub fn forget(&mut self, id: &str) {
+        let mut changed = false;
+        for listing in self.listings.values_mut() {
+            if let Listing::Ready(items) = listing {
+                let before = items.len();
+                items.retain(|m| m.id != id);
+                changed |= items.len() != before;
+            }
+        }
+        if changed {
+            self.generation += 1;
+        }
+    }
+
     /// Drops a cached listing so the next `get` re-fetches it.
     pub fn refresh(&mut self, source: &Source) {
         self.listings.remove(&source.label());
@@ -107,5 +124,34 @@ impl SourceCatalog {
 impl Default for SourceCatalog {
     fn default() -> SourceCatalog {
         SourceCatalog::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_deleted_item_leaves_every_listing_and_moves_the_generation() {
+        let mut cat = SourceCatalog::new();
+        let item = |id: &str| {
+            let mut m = MediaItem::from_path(std::path::Path::new("/m/x.mkv"));
+            m.id = id.to_owned();
+            m
+        };
+        cat.listings.insert("a".into(), Listing::Ready(vec![item("keep"), item("gone")]));
+        cat.listings.insert("b".into(), Listing::Ready(vec![item("gone")]));
+        cat.listings.insert("c".into(), Listing::Loading);
+        let g = cat.generation();
+        cat.forget("gone");
+        assert!(cat.generation() > g, "the library's row cache must rebuild");
+        for key in ["a", "b"] {
+            let Some(Listing::Ready(items)) = cat.listings.get(key) else { panic!("{key} not ready") };
+            assert!(items.iter().all(|m| m.id != "gone"));
+        }
+        // Forgetting something nobody lists changes nothing.
+        let g = cat.generation();
+        cat.forget("never-listed");
+        assert_eq!(cat.generation(), g);
     }
 }

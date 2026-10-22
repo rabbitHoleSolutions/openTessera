@@ -9,6 +9,7 @@ pub mod sources;
 pub mod subs;
 pub mod timecode;
 pub mod title;
+pub mod tracks;
 pub mod view;
 
 pub use budget::{Admission, Codec, DecodeBudget, StreamSpec};

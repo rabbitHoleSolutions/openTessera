@@ -32,6 +32,11 @@ pub struct Wall<'a> {
     /// The configured sources, so a delete can be routed to the server the
     /// item actually came from.
     pub sources: &'a [tessera_core::sources::Source],
+    /// The library's listings, so a deleted file leaves the library tab
+    /// as well as the wall.
+    pub catalog: &'a mut crate::catalog::SourceCatalog,
+    /// Audio and subtitle picks per item, so a choice sticks to that film.
+    pub tracks: &'a mut tessera_core::tracks::TrackMemory,
     pub overlay: &'a mut OverlayState,
     pub mpv_lib: &'a std::sync::Arc<tessera_mpv::MpvLib>,
     pub tile_opts: &'a TileOptions,
@@ -42,6 +47,21 @@ pub struct Wall<'a> {
     pub audio_follows: bool,
     /// Deferred WM re-anchor check; armed by anything that moves a window.
     pub wm_settle_at: &'a mut Option<(Instant, u32)>,
+}
+
+/// Remembers the track a tile is now playing for its item, so the next
+/// time that item plays it comes up the way it was left rather than on the
+/// file's default. Read back from mpv rather than taken from the request,
+/// so a pick mpv refused isn't recorded.
+fn remember_track(tracks: &mut tessera_core::tracks::TrackMemory, tile: &Tile, kind: tessera_core::tracks::Kind) {
+    // A camera has nothing to come back to; and with audio off in the
+    // config tab there is no audio track to speak of, only "no".
+    if tile.item.is_live() || (kind == tessera_core::tracks::Kind::Audio && !tile.audio_enabled()) {
+        return;
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    tracks.remember(&tile.item.id, kind, tile.choice(kind), now);
+    crate::persist::save_tracks(tracks);
 }
 
 /// Executes one queued overlay interaction. `screen_idx` is the screen whose
@@ -144,6 +164,7 @@ pub fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx:
                         })
                         .unwrap_or_else(|| "off".into());
                     println!("screen {} tile {tile_id}: audio track -> {label}", screen.monitor_index);
+                    remember_track(wall.tracks, tile, tessera_core::tracks::Kind::Audio);
                     return;
                 }
             }
@@ -162,6 +183,7 @@ pub fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx:
                         })
                         .unwrap_or_else(|| "off".into());
                     println!("screen {} tile {tile_id}: subtitle track -> {label}", screen.monitor_index);
+                    remember_track(wall.tracks, tile, tessera_core::tracks::Kind::Subtitle);
                     return;
                 }
             }
@@ -331,7 +353,7 @@ pub fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx:
         }
         OverlayAction::ItemInfo { item } => toggle_info(wall, screen_idx, item, None),
         OverlayAction::DeleteCurrent { tile_id } => {
-            delete_current(wall.screens, wall.queue, wall.sources, screen_idx, tile_id, wall.overlay);
+            delete_current(wall, screen_idx, tile_id);
         }
         OverlayAction::QueueRemove { index } => {
             let monitor_index = wall.screens[screen_idx].monitor_index;
@@ -812,20 +834,13 @@ pub fn move_tile_cross_screen(
 /// Deletes the tile's current video at its source (local file, or the
 /// server's delete API), drops it from the queue, and advances the tile to
 /// the next item.
-pub fn delete_current(
-    screens: &mut [Screen],
-    queue: &mut PlaybackQueue,
-    sources: &[tessera_core::sources::Source],
-    screen_idx: usize,
-    tile_id: usize,
-    overlay: &mut OverlayState,
-) {
-    let Some(tile) = screens[screen_idx].tiles.iter().find(|t| t.id == tile_id) else {
+pub fn delete_current(wall: &mut Wall, screen_idx: usize, tile_id: usize) {
+    let Some(tile) = wall.screens[screen_idx].tiles.iter().find(|t| t.id == tile_id) else {
         return;
     };
     let item = tile.item.clone();
-    let monitor_index = screens[screen_idx].monitor_index;
-    match tessera_core::sources::delete_item(&item, sources) {
+    let monitor_index = wall.screens[screen_idx].monitor_index;
+    match tessera_core::sources::delete_item(&item, wall.sources) {
         Ok(()) => println!(
             "screen {monitor_index} tile {tile_id}: deleted \"{}\" ({})",
             item.title,
@@ -833,12 +848,44 @@ pub fn delete_current(
         ),
         Err(e) => {
             println!("delete failed: {e}");
-            overlay.notice = Some((format!("delete failed: {e}"), Instant::now()));
+            wall.overlay.notice = Some((format!("delete failed: {e}"), Instant::now()));
             return;
         }
     }
-    queue.remove_item(&item.id);
-    tile_next(screens, queue, tile_id, true);
+    wall.queue.remove_item(&item.id);
+    // The library tab kept listing it until a refresh, which looked like
+    // the delete had not happened.
+    wall.catalog.forget(&item.id);
+    // Every tile showing it moves on, not just the one whose trash was
+    // clicked: the file is gone, and whatever mpv still has buffered (a
+    // quarter of an hour of it, in the case that found this) is borrowed
+    // time that ends in a read error.
+    let showing: Vec<usize> = wall
+        .screens
+        .iter()
+        .flat_map(|s| s.tiles.iter())
+        .filter(|t| t.item.id == item.id)
+        .map(|t| t.id)
+        .collect();
+    let mut closed = 0;
+    for id in showing {
+        // An empty queue has no next, and `tile_next` then leaves the tile
+        // as it was — still playing the deleted file. The tile closes
+        // instead.
+        if wall.queue.items().is_empty() {
+            remove_tile_action(wall.screens, wall.budget, wall.overlay, id);
+            closed += 1;
+        } else {
+            tile_next(wall.screens, wall.queue, id, true);
+        }
+    }
+    // Success says so too: a delete that changes nothing on screen until
+    // the next video loads is indistinguishable from one that did nothing.
+    let note = match closed {
+        0 => format!("deleted \"{}\"", item.title),
+        _ => format!("deleted \"{}\" — nothing left in the queue, so its tile closed", item.title),
+    };
+    wall.overlay.notice = Some((note, Instant::now()));
 }
 
 /// Loads the next (or previous) queue item onto the tile, advancing the

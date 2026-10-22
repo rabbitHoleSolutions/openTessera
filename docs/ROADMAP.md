@@ -1511,11 +1511,53 @@ The first real delete then failed, which surfaced two more things:
   error now says so; Plex's equivalent (deletion turned off on the server)
   gets the same treatment.
 
+With the mount fixed, the delete went through and then looked as if it
+had not: no confirmation, the library still listed the file, and the
+tile kept playing the deleted copy from a quarter-hour of buffer, because
+`tile_next` on an empty queue leaves the tile as it was. Now a delete
+says so, drops the item from every cached listing
+(`SourceCatalog::forget`), and moves every tile showing it on — or
+closes the tile when the queue has nothing left. Verified in the sandbox
+on two throwaway clips: next, then close.
+
 **Known gaps**: no delete from the panel itself (play it, then the tile's
 trash); the per-version Plex delete matches python-plexapi but has not
 been run against a live server.
 
 **Effort**: M
+
+---
+
+## 29. Audio and subtitle picks stick to the film
+
+Status: **implemented** (2026-10-22)
+
+Turning subtitles off lasted only until the film was opened again: mpv
+plays a Plex/Jellyfin file directly, so whatever the server remembers
+about a viewer's picks never reaches it, and a local or SMB file has no
+server at all — every open started from the file's default flags. Now an
+audio or subtitle pick made on a tile (the chip's A and S menus, or the
+API's `subtitles select`) is remembered per item in `~/.config/opentessera/tracks.json` and put back
+when that item loads again, in any tile, after a restart
+(`tessera_core::tracks`). A track is matched by mpv's id and by what it
+is (language, title, codec), so an external subtitle file added later,
+which renumbers the embedded ones, doesn't send it to the wrong track. A
+tile's next item no longer inherits the previous one's picks either
+(`sid` and `aid` are reset to `auto` on each load — `aid` to `no` while
+the config tab has audio off, and a remembered audio pick is not applied
+then, so it can't turn the sound back on). Verified in the sandbox:
+subtitles off on one file and French on another, Japanese audio on a
+third, each restored on reopening and across a restart, with a copy of
+the dual-audio file still on its own English default.
+
+In the same pass: library thumbnails are fitted inside their slot rather
+than stretched to it — server posters are 2:3, and were squashed into
+16:9.
+
+**Known gaps**: a pick made in Plex or Jellyfin's own apps is not read;
+the API has no audio-track tool, so only the chip sets audio.
+
+**Effort**: S
 
 ---
 

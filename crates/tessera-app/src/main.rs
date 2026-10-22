@@ -391,6 +391,9 @@ fn main() {
     // startup enumeration above is separate — the wall starts playing
     // without waiting on any of this.
     let mut catalog = catalog::SourceCatalog::new();
+    // The audio and subtitle tracks picked for each film, put back when it
+    // plays again.
+    let mut tracks = persist::load_tracks();
     // Server sign-in (Jellyfin discovery/login, plex.tv link) — all of it
     // blocking, so it lives on its own worker.
     let mut auth = auth::Auth::new();
@@ -636,6 +639,8 @@ fn main() {
                             budget: &mut budget,
                             queue: &mut queue,
                             sources: &sources,
+                            catalog: &mut catalog,
+                            tracks: &mut tracks,
                             overlay: &mut overlay,
                             mpv_lib: &mpv_lib,
                             tile_opts: &tile_opts,
@@ -656,6 +661,8 @@ fn main() {
                             budget: &mut budget,
                             queue: &mut queue,
                             sources: &sources,
+                            catalog: &mut catalog,
+                            tracks: &mut tracks,
                             overlay: &mut overlay,
                             mpv_lib: &mpv_lib,
                             tile_opts: &tile_opts,
@@ -711,6 +718,7 @@ fn main() {
                     for screen_idx in 0..screens.len() {
                         let mut services = screen::Services {
                             catalog: &mut catalog,
+                            tracks: &tracks,
                             wall_tiles: &wall_tiles,
                             auth: &mut auth,
                             plex_client_id: &plex_client_id,
@@ -748,6 +756,8 @@ fn main() {
                                 budget: &mut budget,
                                 queue: &mut queue,
                                 sources: &sources,
+                                catalog: &mut catalog,
+                                tracks: &mut tracks,
                                 overlay: &mut overlay,
                                 mpv_lib: &mpv_lib,
                                 tile_opts: &tile_opts,
@@ -770,6 +780,8 @@ fn main() {
                                     budget: &mut budget,
                                     queue: &mut queue,
                                     sources: &sources,
+                                    catalog: &mut catalog,
+                                    tracks: &mut tracks,
                                     overlay: &mut overlay,
                                     mpv_lib: &mpv_lib,
                                     tile_opts: &tile_opts,
@@ -855,6 +867,8 @@ fn main() {
                                 budget: &mut budget,
                                 queue: &mut queue,
                                 sources: &sources,
+                                catalog: &mut catalog,
+                                tracks: &mut tracks,
                                 overlay: &mut overlay,
                                 mpv_lib: &mpv_lib,
                                 tile_opts: &tile_opts,
@@ -1551,6 +1565,8 @@ fn main() {
                                 budget: &mut budget,
                                 queue: &mut queue,
                                 sources: &sources,
+                                catalog: &mut catalog,
+                                tracks: &mut tracks,
                                 overlay: &mut overlay,
                                 mpv_lib: &mpv_lib,
                                 tile_opts: &tile_opts,

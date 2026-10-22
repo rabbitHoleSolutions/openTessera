@@ -51,6 +51,35 @@ pub fn save_queue(queue: &PlaybackQueue) {
     }
 }
 
+/// The audio and subtitle tracks picked for each item (`tessera_core::tracks`).
+pub fn tracks_path() -> std::path::PathBuf {
+    config_dir().join("tracks.json")
+}
+
+/// Restores the remembered track picks; an unreadable file starts over
+/// empty, which costs no more than a few re-picks.
+pub fn load_tracks() -> tessera_core::tracks::TrackMemory {
+    let Ok(text) = std::fs::read_to_string(tracks_path()) else {
+        return Default::default();
+    };
+    tessera_core::tracks::TrackMemory::from_json(&text).unwrap_or_else(|e| {
+        eprintln!("warning: tracks.json unreadable ({e}) — track picks start over");
+        Default::default()
+    })
+}
+
+/// Written on each pick: a click, a few a session, and a pick lost to a
+/// crash is exactly the annoyance this file exists to end.
+pub fn save_tracks(tracks: &tessera_core::tracks::TrackMemory) {
+    if std::fs::create_dir_all(config_dir()).is_err() {
+        return;
+    }
+    // Private: a URL item is keyed by its URL, which can carry a token.
+    if let Err(e) = write_private(&tracks_path(), &tracks.to_json()) {
+        eprintln!("warning: could not save track picks: {e}");
+    }
+}
+
 /// Writes a file only its owner can read.
 ///
 /// Both files this is used for carry live server tokens: settings.conf in
