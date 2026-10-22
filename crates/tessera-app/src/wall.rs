@@ -230,7 +230,7 @@ pub fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx:
             // The panel opens on the screen whose button was clicked; a
             // click on another screen's button moves it there.
             let win = wall.screens[screen_idx].window.id();
-            wall.overlay.help_open = if wall.overlay.help_open == Some(win) { None } else { Some(win) };
+            wall.overlay.toggle_help(win);
         }
         OverlayAction::QueueAdd { items } => {
             let n = items.len();
@@ -323,6 +323,13 @@ pub fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx:
                 }
             }
         }
+        OverlayAction::TileInfo { tile_id } => {
+            let item = wall.screens.iter().flat_map(|s| s.tiles.iter()).find(|t| t.id == tile_id).map(|t| t.item.clone());
+            if let Some(item) = item {
+                toggle_info(wall, screen_idx, item, Some(tile_id));
+            }
+        }
+        OverlayAction::ItemInfo { item } => toggle_info(wall, screen_idx, item, None),
         OverlayAction::DeleteCurrent { tile_id } => {
             delete_current(wall.screens, wall.queue, wall.sources, screen_idx, tile_id, wall.overlay);
         }
@@ -362,6 +369,22 @@ pub fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx:
             }
         }
     }
+}
+
+/// Opens the info panel on the acting window, or closes it when it is
+/// already showing this item there — the "i" buttons are toggles.
+fn toggle_info(wall: &mut Wall, screen_idx: usize, item: tessera_core::MediaItem, tile_id: Option<usize>) {
+    let window = wall.screens[screen_idx].window.id();
+    let same = wall
+        .overlay
+        .info
+        .as_ref()
+        .is_some_and(|p| p.window == window && p.item.id == item.id && p.tile_id == tile_id);
+    wall.overlay.info = if same {
+        None
+    } else {
+        Some(crate::info_panel::InfoPanel::open(window, item, tile_id, wall.sources))
+    };
 }
 
 /// Adds a tile to a screen from its queue — the transport "+" button and

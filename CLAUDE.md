@@ -11,7 +11,7 @@ ideas, no shared code. See `README.md` for the user-facing feature list and
 cargo build --release          # binary: target/release/tessera
 ./packaging/install.sh         # user-local install (bin + icon + .desktop)
 cargo check --workspace        # fast loop while editing
-cargo test --workspace         # 117 tests, mostly tessera-core (layout, budget, queue, sources)
+cargo test --workspace         # 125 tests, mostly tessera-core (layout, budget, queue, sources, info)
 cargo clippy --workspace --all-targets   # clean; keep it that way
 cargo +1.99.0 clippy --workspace --all-targets -- -D warnings   # exactly what CI runs
 ./scripts/check-macos.sh       # type-check + lint the macOS build from Linux
@@ -88,8 +88,8 @@ Useful at runtime: `--windowed 1600x900` (one ordinary window),
 | Crate | Responsibility |
 |---|---|
 | `tessera-mpv` | libmpv render-API wrapper: `dlopen` + hand-declared C ABI (no dev headers). `MpvLib` / `Mpv` / `RenderContext`. |
-| `tessera-core` | Pure logic, no I/O of its own beyond HTTP sources: `MediaItem`/`SourceKind`, `PlaybackQueue`, `solve_grid`, `DecodeBudget`, `title` (file name → show/season/episode/year), `subs` (SRT cues, search), `timecode` (`HH:MM:SS`, seek targets incl. chapters), `view` (per-tile crop/zoom), `monitor` (a monitor by number, connector or position). **This is where tests live** — put new logic here if it can be tested headlessly. |
-| `tessera-app` | The binary. `main.rs` (startup + the event loop), `cli.rs` (arguments, usage text), `wall.rs` (`Wall` and every action on tiles/queue/budget, incl. `handle_overlay_action`), `windowing.rs` (window + GL context creation, fullscreen, which monitor a window is on), `seek.rs` (coalesced keyboard seeking), `persist.rs` (settings.conf, queue.json), `platform/` (everything OS-specific: `linux.rs`, `macos.rs`, same items in both), `screen.rs` (one window + GL context per `Screen`, wall or library), `tile.rs` (one mpv instance + FBO), `compositor.rs`, `overlay.rs` (wall egui), `browser/` (the browser window's egui: `mod.rs` tab bar + shared state, then one file per tab — `library.rs`, `queue.rs`, `sources.rs`, `config.rs`), `catalog.rs` (background source listing), `thumbs.rs`, `png_util.rs`, `instance.rs` (the single-instance socket, which also carries the API), `rpc.rs` (the API: what each request does, on which thread), `mcp.rs` (`tessera mcp`: the stdio MCP server over that API). |
+| `tessera-core` | Pure logic, no I/O of its own beyond HTTP sources: `MediaItem`/`SourceKind`, `PlaybackQueue`, `solve_grid`, `DecodeBudget`, `title` (file name → show/season/episode/year), `subs` (SRT cues, search), `timecode` (`HH:MM:SS`, seek targets incl. chapters), `info` (the "i" panel's rows: Plex/Jellyfin detail parsers, size/bitrate/date formatting), `view` (per-tile crop/zoom), `monitor` (a monitor by number, connector or position). **This is where tests live** — put new logic here if it can be tested headlessly. |
+| `tessera-app` | The binary. `main.rs` (startup + the event loop), `cli.rs` (arguments, usage text), `wall.rs` (`Wall` and every action on tiles/queue/budget, incl. `handle_overlay_action`), `windowing.rs` (window + GL context creation, fullscreen, which monitor a window is on), `seek.rs` (coalesced keyboard seeking), `persist.rs` (settings.conf, queue.json), `platform/` (everything OS-specific: `linux.rs`, `macos.rs`, same items in both), `screen.rs` (one window + GL context per `Screen`, wall or library), `tile.rs` (one mpv instance + FBO), `compositor.rs`, `overlay.rs` (wall egui), `browser/` (the browser window's egui: `mod.rs` tab bar + shared state, then one file per tab — `library.rs`, `queue.rs`, `sources.rs`, `config.rs`), `catalog.rs` (background source listing), `thumbs.rs`, `info_panel.rs` (the "i" panel, shared by tiles and browser rows), `png_util.rs`, `instance.rs` (the single-instance socket, which also carries the API), `rpc.rs` (the API: what each request does, on which thread), `mcp.rs` (`tessera mcp`: the stdio MCP server over that API). |
 
 ## Architecture invariants
 
@@ -211,7 +211,8 @@ worker instead.
 `arboard` in the build at all — and egui-winit silently substitutes an
 *in-app* clipboard. Copy in a browser, paste in Tessera, and you get
 whatever was last copied inside Tessera instead. It looks like a paste bug
-in the widget; it is a missing Cargo feature.
+in the widget; it is a missing Cargo feature. `links` is the same story for
+`Hyperlink`: without it a clicked link only logs a warning.
 
 **Playback options key off the item, not the app.** `TileOptions` is
 global, but what mpv is actually told is derived per item, because a live

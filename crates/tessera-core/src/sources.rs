@@ -269,12 +269,64 @@ fn agent() -> &'static ureq::Agent {
     })
 }
 
+/// An HTTP failure as text a person can be shown — and never the URL.
+///
+/// ureq's own `Display` leads with the full request URL, and for every
+/// server here the query *is* the credential (`?api_key=`,
+/// `?X-Plex-Token=`). It put a live Jellyfin key into the delete toast, the
+/// log and the library tab's "couldn't list this source". The status and
+/// the server's own first line are the useful part anyway.
+pub(crate) fn http_error(e: ureq::Error) -> String {
+    match e {
+        ureq::Error::Status(code, resp) => {
+            let body = resp.into_string().unwrap_or_default();
+            let first: String = body.trim().lines().next().unwrap_or("").chars().take(200).collect();
+            // An HTML error page says nothing a toast can use, and nor
+            // does Jellyfin's stock 500 body — its reason is only in its
+            // own log.
+            if first.is_empty() || first.starts_with('<') || first == "Error processing request." {
+                format!("the server answered {code}")
+            } else {
+                format!("the server answered {code}: {first}")
+            }
+        }
+        ureq::Error::Transport(t) => match t.message() {
+            Some(m) => format!("{}: {m}", t.kind()),
+            None => t.kind().to_string(),
+        },
+    }
+}
+
+/// Why a server refused a delete, when the status alone can say. Both of
+/// these are settings on the server, which Tessera cannot change.
+fn delete_error(e: ureq::Error, kind: SourceKind) -> String {
+    let code = match &e {
+        ureq::Error::Status(code, _) => Some(*code),
+        ureq::Error::Transport(_) => None,
+    };
+    match (kind, code) {
+        // Observed: Jellyfin in Docker with the movies volume mounted `:ro`
+        // answers 500 with a body of "Error processing request." and keeps
+        // the item; "Read-only file system" is only in its own log.
+        (SourceKind::Jellyfin, Some(500)) => {
+            "jellyfin couldn't delete the file (server error 500). Its log says why — usually the media folder is mounted read-only, e.g. a Docker `:ro` volume.".to_owned()
+        }
+        (SourceKind::Jellyfin, Some(401 | 403)) => {
+            "jellyfin refused: this key isn't allowed to delete. Check \"allow media deletion\" for the user in jellyfin.".to_owned()
+        }
+        (SourceKind::Plex, Some(401 | 403)) => {
+            "plex refused. Turn on \"allow media deletion\" in the plex server's library settings.".to_owned()
+        }
+        _ => http_error(e),
+    }
+}
+
 fn get_json(url: &str, headers: &[(&str, &str)]) -> Result<Value, SourceError> {
     let mut req = agent().get(url).set("Accept", "application/json");
     for (k, v) in headers {
         req = req.set(k, v);
     }
-    let resp = req.call().map_err(|e| SourceError::Http(e.to_string()))?;
+    let resp = req.call().map_err(|e| SourceError::Http(http_error(e)))?;
     resp.into_json::<Value>()
         .map_err(|e| SourceError::Json(e.to_string()))
 }
@@ -387,6 +439,15 @@ fn movie_section_titles(sections: &Value) -> Vec<String> {
 
 /// Maps one Plex library-section listing (`/library/sections/{id}/all`)
 /// into MediaItems. Direct-play URI: `{base}{part.key}?X-Plex-Token=...`.
+///
+/// One item per *version*, not per film. Plex merges every file it
+/// matches to the same movie into one entry with several `Media`, and
+/// reading only the first hid the rest: the library showed one title, the
+/// wall could only ever play one copy, and the trash — which deletes the
+/// whole entry — took every copy with it. A single-version item keeps the
+/// plain `plex|{ratingKey}` id, so saved queues and thumbnails are
+/// unchanged; only a merged one gains `|{mediaId}` (see
+/// [`crate::info::plex_ids`]).
 fn plex_items_from_section(json: &Value, base: &str, token: &str) -> Vec<MediaItem> {
     let metadata = json
         .pointer("/MediaContainer/Metadata")
@@ -395,11 +456,6 @@ fn plex_items_from_section(json: &Value, base: &str, token: &str) -> Vec<MediaIt
         .unwrap_or_default();
     let mut items = Vec::new();
     for m in metadata {
-        let part = m.pointer("/Media/0/Part/0").cloned().unwrap_or(Value::Null);
-        let part_key = match part.get("key").and_then(Value::as_str) {
-            Some(k) => k,
-            None => continue,
-        };
         let title = m.get("title").and_then(Value::as_str).unwrap_or("?").to_owned();
         let year = m.get("year").and_then(Value::as_i64);
         let rating_key = m.get("ratingKey").and_then(Value::as_str).unwrap_or("").to_owned();
@@ -411,20 +467,40 @@ fn plex_items_from_section(json: &Value, base: &str, token: &str) -> Vec<MediaIt
             Some(y) => format!("{title} ({y})"),
             None => title,
         };
-        items.push(MediaItem {
-            id: format!("plex|{rating_key}"),
-            title,
-            uri: format!("{base}{part_key}?X-Plex-Token={token}"),
-            kind: SourceKind::Plex,
-            width: m.pointer("/Media/0/videoWidth").and_then(Value::as_i64).map(|v| v as u32),
-            height: m.pointer("/Media/0/videoHeight").and_then(Value::as_i64).map(|v| v as u32),
-            fps: plex_frame_rate(m.pointer("/Media/0/videoFrameRate").and_then(Value::as_str)),
-            codec: m.pointer("/Media/0/videoCodec").and_then(Value::as_str).map(str::to_owned),
-            size: part.get("size").and_then(Value::as_i64).map(|v| v.max(0) as u64),
-            modified: part.get("updatedAt").and_then(Value::as_i64).map(|v| v.max(0) as u64),
-            thumb_url,
-            source: None,
-        });
+        let medias = m.get("Media").and_then(Value::as_array).cloned().unwrap_or_default();
+        let several = medias.len() > 1;
+        for media in &medias {
+            let part = media.pointer("/Part/0").cloned().unwrap_or(Value::Null);
+            let part_key = match part.get("key").and_then(Value::as_str) {
+                Some(k) => k,
+                None => continue,
+            };
+            let id = match media.get("id").map(|v| v.to_string()) {
+                Some(media_id) if several => format!("plex|{rating_key}|{}", media_id.trim_matches('"')),
+                _ => format!("plex|{rating_key}"),
+            };
+            let dim = |k: &str| media.get(k).and_then(Value::as_i64).map(|v| v as u32);
+            items.push(MediaItem {
+                id,
+                title: title.clone(),
+                uri: format!("{base}{part_key}?X-Plex-Token={token}"),
+                kind: SourceKind::Plex,
+                // `width`/`height`, not `videoWidth`/`videoHeight`: the
+                // latter are not Plex fields, and reading them left every
+                // Plex item's size unknown — so each one entered the
+                // decode budget as the 1080p30 placeholder, 4K included.
+                width: dim("width"),
+                height: dim("height"),
+                fps: plex_frame_rate(media.get("videoFrameRate").and_then(Value::as_str)),
+                codec: media.get("videoCodec").and_then(Value::as_str).map(str::to_owned),
+                size: part.get("size").and_then(Value::as_i64).map(|v| v.max(0) as u64),
+                // When it joined the library — what "date" ordering means
+                // to a person. Parts carry no timestamp of their own.
+                modified: m.get("addedAt").and_then(Value::as_i64).map(|v| v.max(0) as u64),
+                thumb_url: thumb_url.clone(),
+                source: None,
+            });
+        }
     }
     items.sort_by_key(|a| a.title.to_lowercase());
     items
@@ -603,58 +679,121 @@ fn jellyfin_items_from_query(json: &Value, base: &str, api_key: &str) -> Vec<Med
     items
 }
 
-/// Deletes a media item at its source: removes the local file, or issues
-/// the server's delete API (Jellyfin `DELETE /Items/{id}`, Plex
-/// `DELETE /library/metadata/{ratingKey}/delete`).
-pub fn delete_item(item: &MediaItem, configured: &[Source]) -> Result<(), String> {
-    // This erases the file, on the server's disk for Plex and Jellyfin —
-    // not just the library entry — so it has to reach the server the item
-    // actually came from. `item.source` is stamped by [`Source::list`];
-    // sources.conf is only a fallback for items listed through the
-    // --plex/--jellyfin flags, which never had a configured Source.
+/// The server an item came from: its base URL and credential.
+///
+/// `item.source` is stamped by [`Source::list`]; sources.conf is only a
+/// fallback for items listed through the --plex/--jellyfin flags, which
+/// never had a configured Source. Shared by delete and details, because
+/// both have to reach the server that actually holds the file — guessing
+/// is wrong the moment two servers are configured.
+fn server_for(item: &MediaItem, configured: &[Source]) -> Result<(String, String), String> {
     let owner = item
         .source
         .as_deref()
         .and_then(|label| configured.iter().find(|s| s.label() == label));
+    let (base, key) = match (item.kind, owner) {
+        (SourceKind::Jellyfin, Some(Source::Jellyfin { url, api_key, .. })) => (url.clone(), api_key.clone()),
+        (SourceKind::Plex, Some(Source::Plex { url, token, .. })) => (url.clone(), token.clone()),
+        (SourceKind::Jellyfin, _) => {
+            let srv = SourceConfig::load()
+                .jellyfin
+                .ok_or("can't tell which Jellyfin server owns this item")?;
+            (srv.url, srv.token)
+        }
+        (SourceKind::Plex, _) => {
+            let srv = SourceConfig::load()
+                .plex
+                .ok_or("can't tell which Plex server owns this item")?;
+            (srv.url, srv.token)
+        }
+        (kind, _) => return Err(format!("a {} item has no server", kind.label())),
+    };
+    Ok((base.trim_end_matches('/').to_owned(), key))
+}
 
+/// Everything the item's source can say about it, for the info panel. A
+/// server round trip (or a stat for a local file), so call it from a
+/// worker — never the render thread.
+pub fn item_details(item: &MediaItem, configured: &[Source]) -> Result<Vec<crate::info::Section>, String> {
+    match item.kind {
+        SourceKind::Local => Ok(crate::info::local(std::path::Path::new(&item.uri))),
+        SourceKind::Jellyfin => {
+            let (base, key) = server_for(item, configured)?;
+            let id = item.id.strip_prefix("jellyfin|").ok_or("bad jellyfin item id")?;
+            // /Items?Ids= rather than /Items/{id}: the latter wants a user
+            // id, which an API key does not have.
+            let json = get_json(
+                &format!("{base}/Items?Ids={id}&Fields=MediaSources,Path,DateCreated&api_key={key}"),
+                &[],
+            )
+            .map_err(|e| e.to_string())?;
+            let found = json.pointer("/Items/0").ok_or("the server no longer has this item")?;
+            Ok(crate::info::jellyfin(found))
+        }
+        SourceKind::Plex => {
+            let (base, token) = server_for(item, configured)?;
+            let (rating_key, media) = crate::info::plex_ids(&item.id).ok_or("bad plex item id")?;
+            let json = get_json(&format!("{base}/library/metadata/{rating_key}?X-Plex-Token={token}"), &[])
+                .map_err(|e| e.to_string())?;
+            let meta = json
+                .pointer("/MediaContainer/Metadata/0")
+                .ok_or("the server no longer has this item")?;
+            Ok(crate::info::plex(meta, media))
+        }
+        // Nothing to ask: the listing said all there is.
+        SourceKind::Smb | SourceKind::Url | SourceKind::Camera => Ok(Vec::new()),
+    }
+}
+
+/// Deletes a media item at its source: removes the local file, or issues
+/// the server's delete API (Jellyfin `DELETE /Items/{id}`, Plex
+/// `DELETE /library/metadata/{ratingKey}`, or `.../media/{mediaId}` for one
+/// version of a merged item).
+pub fn delete_item(item: &MediaItem, configured: &[Source]) -> Result<(), String> {
+    // This erases the file, on the server's disk for Plex and Jellyfin —
+    // not just the library entry — so it has to reach the server the item
+    // actually came from (see `server_for`).
     match item.kind {
         SourceKind::Local => std::fs::remove_file(&item.uri).map_err(|e| e.to_string()),
         SourceKind::Jellyfin => {
-            let (base, key) = match owner {
-                Some(Source::Jellyfin { url, api_key, .. }) => (url.clone(), api_key.clone()),
-                _ => {
-                    let srv = SourceConfig::load()
-                        .jellyfin
-                        .ok_or("can't tell which Jellyfin server owns this item")?;
-                    (srv.url, srv.token)
-                }
-            };
+            let (base, key) = server_for(item, configured)?;
             let id = item.id.strip_prefix("jellyfin|").ok_or("bad jellyfin item id")?;
-            let url = format!("{}/Items/{id}?api_key={key}", base.trim_end_matches('/'));
-            agent().delete(&url).call().map(|_| ()).map_err(|e| e.to_string())
+            let url = format!("{base}/Items/{id}?api_key={key}");
+            agent().delete(&url).call().map(|_| ()).map_err(|e| delete_error(e, SourceKind::Jellyfin))
         }
         SourceKind::Plex => {
-            let (base, token) = match owner {
-                Some(Source::Plex { url, token, .. }) => (url.clone(), token.clone()),
-                _ => {
-                    let srv = SourceConfig::load()
-                        .plex
-                        .ok_or("can't tell which Plex server owns this item")?;
-                    (srv.url, srv.token)
-                }
-            };
-            let key = item.id.strip_prefix("plex|").ok_or("bad plex item id")?;
+            let (base, token) = server_for(item, configured)?;
+            let (key, media) = crate::info::plex_ids(&item.id).ok_or("bad plex item id")?;
             // DELETE /library/metadata/{ratingKey} — the trailing "/delete"
             // this carried over from the Quest app is not a Plex endpoint,
             // so the request 404'd and nothing was ever removed. Matches
             // Plex's documented API, but is NOT verified against a live
             // server: this erases the file on the server's disk, so try it
             // on something expendable first.
-            let url = format!(
-                "{}/library/metadata/{key}?X-Plex-Token={token}",
-                base.trim_end_matches('/')
-            );
-            agent().delete(&url).call().map(|_| ()).map_err(|e| e.to_string())
+            let url = match media {
+                // One version of a merged item: only that file. The whole
+                // entry would take every copy with it, which is the very
+                // thing a person deleting "the big one" does not want.
+                Some(media) => format!("{base}/library/metadata/{key}/media/{media}?X-Plex-Token={token}"),
+                None => {
+                    // An id without a version may predate the split (a
+                    // saved queue) and still name a merged item. Refuse
+                    // rather than erase copies nobody was looking at.
+                    let meta = get_json(&format!("{base}/library/metadata/{key}?X-Plex-Token={token}"), &[])
+                        .map_err(|e| e.to_string())?;
+                    let versions = meta
+                        .pointer("/MediaContainer/Metadata/0/Media")
+                        .and_then(Value::as_array)
+                        .map_or(0, Vec::len);
+                    if versions > 1 {
+                        return Err(format!(
+                            "this plex item holds {versions} versions — refresh the library and delete the one you mean"
+                        ));
+                    }
+                    format!("{base}/library/metadata/{key}?X-Plex-Token={token}")
+                }
+            };
+            agent().delete(&url).call().map(|_| ()).map_err(|e| delete_error(e, SourceKind::Plex))
         }
         SourceKind::Smb => Err("smb delete not supported (mount it locally instead)".into()),
         SourceKind::Url => Err("nothing to delete: this was opened by URL".into()),
@@ -679,10 +818,11 @@ mod tests {
                 {
                     "title": "Gravity", "year": 2013, "ratingKey": "123",
                     "thumb": "/library/metadata/123/thumb/1700000000",
+                    "addedAt": 1700000000u64,
                     "Media": [{
-                        "videoWidth": 3840, "videoHeight": 1080,
+                        "id": 77, "width": 3840, "height": 1080,
                         "videoFrameRate": "NTSC", "videoCodec": "hevc",
-                        "Part": [{ "key": "/library/parts/9/42/file.mkv", "size": 9000000000u64, "updatedAt": 1700000000u64 }]
+                        "Part": [{ "key": "/library/parts/9/42/file.mkv", "size": 9000000000u64 }]
                     }]
                 },
                 { "title": "No Media", "ratingKey": "124" }
@@ -701,6 +841,31 @@ mod tests {
         assert_eq!(it.size, Some(9_000_000_000));
         assert_eq!(it.modified, Some(1_700_000_000));
         assert_eq!(it.thumb_url.as_deref(), Some("http://x:32400/library/metadata/123/thumb/1700000000?X-Plex-Token=tok"));
+    }
+
+    #[test]
+    fn plex_lists_each_version_of_a_merged_item() {
+        // Plex merges every file matched to one film into a single entry;
+        // a real library had 21 of them. Each copy is its own item, so
+        // each can be played, inspected and deleted on its own.
+        let json: Value = serde_json::json!({
+            "MediaContainer": { "Metadata": [{
+                "title": "Alita: Battle Angel", "year": 2019, "ratingKey": "55",
+                "Media": [
+                    { "id": 4806, "width": 1920, "height": 1080,
+                      "Part": [{ "key": "/library/parts/4962/1/file.mkv", "size": 22010512751u64 }] },
+                    { "id": 5046, "width": 3840, "height": 1600,
+                      "Part": [{ "key": "/library/parts/5200/1/file.mkv", "size": 13665808326u64 }] }
+                ]
+            }]}
+        });
+        let items = plex_items_from_section(&json, "http://x:32400", "tok");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].id, "plex|55|4806");
+        assert_eq!(items[1].id, "plex|55|5046");
+        assert_eq!(items[1].width, Some(3840));
+        assert!(items[1].uri.contains("/parts/5200/"));
+        assert_eq!(items[0].title, items[1].title);
     }
 
     #[test]
@@ -762,6 +927,26 @@ mod tests {
                         "MediaSources": [{ "MediaStreams": [{ "Type": "Audio" }] }] }]
         });
         assert_eq!(jellyfin_items_from_query(&none, "http://x:8096", "k")[0].width, None);
+    }
+
+    #[test]
+    fn http_errors_never_carry_the_url() {
+        // The query is the credential; this is what leaked into a toast.
+        let e = agent().get("http://127.0.0.1:1/Items/x?api_key=sekrit").call().unwrap_err();
+        let shown = http_error(e);
+        assert!(!shown.contains("sekrit") && !shown.contains("api_key"), "{shown}");
+
+        // Jellyfin's real 500 body, which says nothing; the hint does.
+        let resp = ureq::Response::new(500, "Internal Server Error", "Error processing request.").unwrap();
+        assert_eq!(http_error(ureq::Error::Status(500, resp)), "the server answered 500");
+        let resp = ureq::Response::new(500, "Internal Server Error", "Error processing request.").unwrap();
+        let shown = delete_error(ureq::Error::Status(500, resp), SourceKind::Jellyfin);
+        assert!(shown.contains("read-only"), "{shown}");
+        let resp = ureq::Response::new(400, "Bad Request", "Item not found").unwrap();
+        assert_eq!(http_error(ureq::Error::Status(400, resp)), "the server answered 400: Item not found");
+
+        let page = ureq::Response::new(404, "Not Found", "<html><body>nope</body></html>").unwrap();
+        assert_eq!(http_error(ureq::Error::Status(404, page)), "the server answered 404");
     }
 
     #[test]

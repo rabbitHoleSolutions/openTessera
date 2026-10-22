@@ -27,7 +27,7 @@ const WALL_ORDER: egui::Order = egui::Order::Middle;
 /// so they can't be buried by it. NOT `Order::Tooltip` — egui never
 /// hit-tests tooltip-order layers, which silently makes every control in
 /// them inert.
-const PANEL_ORDER: egui::Order = egui::Order::Foreground;
+pub(crate) const PANEL_ORDER: egui::Order = egui::Order::Foreground;
 
 /// Which track row is expanded below a tile's transport.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +76,10 @@ pub struct OverlayState {
     /// singletons, and drawing a copy on every screen means several egui
     /// contexts fighting over one shared state.
     pub help_open: Option<winit::window::WindowId>,
+    /// Points to scroll the help panel by on its next frame — the wheel
+    /// and arrow keys while it is open, routed by the event loop. Negative
+    /// infinity means "from the top", which is how it opens.
+    pub help_scroll: f32,
     /// Settings panel open, on the window whose gear was clicked. See
     /// [`OverlayState::help_open`] for why this is window-scoped.
     pub settings_open: Option<winit::window::WindowId>,
@@ -86,6 +90,20 @@ pub struct OverlayState {
     /// runs its own egui pass over this one struct, and a plain bool would
     /// light up the hint on all of them.
     pub drop_target: Option<winit::window::WindowId>,
+    /// The "i" panel, on the window that opened it (`InfoPanel::window`).
+    /// Here rather than on a `Screen` because the tile it describes may
+    /// live in another window: the browser's queue tab can open it on any
+    /// tile, and the owning screen feeds it live numbers as it ticks.
+    pub info: Option<crate::info_panel::InfoPanel>,
+}
+
+impl OverlayState {
+    /// Opens the help panel on `win`, or closes it if it is already there.
+    /// A press on another window's ? moves it. Opens at the top.
+    pub fn toggle_help(&mut self, win: winit::window::WindowId) {
+        self.help_open = if self.help_open == Some(win) { None } else { Some(win) };
+        self.help_scroll = f32::NEG_INFINITY;
+    }
 }
 
 /// A seek the user is still spelling out. Holding an arrow fires roughly 25
@@ -187,6 +205,12 @@ pub enum OverlayAction {
     PlayOnTile { tile_id: usize, index: usize },
     /// Queue entry right-clicked: remove it from the pending queue.
     QueueRemove { index: usize },
+    /// Tile chip "i": show what is known about this tile's video, live
+    /// playback numbers included (toggles).
+    TileInfo { tile_id: usize },
+    /// Library or queue row "i": show what is known about this item
+    /// (toggles).
+    ItemInfo { item: tessera_core::MediaItem },
     /// Transport trash clicked twice: delete the tile's current video at its
     /// source and advance to the next queue item.
     DeleteCurrent { tile_id: usize },
@@ -303,6 +327,8 @@ pub struct TileUiInfo {
     pub pinned: bool,
     /// This tile's audio is soloed (all other streams muted).
     pub solo: bool,
+    /// The info panel is showing this tile.
+    pub info_open: bool,
 }
 
 /// One pending queue entry as shown in the hover queue.
@@ -382,7 +408,7 @@ const SETTINGS_DESIGN_W: f32 = 400.0;
 ///
 /// `max_h_fraction` of 0 means "don't judge by height", which is what the
 /// panels want: their height depends on their content.
-fn window_scale(w_pts: f32, h_pts: f32, design_w: f32, design_h: f32, max_h_fraction: f32) -> f32 {
+pub(crate) fn window_scale(w_pts: f32, h_pts: f32, design_w: f32, design_h: f32, max_h_fraction: f32) -> f32 {
     let by_width = (w_pts - 16.0) / design_w;
     let by_height = if max_h_fraction > 0.0 && design_h > 0.0 {
         h_pts * max_h_fraction / design_h
@@ -452,7 +478,7 @@ fn chip_scale(cell_w_pts: f32, cell_h_pts: f32, ppp: f32) -> f32 {
 /// Style scaling has no such limit. The cost is that explicit pixel sizes —
 /// painter-drawn icons, `min_size`, `add_sized` — are not style, so they
 /// take the factor at their call sites.
-fn scale_style(ui: &mut egui::Ui, k: f32) {
+pub(crate) fn scale_style(ui: &mut egui::Ui, k: f32) {
     if (k - 1.0).abs() < 0.01 {
         return;
     }
@@ -759,6 +785,11 @@ pub fn draw(
                                     r.on_hover_text(tip);
                                     clicked
                                 };
+                                // Plain "i", not U+2139: it reads the same
+                                // and needs no font to have the glyph.
+                                if b(ui, "i", tile.info_open, "what is this file? (size, path, format)") {
+                                    actions.push(OverlayAction::TileInfo { tile_id: tile.id });
+                                }
                                 if tile.audio_tracks.len() > 1
                                     && b(
                                         ui,
@@ -1503,12 +1534,72 @@ fn draw_empty_wall(ctx: &egui::Context, why: EmptyWall, actions: &mut Vec<Overla
         });
 }
 
+/// The help panel's egui id, which is also its layer's: the event loop
+/// asks whether a press landed on the panel ([`pos_on_help`]) before
+/// deciding that the press means "close it".
+const HELP_ID: &str = "tessera-help";
+
+/// Points to scroll the help panel per arrow press or wheel notch.
+pub const HELP_LINE: f32 = 40.0;
+
+/// Whether a window-pixel position is over the help panel.
+pub fn pos_on_help(ctx: &egui::Context, x: f32, y: f32) -> bool {
+    let ppp = ctx.pixels_per_point();
+    ctx.layer_id_at(egui::pos2(x / ppp, y / ppp))
+        == Some(egui::LayerId::new(PANEL_ORDER, egui::Id::new(HELP_ID)))
+}
+
+const KEYS: &[(&str, &str)] = &[
+    ("Esc", "exit fullscreen; otherwise quit"),
+    ("Tab", "pin/unpin the overlay (auto-hides when idle)"),
+    ("Space", "pause/resume all tiles on this screen"),
+    ("F", "fullscreen the tile under the cursor (its sound plays, the rest mute, unless all are muted)"),
+    ("W", "toggle THIS window: fullscreen wall <-> window (on whichever monitor it is currently on — drag it, then W)"),
+    ("T", "float THIS window on top, no title bar — drag the status bar to move it, the edges to resize"),
+    ("Left / Right", "seek -/+10s on the tile under the cursor; hold to scan (the jump adds up and is applied in batches, so it doesn't stutter)"),
+    ("Up / Down", "volume -/+5 on unmuted tiles of this screen"),
+    ("N / Shift+P", "next / previous queue item on each tile"),
+    ("P", "pin the tile under the cursor: it takes most of the screen, the rest share a bottom strip (sound follows, as F)"),
+    ("- / +", "remove tile under cursor / add a tile"),
+    ("L / Q", "browser window, library / queue tab (opens it if there isn't one)"),
+    ("S / C", "browser window, sources / config tab — everything app-wide"),
+    ("?", "toggle this help"),
+    ("gear / top bar", "this window's own settings (UI scale)"),
+    ("+ / top bar", "new window: its own tiles, drawn from the same shared queue"),
+];
+
+const MOUSE: &[(&str, &str)] = &[
+    ("click tile", "pause/resume that tile"),
+    ("drag tile", "drop on another tile to swap; drop on another screen to move it (Esc cancels)"),
+    ("wheel on tile", "that tile's volume +/-5 (Up/Down = all unmuted tiles)"),
+    ("i / A / S buttons", "what this file is (path, size, format, live decode) / audio / subtitle track row"),
+    ("🎤 / 📌 buttons", "solo audio (mute all others) / pin this tile big"),
+    ("right-click tile", "mute/unmute audio"),
+    ("hover tile", "show the queue strip at its bottom"),
+    ("click thumb", "play that item on the hovered tile"),
+    ("right-click thumb", "remove it from the queue"),
+    ("drag thumb", "reorder the queue"),
+    ("transport row", "⏮ ⏪ ⏩ ⏭ seek · scrub bar · ⛶ fullscreen · -/+ tiles · 🗑 delete (click twice)"),
+];
+
 /// Keyboard/mouse help panel, centered. Drawn regardless of the overlay's
 /// auto-hide state (it stays until dismissed).
-pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
+///
+/// It used to be a fixed 520pt grid that ran off any window shorter than
+/// itself, with no visible way to scroll and nothing but ? to close it.
+/// Now it fits the window — narrower means the descriptions wrap, shorter
+/// means it scrolls, with the bar always showing — and while it is open it
+/// owns the wheel and the arrow keys (the event loop routes them here as
+/// `scroll_by`, in points). A click on it closes it; so does a click
+/// anywhere else, or almost any key (see the event loop).
+pub fn draw_help(ctx: &egui::Context, open: &mut bool, scroll_by: f32) {
     let win = ctx.screen_rect();
     let k = window_scale(win.width(), win.height(), HELP_DESIGN_W, 0.0, 0.0);
-    egui::Area::new(egui::Id::new("tessera-help"))
+    // Never wider than the window: the floor in `window_scale` stops the
+    // shrinking well before a narrow window is satisfied, and what is left
+    // over is taken up by wrapping.
+    let width = (520.0 * k).min((win.width() - 48.0).max(80.0));
+    let area = egui::Area::new(egui::Id::new(HELP_ID))
         .order(PANEL_ORDER)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
@@ -1517,73 +1608,80 @@ pub fn draw_help(ctx: &egui::Context, open: &mut bool) {
                 .inner_margin(egui::Margin::symmetric(20.0, 14.0))
                 .show(ui, |ui| {
                     scale_style(ui, k);
-                    ui.set_width(520.0 * k);
+                    ui.set_width(width);
                     ui.heading("Tessera — keyboard & mouse");
                     ui.add_space(6.0);
-                    egui::Grid::new("help-keys")
-                        .num_columns(2)
-                        .spacing(egui::vec2(16.0, 4.0))
-                        .show(ui, |ui| {
-                            let keys: &[(&str, &str)] = &[
-                                ("Esc", "exit fullscreen; otherwise quit"),
-                                ("Tab", "pin/unpin the overlay (auto-hides when idle)"),
-                                ("Space", "pause/resume all tiles on this screen"),
-                                ("F", "fullscreen the tile under the cursor (its sound plays, the rest mute, unless all are muted)"),
-                                ("W", "toggle THIS window: fullscreen wall <-> window (on whichever monitor it is currently on — drag it, then W)"),
-                                ("T", "float THIS window on top, no title bar — drag the status bar to move it, the edges to resize"),
-                                ("Left / Right", "seek -/+10s on the tile under the cursor; hold to scan (the jump adds up and is applied in batches, so it doesn't stutter)"),
-                                ("Up / Down", "volume -/+5 on unmuted tiles of this screen"),
-                                ("N / Shift+P", "next / previous queue item on each tile"),
-                                ("P", "pin the tile under the cursor: it takes most of the screen, the rest share a bottom strip (sound follows, as F)"),
-                                ("- / +", "remove tile under cursor / add a tile"),
-                                ("L / Q", "browser window, library / queue tab (opens it if there isn't one)"),
-                                ("S / C", "browser window, sources / config tab — everything app-wide"),
-                                ("?", "toggle this help"),
-                                ("gear / top bar", "this window's own settings (UI scale)"),
-                                ("+ / top bar", "new window: its own tiles, drawn from the same shared queue"),
-                            ];
-                            for (k, d) in keys {
-                                ui.strong(*k);
-                                ui.label(*d);
-                                ui.end_row();
-                            }
-                        });
-                    ui.add_space(4.0);
-                    ui.separator();
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new("mouse").strong());
-                    egui::Grid::new("help-mouse")
-                        .num_columns(2)
-                        .spacing(egui::vec2(16.0, 4.0))
-                        .show(ui, |ui| {
-                            let mouse: &[(&str, &str)] = &[
-                                ("click tile", "pause/resume that tile"),
-                                ("drag tile", "drop on another tile to swap; drop on another screen to move it (Esc cancels)"),
-                                ("wheel on tile", "that tile's volume +/-5 (Up/Down = all unmuted tiles)"),
-                                ("A / S buttons", "audio / subtitle track row (expands below the transport)"),
-                                ("🎤 / 📌 buttons", "solo audio (mute all others) / pin this tile big"),
-                                ("right-click tile", "mute/unmute audio"),
-                                ("hover tile", "show the queue strip at its bottom"),
-                                ("click thumb", "play that item on the hovered tile"),
-                                ("right-click thumb", "remove it from the queue"),
-                                ("drag thumb", "reorder the queue"),
-                                ("transport row", "⏮ ⏪ ⏩ ⏭ seek · scrub bar · ⛶ fullscreen · -/+ tiles · 🗑 delete (click twice)"),
-                            ];
-                            for (k, d) in mouse {
-                                ui.strong(*k);
-                                ui.label(*d);
-                                ui.end_row();
-                            }
-                        });
-                    ui.add_space(8.0);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("close").clicked() {
-                            *open = false;
-                        }
-                        ui.weak("? or / also closes");
+                    // What the frame, heading and footer take; the list
+                    // gets the rest of the window.
+                    let chrome = 120.0 * k;
+                    let mut scroll = egui::ScrollArea::vertical()
+                        .id_source("tessera-help-scroll")
+                        .max_height((win.height() - chrome).max(60.0))
+                        .auto_shrink([false, true])
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible);
+                    if scroll_by != 0.0 {
+                        let now = egui::scroll_area::State::load(ctx, ui.make_persistent_id("tessera-help-scroll"))
+                            .map_or(0.0, |s| s.offset.y);
+                        // egui clamps the far end itself once it knows
+                        // the content's height.
+                        scroll = scroll.vertical_scroll_offset((now + scroll_by).clamp(0.0, 1.0e7));
+                    }
+                    scroll.show(ui, |ui| {
+                        help_rows(ui, KEYS, k);
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("mouse").strong());
+                        help_rows(ui, MOUSE, k);
                     });
+                    ui.add_space(8.0);
+                    // A row of fixed height: `with_layout` in an Area takes
+                    // every pixel left in the window.
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), 20.0 * k),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            if ui.button("close").clicked() {
+                                *open = false;
+                            }
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new("wheel or arrows scroll · click or any key closes").weak(),
+                                )
+                                .wrap(true),
+                            );
+                        },
+                    );
                 });
         });
+    // A plain click anywhere on the panel closes it. A click, not a press:
+    // egui reports none for a press that moved, so dragging the scroll bar
+    // still scrolls.
+    let r = area.response.rect;
+    let clicked_here = ctx.input(|i| i.pointer.any_click() && i.pointer.interact_pos().is_some_and(|p| r.contains(p)));
+    if clicked_here {
+        *open = false;
+    }
+}
+
+/// Key and description, the description wrapping into whatever width the
+/// key column leaves.
+fn help_rows(ui: &mut egui::Ui, rows: &[(&str, &str)], k: f32) {
+    let key_w = 120.0 * k;
+    for (key, what) in rows {
+        ui.horizontal_top(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(key_w, 0.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_width(key_w);
+                    ui.add(egui::Label::new(egui::RichText::new(*key).strong()).wrap(true));
+                },
+            );
+            ui.add(egui::Label::new(*what).wrap(true));
+        });
+        ui.add_space(2.0);
+    }
 }
 
 /// Width the drop banner lays out in, before window scaling.
@@ -1636,29 +1734,51 @@ pub fn draw_drop_hint(ctx: &egui::Context, queue_only: bool, cell: Option<Rect>)
 /// Transient feedback toast, top-center. Drawn even while the rest of the
 /// overlay is hidden, fading out over the last second.
 pub fn draw_notice(ctx: &egui::Context, notice: &(String, std::time::Instant)) {
-    const SHOW_SECS: f64 = 4.0;
+    let show_secs = notice_secs(&notice.0);
     let age = notice.1.elapsed().as_secs_f64();
-    if age > SHOW_SECS {
+    if age > show_secs {
         return;
     }
-    let alpha = if age > SHOW_SECS - 1.0 {
-        ((SHOW_SECS - age) as f32).clamp(0.0, 1.0)
+    let alpha = if age > show_secs - 1.0 {
+        ((show_secs - age) as f32).clamp(0.0, 1.0)
     } else {
         1.0
     };
+    let win = ctx.screen_rect();
+    // Along the bottom, not the top. Most notices answer a click on a tile
+    // chip, and a toast dropped over the chip landed on the hover tooltip
+    // of the very button that was clicked: the tooltip showed through it
+    // and ran past its edge, which read as the message being clipped.
     egui::Area::new(egui::Id::new("tessera-notice"))
         .order(egui::Order::Tooltip)
-        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 44.0))
+        .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -24.0))
         .show(ctx, |ui| {
             egui::Frame::none()
-                .fill(egui::Color32::from_black_alpha((215.0 * alpha) as u8))
+                // Near-opaque: whatever is behind must not read as part of
+                // the message.
+                .fill(egui::Color32::from_black_alpha((240.0 * alpha) as u8))
                 .rounding(egui::Rounding::same(6.0))
                 .inner_margin(egui::Margin::symmetric(12.0, 7.0))
                 .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_black_alpha((120.0 * alpha) as u8)))
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new(&notice.0).color(egui::Color32::from_white_alpha((255.0 * alpha) as u8)));
+                    // A long message wraps into a block rather than
+                    // spanning the window.
+                    ui.set_max_width((560.0_f32).min(win.width() - 48.0).max(120.0));
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&notice.0).color(egui::Color32::from_white_alpha((255.0 * alpha) as u8)),
+                        )
+                        .wrap(true),
+                    );
                 });
         });
+}
+
+/// How long a notice stays up: four seconds for a short one, longer for
+/// one that takes longer to read (an explanation of why a delete failed is
+/// not read in four), within reason.
+fn notice_secs(msg: &str) -> f64 {
+    (4.0 + msg.chars().count() as f64 / 25.0).min(12.0)
 }
 
 /// Converts a tessera pixel-space rect to egui points.

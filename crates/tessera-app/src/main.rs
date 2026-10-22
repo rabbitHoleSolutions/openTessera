@@ -4,6 +4,7 @@ mod catalog;
 mod cli;
 mod compositor;
 mod hud;
+mod info_panel;
 mod instance;
 mod mcp;
 mod overlay;
@@ -1057,6 +1058,24 @@ fn main() {
                             }
                         }
                     }
+                    // The help panel is dismissed by any press that is not
+                    // on it, and that press does nothing else — taken here,
+                    // before egui sees it, or a press on a status-bar button
+                    // would close the help *and* fire the button. A press on
+                    // the panel goes on to egui, which closes it on a click
+                    // and lets a scroll-bar drag scroll.
+                    if let WindowEvent::MouseInput { state: ElementState::Pressed, .. } = &event {
+                        if overlay.help_open == Some(window_id) {
+                            let on_help = screens[idx]
+                                .cursor
+                                .is_some_and(|(x, y)| overlay::pos_on_help(&screens[idx].egui.egui_ctx, x, y));
+                            if !on_help {
+                                overlay.help_open = None;
+                                last_input = Instant::now();
+                                return;
+                            }
+                        }
+                    }
                     // Forward everything to egui so its input state stays
                     // fresh. Event-time consumption is NOT used to gate raw
                     // input: egui's pointer position lags one frame, so
@@ -1260,6 +1279,21 @@ fn main() {
                         }
                         WindowEvent::MouseWheel { delta, .. } => {
                             last_input = Instant::now();
+                            // The help panel owns the wheel while it is open:
+                            // over the panel egui scrolls it, anywhere else it
+                            // is routed to it — never to a tile's volume.
+                            if overlay.help_open == Some(window_id) {
+                                let on_help = screens[idx]
+                                    .cursor
+                                    .is_some_and(|(x, y)| overlay::pos_on_help(&screens[idx].egui.egui_ctx, x, y));
+                                if !on_help && overlay.help_scroll.is_finite() {
+                                    overlay.help_scroll -= match delta {
+                                        MouseScrollDelta::LineDelta(_, l) => l * overlay::HELP_LINE,
+                                        MouseScrollDelta::PixelDelta(p) => (p.y / screens[idx].window.scale_factor()) as f32,
+                                    };
+                                }
+                                return;
+                            }
                             // Scroll over a tile = that tile's volume ±5.
                             // If the pointer is over an overlay widget (e.g.
                             // the queue strip), egui owns the wheel instead.
@@ -1345,6 +1379,56 @@ fn main() {
                                         on_release = None;
                                         if float_key(&mut screens, k, w) {
                                             wm_settle_at = Some((Instant::now() + Duration::from_millis(600), 4));
+                                        }
+                                    }
+                                }
+                            }
+                            // The help panel owns the scrolling keys while it
+                            // is open — arrows included, so Left/Right no
+                            // longer seek behind it. Almost anything else
+                            // closes it and then does what it always does:
+                            // not modifiers (Shift is half of ?), not ? itself
+                            // (which toggles it below), and not Esc, which
+                            // still leaves fullscreen or quits.
+                            if key_event.state == ElementState::Pressed && overlay.help_open == Some(window_id) {
+                                let page = screens[idx].window.inner_size().height as f32
+                                    / screens[idx].egui.egui_ctx.pixels_per_point()
+                                    * 0.8;
+                                let line = overlay::HELP_LINE;
+                                let by = match &key_event.logical_key {
+                                    Key::Named(NamedKey::ArrowUp) => Some(-line),
+                                    Key::Named(NamedKey::ArrowDown) => Some(line),
+                                    Key::Named(NamedKey::PageUp) => Some(-page),
+                                    Key::Named(NamedKey::PageDown) => Some(page),
+                                    Key::Named(NamedKey::Home) => Some(f32::NEG_INFINITY),
+                                    Key::Named(NamedKey::End) => Some(f32::INFINITY),
+                                    Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight) => Some(0.0),
+                                    _ => None,
+                                };
+                                match by {
+                                    Some(d) => {
+                                        if d.is_infinite() || !overlay.help_scroll.is_finite() {
+                                            overlay.help_scroll = d;
+                                        } else {
+                                            overlay.help_scroll += d;
+                                        }
+                                        return;
+                                    }
+                                    None => {
+                                        let keeps_it = matches!(
+                                            &key_event.logical_key,
+                                            Key::Named(
+                                                NamedKey::Shift
+                                                    | NamedKey::Control
+                                                    | NamedKey::Alt
+                                                    | NamedKey::AltGraph
+                                                    | NamedKey::Super
+                                                    | NamedKey::Meta
+                                                    | NamedKey::Escape
+                                            )
+                                        ) || matches!(&key_event.logical_key, Key::Character(c) if c == "?" || c == "/");
+                                        if !keeps_it {
+                                            overlay.help_open = None;
                                         }
                                     }
                                 }
@@ -1436,8 +1520,7 @@ fn main() {
                                     Key::Character(ref c) if c == "?" || c == "/" => {
                                         // On the focused screen only.
                                         let win = screens[idx].window.id();
-                                        overlay.help_open =
-                                            if overlay.help_open == Some(win) { None } else { Some(win) };
+                                        overlay.toggle_help(win);
                                     }
                                     Key::Character(ref c) if browser_tab_key(c).is_some() => {
                                         // L/Q/S/C all reach the same browser

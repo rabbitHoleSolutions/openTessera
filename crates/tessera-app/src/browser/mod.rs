@@ -25,6 +25,8 @@ use crate::catalog::SourceCatalog;
 use crate::overlay::{OverlayAction, UiSettings};
 use crate::thumbs::ThumbCache;
 
+pub(crate) use tessera_core::info::human_size;
+
 /// How long a confirmation flash stays up. The queue lives in the other
 /// windows, so without a flash a bulk add gives no feedback at all.
 pub(crate) const FLASH_SECS: f64 = 2.5;
@@ -239,34 +241,9 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
     format!("{head}…")
 }
 
-pub(crate) fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
-    let mut v = bytes as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u < UNITS.len() - 1 {
-        v /= 1024.0;
-        u += 1;
-    }
-    if u == 0 {
-        format!("{} {}", bytes, UNITS[0])
-    } else {
-        format!("{v:.1} {}", UNITS[u])
-    }
-}
-
 /// Green confirmation text, shown next to whatever caused it.
 pub(crate) fn flash_label(ui: &mut egui::Ui, state: &BrowserState) {
     if let Some((msg, _)) = &state.flash {
         ui.colored_label(egui::Color32::from_rgb(140, 220, 140), msg);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn human_size_scales_and_keeps_bytes_exact() {
-        assert_eq!(super::human_size(512), "512 B");
-        assert_eq!(super::human_size(2048), "2.0 KB");
-        assert_eq!(super::human_size(3_500_000_000), "3.3 GB");
     }
 }

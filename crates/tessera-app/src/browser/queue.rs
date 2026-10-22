@@ -60,6 +60,13 @@ pub fn draw(
                     {
                         actions.push(OverlayAction::SetVolume { tile_id: t.tile_id, volume: vol });
                     }
+                    if ui
+                        .add(egui::Button::new("i").small())
+                        .on_hover_text("what is this file? (path, size, format, live decode)")
+                        .clicked()
+                    {
+                        actions.push(OverlayAction::TileInfo { tile_id: t.tile_id });
+                    }
                     ui.weak(format!("w{} · m{}", t.window, t.monitor));
                     ui.weak(format!("{} / {}", fmt_time(t.time_pos), fmt_time(t.duration)));
                     ui.label(truncate(&t.title, 70));
@@ -164,6 +171,15 @@ pub fn draw(
                             actions.push(OverlayAction::QueueRemove { index: i });
                         }
                     });
+                    // Outside the pending-only block: what an item is
+                    // is worth asking whether or not it has played.
+                    if ui
+                        .add(egui::Button::new("i").small())
+                        .on_hover_text("what is this file? (path, size, format)")
+                        .clicked()
+                    {
+                        actions.push(OverlayAction::ItemInfo { item: m.clone() });
+                    }
                     if pending {
                         ui.label(truncate(&m.title, 80));
                     } else {

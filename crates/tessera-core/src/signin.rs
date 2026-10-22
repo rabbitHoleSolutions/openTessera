@@ -500,7 +500,8 @@ fn friendly_http(e: ureq::Error) -> String {
                 format!("HTTP {code}{hint}: {}", truncate(body, 160))
             }
         }
-        other => other.to_string(),
+        // Never `to_string()`: it leads with the URL, query and all.
+        other => crate::sources::http_error(other),
     }
 }
 

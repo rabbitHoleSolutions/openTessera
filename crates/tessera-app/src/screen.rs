@@ -446,6 +446,7 @@ impl Screen {
                     behind: if t.item.is_live() { t.behind_live() } else { 0.0 },
                     pinned: self.pinned == Some(t.id),
                     solo: overlay.solo_id == Some(t.id),
+                    info_open: overlay.info.as_ref().is_some_and(|p| p.tile_id == Some(t.id)),
                 })
                 .collect()
         };
@@ -532,8 +533,28 @@ impl Screen {
         // over one set of widgets.
         let drop_hint = overlay.drop_target == Some(window_id);
         let mut help_open = overlay.help_open == Some(window_id);
+        let help_scroll = if help_open { std::mem::take(&mut overlay.help_scroll) } else { 0.0 };
         let mut settings_open = overlay.settings_open == Some(window_id);
         let window_fullscreen = crate::platform::is_fullscreen(&self.window);
+        // The info panel. Whichever screen owns its tile keeps it current —
+        // following the tile to its next video, re-reading mpv's numbers —
+        // and only the window that opened it draws it, which may be a
+        // different one (the browser's queue tab).
+        if let Some(panel) = overlay.info.as_mut() {
+            if let Some(tile) = panel.tile_id.and_then(|id| self.tiles.iter().find(|t| t.id == id)) {
+                if tile.item.id != panel.item.id {
+                    *panel = crate::info_panel::InfoPanel::open(panel.window, tile.item.clone(), panel.tile_id, &settings.sources);
+                }
+                if panel.live_due() {
+                    panel.set_live(vec![tile.playback_info()]);
+                }
+            }
+        }
+        let info = overlay.info.take_if(|p| p.window == window_id).map(|mut p| {
+            p.poll();
+            p
+        });
+        let mut info_open = info.is_some();
         egui.run(&window, |ctx| {
             // Scale the whole overlay UI (zoom multiplies the native ppp
             // and persists across frames). `ui_scale` only moves when the
@@ -569,10 +590,13 @@ impl Screen {
                 });
             }
             if help_open {
-                overlay::draw_help(ctx, &mut help_open);
+                overlay::draw_help(ctx, &mut help_open, help_scroll);
             }
             if settings_open {
                 overlay::draw_settings(ctx, &mut ui_scale, &mut scale_drag, &mut scale_committed, &mut settings_open, floating, &mut actions);
+            }
+            if let Some(panel) = &info {
+                crate::info_panel::draw(ctx, panel, &mut info_open);
             }
             if drop_hint {
                 overlay::draw_drop_hint(ctx, role == ScreenRole::Browser, drop_cell);
@@ -619,6 +643,9 @@ impl Screen {
             overlay.settings_open = None;
         }
         overlay.confirm_delete = confirm_delete;
+        if info_open {
+            overlay.info = info;
+        }
         if click_on_ui {
             overlay.pending_click = None;
         }

@@ -270,6 +270,16 @@ fn row(
         {
             actions.push(OverlayAction::PlayNow { item: m.clone() });
         }
+        // With the row's other buttons, not at its right end: there it
+        // sat under the scroll bar, which widens on hover and took the
+        // click.
+        if ui
+            .add(egui::Button::new("i").small())
+            .on_hover_text("what is this file? (path, size, format)")
+            .clicked()
+        {
+            actions.push(OverlayAction::ItemInfo { item: m.clone() });
+        }
 
         let title = if queued {
             egui::RichText::new(format!("{} · queued", m.title)).weak()
@@ -281,6 +291,11 @@ fn row(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if let Some(sz) = m.size {
                 ui.weak(human_size(sz));
+            }
+            // Two copies of one film list under one title; the frame size
+            // is usually what tells them apart before anything is opened.
+            if let (Some(w), Some(h)) = (m.width, m.height) {
+                ui.weak(tessera_core::info::resolution_label(w, h));
             }
         });
     });

@@ -939,6 +939,50 @@ impl Tile {
         }
     }
 
+    /// What mpv is doing with this file right now, for the info panel:
+    /// which decoder, what frames it is producing, how fast the bits are
+    /// arriving. The one source of format details for a local file, which
+    /// has no server to ask.
+    pub fn playback_info(&self) -> tessera_core::info::Section {
+        use tessera_core::info::human_bitrate;
+        let s = |p: &str| self.mpv.get_string(p).filter(|v| !v.is_empty());
+        let f = |p: &str| self.mpv.get_f64(p);
+        let mut out = tessera_core::info::Section::new("playing");
+        let hw = match s("hwdec-current").as_deref() {
+            None | Some("no") => "software".to_owned(),
+            Some(h) => h.to_owned(),
+        };
+        out.row("decoder", [Some(hw), s("video-format")].into_iter().flatten().collect::<Vec<_>>().join(" · "));
+        let mut pic = Vec::new();
+        if let (Some(w), Some(h)) = (self.mpv.get_i64("video-params/w"), self.mpv.get_i64("video-params/h")) {
+            pic.push(format!("{w}×{h}"));
+        }
+        pic.extend(s("video-params/pixelformat"));
+        // Primaries and transfer together are what says HDR: bt.2020 + pq.
+        if let (Some(p), Some(g)) = (s("video-params/primaries"), s("video-params/gamma")) {
+            pic.push(format!("{p} / {g}"));
+        }
+        out.row("frames", pic.join(" · "));
+        if let Some(fps) = f("estimated-vf-fps").or_else(|| f("container-fps")).filter(|v| *v > 0.0) {
+            out.row("frame rate", format!("{fps:.3} fps"));
+        }
+        let rates: Vec<String> = [("video", "video-bitrate"), ("audio", "audio-bitrate")]
+            .iter()
+            .filter_map(|(what, p)| f(p).filter(|v| *v > 0.0).map(|v| format!("{what} {}", human_bitrate(v))))
+            .collect();
+        out.row("bitrate", rates.join(" · "));
+        if self.audio_enabled() {
+            let ch = self.mpv.get_i64("audio-params/channel-count").map(|c| format!("{c} ch"));
+            out.row("audio", [s("audio-codec-name"), ch].into_iter().flatten().collect::<Vec<_>>().join(" · "));
+        }
+        out.row("container", s("file-format").unwrap_or_default());
+        if let Some(c) = f("demuxer-cache-duration") {
+            out.row("buffered", format!("{c:.1} s ahead"));
+        }
+        out.row("dropped", format!("{} frames", self.decoder_drops()));
+        out
+    }
+
     pub fn status(&self) -> String {
         let hwdec = self.mpv.get_string("hwdec-current").unwrap_or_else(|| "n/a".into());
         let drops = self.mpv.get_i64("decoder-frame-drop-count").unwrap_or(-1);

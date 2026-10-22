@@ -1459,6 +1459,66 @@ Not done:
 
 ---
 
+## 28. What is this file? (the "i" panel)
+
+Status: **implemented** (2026-10-22)
+
+Asked for after finding two copies of *Civil War* in a Jellyfin library
+with no way to tell which was the 19 GB one before deleting. An "i" on the
+tile chip, on every library row and on every queue row (now-playing
+included) opens one panel on the window that asked: the server's path,
+size, container, bitrate, length and date added; the video stream
+(resolution, codec, profile, bit depth, HDR / Dolby Vision); every audio
+and subtitle track. On a tile it adds what mpv is doing — decoder, frame
+format, colour, measured bitrates, buffer, drops — which is also the only
+format detail a local file gets, having no server to ask. A tile's panel
+follows the tile to its next video. Library rows now show a resolution
+tag beside the size, which usually tells duplicates apart without
+opening anything.
+
+- `tessera_core::info`: pure parsers (`jellyfin`, `plex`) and formatting,
+  tested on fixtures trimmed from real servers; `sources::item_details`
+  does the round trip, on a thread per open — never the render thread.
+- Plex track labels are built from language codes and the Latin codec
+  part of `displayTitle`, not `displayTitle` itself, which names each
+  language in its own script; egui's bundled fonts draw CJK, Thai and
+  Devanagari as empty boxes.
+
+Found along the way, both on the user's own Plex server:
+
+- **Plex merges versions, and Tessera only saw the first.** 21 of 263
+  films held more than one file. The listing now makes one item per
+  version (`plex|{ratingKey}|{mediaId}`; single-version ids are unchanged,
+  so saved queues are too), and delete on a version removes only that
+  file (`DELETE /library/metadata/{rk}/media/{id}`, the endpoint
+  python-plexapi uses). The old whole-item delete would have erased every
+  copy. An id without a version that turns out to hold several is refused.
+- **Plex sizes were never read.** The listing looked for
+  `videoWidth`/`videoHeight`; Plex sends `width`/`height`. Every Plex item
+  entered the decode budget as the 1080p30 placeholder. Plex items also now
+  carry `addedAt`, so "date" ordering works for them.
+
+The first real delete then failed, which surfaced two more things:
+
+- **A server error printed the credential.** ureq's error text leads with
+  the request URL, and the query is the key, so "delete failed: http://…
+  ?api_key=…" went to the toast and the log. Every server call now goes
+  through `sources::http_error` (status plus the server's first line, or
+  the transport failure, never the URL), sign-in included.
+- **Jellyfin can't delete from a read-only mount.** The container had the
+  movies volume `:ro`; Jellyfin answered 500 ("Read-only file system") and
+  rolled back, keeping both file and item. Nothing Tessera can fix, so the
+  error now says so; Plex's equivalent (deletion turned off on the server)
+  gets the same treatment.
+
+**Known gaps**: no delete from the panel itself (play it, then the tile's
+trash); the per-version Plex delete matches python-plexapi but has not
+been run against a live server.
+
+**Effort**: M
+
+---
+
 ## Implemented features (for context)
 
 - Phase 2 budget: eviction (OLDEST_STARTED), adaptive ceiling, single-stream rule
