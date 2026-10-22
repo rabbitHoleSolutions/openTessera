@@ -52,9 +52,14 @@ const SEEK: &str = "25%";
 pub const LIVE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// True when a frame can be extracted from this item: a file on disk, or a
-/// live stream. Everything else (Plex, Jellyfin) has a poster URL instead.
+/// live stream, or a server item with no poster of its own.
 pub fn extractable(item: &MediaItem) -> bool {
-    item.kind == SourceKind::Local || item.is_live()
+    // A server item normally has a poster and never gets here; one without
+    // (a version mismatched into someone else's Plex entry) is a file over
+    // HTTP, which mpv reads as readily as a local one.
+    item.kind == SourceKind::Local
+        || item.is_live()
+        || (matches!(item.kind, SourceKind::Plex | SourceKind::Jellyfin) && item.thumb_url.is_none())
 }
 
 /// How long a cached thumbnail stays good. Live sources age out; a file's
@@ -273,14 +278,19 @@ mod tests {
     }
 
     #[test]
-    fn files_and_live_streams_are_candidates_but_posters_are_not() {
+    fn files_live_streams_and_posterless_server_items_are_candidates() {
         assert!(extractable(&item("/media/a.mkv", None, None)));
         let mut cam = item("/x", None, None);
         cam.kind = SourceKind::Camera;
         assert!(extractable(&cam), "a camera frame is extractable too");
         let mut remote = item("/x", None, None);
-        remote.kind = SourceKind::Jellyfin;
-        assert!(!extractable(&remote), "servers hand over a poster instead");
+        remote.kind = SourceKind::Plex;
+        remote.thumb_url = Some("http://x/thumb".into());
+        assert!(!extractable(&remote), "a server's poster is used instead");
+        // A version mismatched into another film's Plex entry has its
+        // poster taken away, and is a file like any other.
+        remote.thumb_url = None;
+        assert!(extractable(&remote));
     }
 
     #[test]

@@ -456,7 +456,11 @@ fn plex_items_from_section(json: &Value, base: &str, token: &str) -> Vec<MediaIt
         .unwrap_or_default();
     let mut items = Vec::new();
     for m in metadata {
-        let title = m.get("title").and_then(Value::as_str).unwrap_or("?").to_owned();
+        // Trimmed: Plex keeps a leading space from a file name like
+        // "(artist) - song.mpg", which sorted those entries ahead of
+        // everything else.
+        let base_title = m.get("title").and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty()).unwrap_or("?");
+        let title = base_title.to_owned();
         let year = m.get("year").and_then(Value::as_i64);
         let rating_key = m.get("ratingKey").and_then(Value::as_str).unwrap_or("").to_owned();
         let thumb_url = m
@@ -475,6 +479,20 @@ fn plex_items_from_section(json: &Value, base: &str, token: &str) -> Vec<MediaIt
                 Some(k) => k,
                 None => continue,
             };
+            // A merged entry is only as right as Plex's match, and a
+            // version whose file names something else was mismatched
+            // into it — 23 different music videos under one film, in a
+            // real library. That row goes by its file, without the
+            // entry's poster (it is of the wrong film; the thumbnailer
+            // takes a frame from the file instead).
+            let own = several
+                .then(|| part.get("file").and_then(Value::as_str))
+                .flatten()
+                .and_then(|f| mismatched_version_title(base_title, year, f));
+            let (title, thumb_url) = match own {
+                Some(t) => (t, None),
+                None => (title.clone(), thumb_url.clone()),
+            };
             let id = match media.get("id").map(|v| v.to_string()) {
                 Some(media_id) if several => format!("plex|{rating_key}|{}", media_id.trim_matches('"')),
                 _ => format!("plex|{rating_key}"),
@@ -482,7 +500,7 @@ fn plex_items_from_section(json: &Value, base: &str, token: &str) -> Vec<MediaIt
             let dim = |k: &str| media.get(k).and_then(Value::as_i64).map(|v| v as u32);
             items.push(MediaItem {
                 id,
-                title: title.clone(),
+                title,
                 uri: format!("{base}{part_key}?X-Plex-Token={token}"),
                 kind: SourceKind::Plex,
                 // `width`/`height`, not `videoWidth`/`videoHeight`: the
@@ -497,13 +515,30 @@ fn plex_items_from_section(json: &Value, base: &str, token: &str) -> Vec<MediaIt
                 // When it joined the library — what "date" ordering means
                 // to a person. Parts carry no timestamp of their own.
                 modified: m.get("addedAt").and_then(Value::as_i64).map(|v| v.max(0) as u64),
-                thumb_url: thumb_url.clone(),
+                thumb_url,
                 source: None,
             });
         }
     }
     items.sort_by_key(|a| a.title.to_lowercase());
     items
+}
+
+/// The title a version of a merged Plex entry should go by, when its file
+/// says it is something other than the entry: `None` when the file agrees
+/// (same title, and the same year or none), which keeps Plex's tidier name
+/// for what is genuinely a second copy.
+fn mismatched_version_title(entry: &str, year: Option<i64>, file: &str) -> Option<String> {
+    let parsed = crate::title::parse_title(file);
+    let key = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect::<String>();
+    let same_year = match (parsed.year, year) {
+        (Some(a), Some(b)) => a as i64 == b,
+        _ => true,
+    };
+    if parsed.title.is_empty() || (key(&parsed.title) == key(entry) && same_year) {
+        return None;
+    }
+    Some(parsed.display())
 }
 
 /// Plex reports frame rates as labels: "24p", "PAL", "NTSC", "60p"...
@@ -866,6 +901,37 @@ mod tests {
         assert_eq!(items[1].width, Some(3840));
         assert!(items[1].uri.contains("/parts/5200/"));
         assert_eq!(items[0].title, items[1].title);
+    }
+
+    #[test]
+    fn a_version_mismatched_into_an_entry_goes_by_its_file() {
+        // From a real library: Plex matched a folder of music videos to
+        // one film, and Home Alone 2 to Home Alone.
+        let json: Value = serde_json::json!({
+            "MediaContainer": { "Metadata": [{
+                "title": " Home Alone", "year": 1990, "ratingKey": "7", "thumb": "/library/metadata/7/thumb/1",
+                "Media": [
+                    { "id": 1, "Part": [{ "key": "/library/parts/1/1/a.mkv",
+                        "file": "/media/Kids Movies/Home.Alone.1990.720p.BRRip.x264-x0r.mkv" }] },
+                    { "id": 2, "Part": [{ "key": "/library/parts/2/1/b.mp4",
+                        "file": "/media/Kids Movies/Home Alone 1992 2 Lost in New York Macaulay Culkin 720p.mp4" }] },
+                    { "id": 3, "Part": [{ "key": "/library/parts/3/1/c.mpg",
+                        "file": "/media/Music Videos/(ace of base) - beautiful life - vsn.mpg" }] },
+                    { "id": 4, "Part": [{ "key": "/library/parts/4/1/d.mkv",
+                        "file": "/media/Kids Movies/home_alone.mkv" }] }
+                ]
+            }]}
+        });
+        let items = plex_items_from_section(&json, "http://x:32400", "tok");
+        let by_id = |id: &str| items.iter().find(|i| i.id == id).unwrap();
+        // Copies of the film keep Plex's name and poster.
+        assert_eq!(by_id("plex|7|1").title, "Home Alone (1990)");
+        assert_eq!(by_id("plex|7|4").title, "Home Alone (1990)");
+        assert!(by_id("plex|7|1").thumb_url.is_some());
+        // The others say what they are, without the wrong poster.
+        assert_eq!(by_id("plex|7|2").title, "Home Alone (1992)");
+        assert_eq!(by_id("plex|7|3").title, "ace of base beautiful life vsn");
+        assert_eq!(by_id("plex|7|3").thumb_url, None);
     }
 
     #[test]

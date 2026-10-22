@@ -1520,6 +1520,15 @@ says so, drops the item from every cached listing
 closes the tile when the queue has nothing left. Verified in the sandbox
 on two throwaway clips: next, then close.
 
+Splitting versions out exposed Plex's bad matches: a real library had 23
+different music videos merged into one film, "Music Videos (2001)", and
+Home Alone 2 filed under Home Alone — every row the same title and
+poster. A version whose file names something else (by the same parser
+local files use; title and year compared) now goes by its file and gets
+a frame from the file instead of the wrong film's poster; genuine second
+copies keep Plex's title. Plex titles are also trimmed — entries made
+from a file name starting "(" carried a leading space and sorted first.
+
 **Known gaps**: no delete from the panel itself (play it, then the tile's
 trash); the per-version Plex delete matches python-plexapi but has not
 been run against a live server.
