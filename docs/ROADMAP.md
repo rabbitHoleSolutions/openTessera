@@ -1528,6 +1528,10 @@ local files use; title and year compared) now goes by its file and gets
 a frame from the file instead of the wrong film's poster; genuine second
 copies keep Plex's title. Plex titles are also trimmed — entries made
 from a file name starting "(" carried a leading space and sorted first.
+Plex posters now come through its image transcoder at 240x360: the bare
+`thumb` path served the original, 7-9 MB on a real server, past the
+thumbnail fetcher's 4 MiB cap — a whole library ("Movies Demo") drew
+no pictures at all.
 
 **Known gaps**: no delete from the panel itself (play it, then the tile's
 trash); the per-version Plex delete matches python-plexapi but has not

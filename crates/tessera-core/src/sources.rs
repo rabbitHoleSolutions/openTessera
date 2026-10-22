@@ -466,7 +466,7 @@ fn plex_items_from_section(json: &Value, base: &str, token: &str) -> Vec<MediaIt
         let thumb_url = m
             .get("thumb")
             .and_then(Value::as_str)
-            .map(|t| format!("{base}{t}?X-Plex-Token={token}"));
+            .map(|t| plex_thumb_url(base, t, token));
         let title = match year {
             Some(y) => format!("{title} ({y})"),
             None => title,
@@ -539,6 +539,25 @@ fn mismatched_version_title(entry: &str, year: Option<i64>, file: &str) -> Optio
         return None;
     }
     Some(parsed.display())
+}
+
+/// A poster at thumbnail size, through Plex's image transcoder.
+///
+/// The bare `thumb` path serves whatever was uploaded or fetched, and on a
+/// real server that was 7-9 MB per poster: past the thumbnail fetcher's
+/// 4 MiB cap, so every one arrived cut off, failed to decode and drew
+/// nothing — a whole library without a picture. Jellyfin's URL already
+/// asks for `maxWidth`; this is Plex's equivalent. 240x360 is a 2:3
+/// poster at twice the library row's size, for high UI scales.
+fn plex_thumb_url(base: &str, thumb: &str, token: &str) -> String {
+    let path: String = thumb
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    format!("{base}/photo/:/transcode?width=240&height=360&minSize=1&upscale=1&url={path}&X-Plex-Token={token}")
 }
 
 /// Plex reports frame rates as labels: "24p", "PAL", "NTSC", "60p"...
@@ -875,7 +894,10 @@ mod tests {
         assert_eq!(it.codec.as_deref(), Some("hevc"));
         assert_eq!(it.size, Some(9_000_000_000));
         assert_eq!(it.modified, Some(1_700_000_000));
-        assert_eq!(it.thumb_url.as_deref(), Some("http://x:32400/library/metadata/123/thumb/1700000000?X-Plex-Token=tok"));
+        assert_eq!(
+            it.thumb_url.as_deref(),
+            Some("http://x:32400/photo/:/transcode?width=240&height=360&minSize=1&upscale=1&url=%2Flibrary%2Fmetadata%2F123%2Fthumb%2F1700000000&X-Plex-Token=tok")
+        );
     }
 
     #[test]
