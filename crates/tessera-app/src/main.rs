@@ -358,8 +358,12 @@ fn main() {
         }
     }
 
+    let hwdec = tessera_mpv::hwdec_for_api(&args.hwdec, mpv_lib.client_api_version());
+    if hwdec != args.hwdec {
+        println!("tessera: libmpv older than 0.36 takes one hwdec, not a list; using {hwdec}");
+    }
     let mut tile_opts = TileOptions {
-        hwdec: args.hwdec.clone(),
+        hwdec: hwdec.to_string(),
         audio: settings.audio,
         audio_device: args.audio_device.clone(),
         cache_mb: settings.cache_mb,

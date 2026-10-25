@@ -109,6 +109,18 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// The `hwdec` value a libmpv of this client API version will accept.
+/// A comma-separated priority list ("nvdec-copy,vaapi-copy") arrived in
+/// mpv 0.36, client API 2.1; an older mpv rejects the whole string, and
+/// since a rejected option fails `Mpv::new`, every tile would fail to
+/// open. There the list's first entry is the closest thing it can take.
+pub fn hwdec_for_api(hwdec: &str, client_api: u64) -> &str {
+    if client_api >= (2 << 16 | 1) {
+        return hwdec;
+    }
+    hwdec.split(',').next().unwrap_or(hwdec).trim()
+}
+
 /// Human-readable name for an mpv error code. Public because end-of-file
 /// events carry a raw code, and a tile that failed to open needs to say
 /// why rather than just going blank.
@@ -466,5 +478,24 @@ impl RenderContext {
 impl Drop for RenderContext {
     fn drop(&mut self) {
         unsafe { (self.lib.render_context_free)(self.ctx) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hwdec_for_api;
+
+    #[test]
+    fn hwdec_list_kept_from_mpv_0_36() {
+        assert_eq!(hwdec_for_api("nvdec-copy,vaapi-copy", 2 << 16 | 1), "nvdec-copy,vaapi-copy");
+        assert_eq!(hwdec_for_api("nvdec-copy,vaapi-copy", 2 << 16 | 5), "nvdec-copy,vaapi-copy");
+    }
+
+    #[test]
+    fn hwdec_list_narrowed_to_first_before_0_36() {
+        assert_eq!(hwdec_for_api("nvdec-copy,vaapi-copy", 2 << 16), "nvdec-copy");
+        assert_eq!(hwdec_for_api("nvdec-copy, vaapi-copy", 1 << 16 | 109), "nvdec-copy");
+        // A single method is left alone at any version.
+        assert_eq!(hwdec_for_api("auto-safe", 1 << 16), "auto-safe");
     }
 }

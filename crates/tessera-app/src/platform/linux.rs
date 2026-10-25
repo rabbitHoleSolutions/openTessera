@@ -13,13 +13,20 @@ use super::Chord;
 
 /// `nvdec-copy`: NVDEC decoding with a frame copy rather than the CUDA/GL
 /// zero-copy interop, which segfaults when decoders re-init mid-playback.
-pub const DEFAULT_HWDEC: &str = "nvdec-copy";
+/// Then `vaapi-copy` for Intel and AMD: alone, nvdec-copy on a machine
+/// with no NVIDIA GPU fell through to software decoding without a word.
+/// NVDEC stays first so an NVIDIA box that also has a VA-API driver
+/// (nvidia-vaapi-driver) keeps the path the app was tuned on. mpv older
+/// than 0.36 can't take a list; `hwdec_for_api` narrows it to the first.
+pub const DEFAULT_HWDEC: &str = "nvdec-copy,vaapi-copy";
 
 /// The `--hwdec` paragraph of `--help`, continuation lines pre-indented.
-pub const HWDEC_HELP: &str = "mpv hardware decode mode (default nvdec-copy — hardware
-                     decode without the CUDA/GL zero-copy interop, which
-                     segfaults in mpv 0.34 when many decoders re-initialize;
-                     use auto-safe for zero-copy at your own risk)";
+pub const HWDEC_HELP: &str = "mpv hardware decode mode, or a comma-separated list
+                     tried in order (default nvdec-copy,vaapi-copy — NVDEC,
+                     else VA-API, each without the GL zero-copy interop,
+                     which segfaults on NVIDIA when many decoders
+                     re-initialize; use auto-safe for zero-copy at your own
+                     risk)";
 
 /// Tiling WMs (pop-shell) ignore a fresh window's fullscreen request and
 /// relocate fullscreen windows when another leaves fullscreen; the event
