@@ -105,9 +105,12 @@ Known rough edges are listed in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
 
   Set `TESSERA_MPV_LIB=/path/to/libmpv.so` to use a particular copy.
 - **Hardware decoding** works through mpv. On Linux the default is
-  `--hwdec nvdec-copy`, because NVIDIA's zero-copy CUDA/GL interop crashes
-  when a decoder re-initializes mid-playback. On AMD or Intel, try
-  `--hwdec vaapi` (or `auto-safe`). On macOS the default is `videotoolbox`.
+  `--hwdec nvdec-copy,vaapi-copy`: NVDEC on NVIDIA, VA-API on AMD and
+  Intel, both copying frames back rather than using GL zero-copy interop,
+  because NVIDIA's CUDA/GL interop crashes when a decoder re-initializes
+  mid-playback. (mpv older than 0.36 can't take a list and gets
+  `nvdec-copy` alone; pass `--hwdec vaapi-copy` there on AMD or Intel.)
+  On macOS the default is `videotoolbox`.
 
 ## Build and install
 
