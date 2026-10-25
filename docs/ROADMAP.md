@@ -1616,6 +1616,18 @@ What had to change:
   every Wayland output twice, so the API offered a "monitor 1" that was
   the same DP-1. `windowing::available_monitors` dedups, and every
   window-side lookup goes through it.
+- **Judder, even with one stream fullscreen**: decoding was fine (24.0fps,
+  no drops); drawing wasn't. The 16ms timer gave COSMIC 62.5 frames a
+  second for a 59.97Hz output, so ~2.5 a second were thrown away and the
+  rest landed at random points in the refresh, breaking a film's cadence.
+  On Wayland each window now draws when the compositor asks for a frame
+  (`pre_present_notify` + `RedrawRequested`, `platform::frame_callbacks`):
+  59–60 frames a second fullscreen at one tile, each one shown. A heavy
+  wall can miss a repaint and wait a refresh (3 tiles: ~47 a second,
+  well-timed) — it looked great in use. A window COSMIC isn't showing
+  gets no callbacks and falls back to 20 a second, so mpv keeps playing.
+  X11 is unchanged (measured: 187 frames per 3s before and after).
+  `TESSERA_FRAME_CALLBACKS=0` goes back to the timer.
 
 Testing on Wayland: `xdotool` can't reach the window; the MCP's synthetic
 input covers the mouse, and `wtype` the keys, into whatever has keyboard
@@ -1625,7 +1637,8 @@ focus (see CLAUDE.md).
 no retyping, and winit sets no window level there) — it only removes the
 title bar. mpv prints "Cannot load libcuda.so.1" twice on non-NVIDIA
 machines as NVDEC is tried first; harmless. Not tested: several monitors,
-fractional scaling, the browser window, AMD.
+fractional scaling, the browser window, AMD, a hidden window's 20Hz
+fallback, two windows paced at once.
 
 **Effort**: S
 

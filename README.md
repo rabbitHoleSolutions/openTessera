@@ -211,6 +211,8 @@ The useful switches when something misbehaves:
 - `TESSERA_PROFILE=1` logs slow render and property calls.
 - `TESSERA_VSYNC=1` turns vsync on. It is off by default because of a swap
   stall seen with occluded windows on X11.
+- `TESSERA_FRAME_CALLBACKS=0` (Wayland) draws on the app's own timer
+  instead of when the compositor asks for a frame.
 
 ## Assistants (MCP)
 

@@ -107,6 +107,13 @@ pub struct Screen {
     pub refocus_at: Option<std::time::Instant>,
     last_status_tp: Vec<f64>,
     pub frames_drawn: u64,
+    /// Drawn when the compositor asks (`platform::frame_callbacks`).
+    pub compositor_paced: bool,
+    /// The compositor has asked for this window's next frame; always true
+    /// where it doesn't ask.
+    pub frame_due: bool,
+    /// When this window last swapped.
+    pub presented_at: std::time::Instant,
     pub thumbs: ThumbCache,
     pending_screenshot: Option<(std::path::PathBuf, String)>,
     /// Frame grabs asked for over the instance socket (MCP), served at the
@@ -151,6 +158,7 @@ impl Screen {
     ) -> Screen {
         let compositor = Compositor::new(&gl);
         let size = window.inner_size();
+        let compositor_paced = crate::platform::frame_callbacks(&window);
         Screen {
             window,
             surface,
@@ -177,6 +185,9 @@ impl Screen {
             refocus_at: None,
             last_status_tp: Vec::new(),
             frames_drawn: 0,
+            compositor_paced,
+            frame_due: true,
+            presented_at: std::time::Instant::now(),
             thumbs: ThumbCache::new(),
             pending_screenshot: None,
             captures: Vec::new(),
@@ -690,8 +701,29 @@ impl Screen {
             self.take_screenshot();
         }
         self.serve_captures(true);
+        if self.compositor_paced {
+            // Asks for a callback on the commit this swap makes; winit then
+            // holds this window's RedrawRequested until the compositor
+            // sends it, which is what sets `frame_due` again.
+            self.window.pre_present_notify();
+        }
         self.surface.swap_buffers(&self.context).ok();
+        if self.compositor_paced {
+            self.frame_due = false;
+            self.window.request_redraw();
+        }
+        self.presented_at = std::time::Instant::now();
         self.frames_drawn += 1;
+    }
+
+    /// Whether to draw this window this frame. Once the compositor asks —
+    /// or after `FRAME_FALLBACK` regardless: a window on another workspace
+    /// is never asked, and its tiles still need rendering, or mpv's video
+    /// output waits on them. 20 frames a second is enough for that, and
+    /// far less than a hidden wall used to cost.
+    pub fn wants_frame(&self) -> bool {
+        const FRAME_FALLBACK: std::time::Duration = std::time::Duration::from_millis(50);
+        self.frame_due || self.presented_at.elapsed() >= FRAME_FALLBACK
     }
 
     /// Answers the captures that can be taken at this point of the frame:

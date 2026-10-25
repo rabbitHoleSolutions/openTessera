@@ -82,7 +82,8 @@ the whole workspace for `aarch64-apple-darwin` (it can't link or run).
 
 **On COSMIC** (Wayland, Ubuntu 26.04, Intel iGPU) the app runs natively on
 Wayland — winit picks it whenever `WAYLAND_DISPLAY` is set; force XWayland
-with `WINIT_UNIX_BACKEND=x11` to tell a Wayland problem from a COSMIC one.
+with `env -u WAYLAND_DISPLAY` to tell a Wayland problem from a COSMIC one
+(winit 0.29 ignores `WINIT_UNIX_BACKEND`).
 `xdotool` can't reach a Wayland window. The MCP's input covers the mouse;
 for keys, `wtype -k <key>` works (COSMIC offers the virtual-keyboard
 protocol) but types into whatever has *keyboard focus*, and the user's
@@ -125,6 +126,17 @@ when a frame begins and every callback re-arms `WaitUntil(next_frame_at)`.
 Re-arming `now + 16ms` per callback (as it once did) makes the period the
 frame's work *plus* 16ms, because the loop's last callback comes after the
 work.
+
+**Under Wayland a window draws when the compositor asks, not on the
+timer.** The timer never lines up with the output's refresh (62.5 frames
+a second at 59.97Hz judders film), so a Wayland `Screen` is
+`compositor_paced`: it calls `pre_present_notify` before its swap, and
+winit holds its `RedrawRequested` until the frame callback — which sets
+`frame_due` and wakes the loop to draw at once. The per-screen loop skips
+a window that isn't due, except after 50ms (`wants_frame`): a window on
+another workspace gets no callbacks, and its tiles must still render.
+X11 and macOS stay timer-paced. To compare, `env -u WAYLAND_DISPLAY`
+forces X11.
 
 **One `Screen` per window, created and destroyed at runtime.** Windows are
 opened from the status bar's "+" and closed individually (`CloseRequested`

@@ -43,6 +43,13 @@ pub const DEFER_STARTUP_TILES: bool = true;
 /// so T acts on the press like every other toggle.
 pub const FLOAT_ON_RELEASE: bool = false;
 
+/// The timer paces every window, as the app was tuned (see linux.rs).
+/// Untried here: a redraw request becomes a drawRect at the display's
+/// rate, which on a 120Hz panel would be twice the work.
+pub fn frame_callbacks(_window: &Window) -> bool {
+    false
+}
+
 /// Nothing to add: a bundle's identity lives in its Info.plist, and
 /// per-window icons don't exist on macOS (the Dock shows the bundle's).
 pub fn window_builder(wb: WindowBuilder) -> WindowBuilder {

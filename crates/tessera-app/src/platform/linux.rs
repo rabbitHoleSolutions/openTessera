@@ -43,6 +43,21 @@ pub const DEFER_STARTUP_TILES: bool = false;
 /// repeats, and T toggled ~40 times a second.
 pub const FLOAT_ON_RELEASE: bool = true;
 
+/// Whether this window draws when the compositor asks for a frame (Wayland
+/// frame callbacks, through winit's `pre_present_notify`) rather than on
+/// the timer alone. A 16ms timer against a 59.97Hz output never lines up
+/// with it: COSMIC got 62.5 frames a second, dropped the spares, and 24fps
+/// film juddered. Wayland only: X11 has no frame callbacks (winit answers a
+/// redraw request at once), and the timer is what the app was tuned on.
+/// `TESSERA_FRAME_CALLBACKS=0` turns it off: a heavy wall can miss COSMIC's
+/// repaint and get its callback a refresh late (3 tiles fullscreen on a UHD
+/// 630: ~47 well-timed frames a second, against 62 untimed ones without).
+pub fn frame_callbacks(window: &Window) -> bool {
+    use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
+    let wanted = std::env::var("TESSERA_FRAME_CALLBACKS").map(|v| v != "0").unwrap_or(true);
+    wanted && matches!(window.raw_window_handle(), RawWindowHandle::Wayland(_))
+}
+
 /// WM_CLASS, and the name the desktop entry matches with StartupWMClass.
 /// Set explicitly rather than left to default from the binary name, so
 /// renaming the binary can't silently break the dock association.

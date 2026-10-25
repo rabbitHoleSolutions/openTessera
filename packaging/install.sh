@@ -108,3 +108,8 @@ case ":$PATH:" in
 esac
 echo "It should now appear in your app menu, and under 'Open With' for videos."
 [ "$set_default" = 1 ] || echo "Run with --default to also make it the default video player."
+# COSMIC's dock caches icon lookups from when it started, so a first install
+# shows the generic icon until the panel restarts. Seen on COSMIC 1.0.
+case "${XDG_CURRENT_DESKTOP:-}" in
+  *COSMIC*) echo "On COSMIC, a first install shows a generic dock icon until you log out and back in." ;;
+esac

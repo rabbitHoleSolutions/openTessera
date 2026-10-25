@@ -514,6 +514,10 @@ fn main() {
     // work, so the real period was that work plus 16ms: ~45Hz on an M1 Max
     // at four tiles, with 60fps video visibly dropping frames to match.
     let mut next_frame_at = Instant::now();
+    // When this pass of the event loop woke. A RedrawRequested for a window
+    // that swapped before it is the compositor asking for a frame; one that
+    // swapped since is winit's own (a configure), and the frame is fresh.
+    let mut pass_began = Instant::now();
 
     event_loop
         .run(move |event, target| {
@@ -523,6 +527,9 @@ fn main() {
                 Event::UserEvent(injected) => rpc::synthesize(injected),
                 other => other,
             };
+            if matches!(event, Event::NewEvents(_)) {
+                pass_began = Instant::now();
+            }
             target.set_control_flow(ControlFlow::WaitUntil(next_frame_at));
             let is_init = matches!(event, Event::NewEvents(StartCause::Init));
             match event {
@@ -721,6 +728,9 @@ fn main() {
                             .collect()
                     };
                     for screen_idx in 0..screens.len() {
+                        if !screens[screen_idx].wants_frame() {
+                            continue;
+                        }
                         let mut services = screen::Services {
                             catalog: &mut catalog,
                             tracks: &tracks,
@@ -1144,6 +1154,17 @@ fn main() {
                         }
                         WindowEvent::Resized(size) => {
                             screens[idx].resize(size.width, size.height);
+                        }
+                        WindowEvent::RedrawRequested => {
+                            screens[idx].frame_due = true;
+                            // The compositor is ready for this window now,
+                            // so draw now: waiting for the timer would put
+                            // the frame back at a random point in the
+                            // refresh, which is the judder this undoes.
+                            if screens[idx].compositor_paced && screens[idx].presented_at < pass_began {
+                                next_frame_at = Instant::now();
+                                target.set_control_flow(ControlFlow::WaitUntil(next_frame_at));
+                            }
                         }
                         WindowEvent::ModifiersChanged(m) => {
                             mods = m.state();
