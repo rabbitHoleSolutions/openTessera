@@ -1567,6 +1567,13 @@ In the same pass: library thumbnails are fitted inside their slot rather
 than stretched to it — server posters are 2:3, and were squashed into
 16:9.
 
+Later: the chip's transport (⏮ ⏪ ⏩ ⏭) and the library's ▶ came from the
+emoji font and sat off centre, clipped, at small chip scales. They are
+painted now (`icons.rs`), as are a circled "i" for info (tile chip,
+library and queue rows) and a captioned screen for subtitles, in place
+of the letters "i" and "S". Minimum stroke widths are in physical
+pixels, so the smallest chip stays crisp at a UI scale of 2.
+
 **Known gaps**: a pick made in Plex or Jellyfin's own apps is not read;
 the API has no audio-track tool, so only the chip sets audio.
 

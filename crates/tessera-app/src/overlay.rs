@@ -14,6 +14,7 @@
 
 use tessera_core::Rect;
 
+use crate::icons::Icon;
 use crate::thumbs::ThumbCache;
 use crate::tile::TrackInfo;
 
@@ -772,28 +773,22 @@ pub fn draw(
                             // position is stable. A only when the file has >1
                             // audio track; S whenever subtitles exist.
                             {
-                                let b = |ui: &mut egui::Ui, glyph: &str, open: bool, tip: &str| {
-                                    let mut btn = egui::Button::new(
-                                        egui::RichText::new(glyph).small(),
-                                    )
-                                    .min_size(egui::vec2(18.0, 16.0) * k);
-                                    if open {
-                                        btn = btn.fill(egui::Color32::from_rgb(70, 110, 150));
-                                    }
-                                    let r = ui.add(btn);
+                                // Painted (see `icons`), so the three share
+                                // one exact box at any chip scale.
+                                let b = |ui: &mut egui::Ui, icon: Icon, open: bool, tip: &str| {
+                                    let fill = open.then_some(egui::Color32::from_rgb(70, 110, 150));
+                                    let r = crate::icons::button(ui, icon, egui::vec2(18.0, 16.0) * k, fill);
                                     let clicked = r.clicked();
                                     r.on_hover_text(tip);
                                     clicked
                                 };
-                                // Plain "i", not U+2139: it reads the same
-                                // and needs no font to have the glyph.
-                                if b(ui, "i", tile.info_open, "what is this file? (size, path, format)") {
+                                if b(ui, Icon::Info, tile.info_open, "what is this file? (size, path, format)") {
                                     actions.push(OverlayAction::TileInfo { tile_id: tile.id });
                                 }
                                 if tile.audio_tracks.len() > 1
                                     && b(
                                         ui,
-                                        "A",
+                                        Icon::Audio,
                                         track_panel == Some((tile.id, TrackKind::Audio)),
                                         "audio tracks",
                                     )
@@ -806,7 +801,7 @@ pub fn draw(
                                 if !tile.subtitle_tracks.is_empty()
                                     && b(
                                         ui,
-                                        "S",
+                                        Icon::Subtitles,
                                         track_panel == Some((tile.id, TrackKind::Subtitle)),
                                         "subtitle tracks",
                                     )
@@ -923,21 +918,27 @@ pub fn draw(
                                     egui::Button::new(egui::RichText::new(glyph).small()),
                                 )
                             };
-                            if b(ui, "⏮", 22.0).clicked() {
+                            // Painted, not ⏮⏪⏩⏭: those come from the emoji
+                            // font, and at a small chip scale they sat off
+                            // centre and clipped (see `icons`).
+                            let t = |ui: &mut egui::Ui, icon: Icon| {
+                                crate::icons::button(ui, icon, egui::vec2(22.0, 16.0) * k, None)
+                            };
+                            if t(ui, Icon::Prev).on_hover_text("previous in the queue").clicked() {
                                 actions.push(OverlayAction::Prev { tile_id: tile.id });
                             }
                             // Seeking a live feed is meaningless — mpv
                             // accepts it and does nothing — so a camera
                             // gets its transport space back instead.
                             if !tile.live {
-                                if b(ui, "⏪", 22.0).clicked() {
+                                if t(ui, Icon::Back).on_hover_text("back 10 seconds").clicked() {
                                     actions.push(OverlayAction::Skip { tile_id: tile.id, secs: -10.0 });
                                 }
-                                if b(ui, "⏩", 22.0).clicked() {
+                                if t(ui, Icon::Forward).on_hover_text("forward 10 seconds").clicked() {
                                     actions.push(OverlayAction::Skip { tile_id: tile.id, secs: 10.0 });
                                 }
                             }
-                            if b(ui, "⏭", 22.0).clicked() {
+                            if t(ui, Icon::Next).on_hover_text("next in the queue").clicked() {
                                 actions.push(OverlayAction::Next { tile_id: tile.id });
                             }
                             // The scrub bar takes whatever the rest of the row

@@ -89,7 +89,7 @@ Useful at runtime: `--windowed 1600x900` (one ordinary window),
 |---|---|
 | `tessera-mpv` | libmpv render-API wrapper: `dlopen` + hand-declared C ABI (no dev headers). `MpvLib` / `Mpv` / `RenderContext`. |
 | `tessera-core` | Pure logic, no I/O of its own beyond HTTP sources: `MediaItem`/`SourceKind`, `PlaybackQueue`, `solve_grid`, `DecodeBudget`, `title` (file name → show/season/episode/year), `subs` (SRT cues, search), `timecode` (`HH:MM:SS`, seek targets incl. chapters), `info` (the "i" panel's rows: Plex/Jellyfin detail parsers, size/bitrate/date formatting), `tracks` (the audio and subtitle tracks picked per item, and matching them back onto a file's tracks), `view` (per-tile crop/zoom), `monitor` (a monitor by number, connector or position). **This is where tests live** — put new logic here if it can be tested headlessly. |
-| `tessera-app` | The binary. `main.rs` (startup + the event loop), `cli.rs` (arguments, usage text), `wall.rs` (`Wall` and every action on tiles/queue/budget, incl. `handle_overlay_action`), `windowing.rs` (window + GL context creation, fullscreen, which monitor a window is on), `seek.rs` (coalesced keyboard seeking), `persist.rs` (settings.conf, queue.json), `platform/` (everything OS-specific: `linux.rs`, `macos.rs`, same items in both), `screen.rs` (one window + GL context per `Screen`, wall or library), `tile.rs` (one mpv instance + FBO), `compositor.rs`, `overlay.rs` (wall egui), `browser/` (the browser window's egui: `mod.rs` tab bar + shared state, then one file per tab — `library.rs`, `queue.rs`, `sources.rs`, `config.rs`), `catalog.rs` (background source listing), `thumbs.rs`, `info_panel.rs` (the "i" panel, shared by tiles and browser rows), `png_util.rs`, `instance.rs` (the single-instance socket, which also carries the API), `rpc.rs` (the API: what each request does, on which thread), `mcp.rs` (`tessera mcp`: the stdio MCP server over that API). |
+| `tessera-app` | The binary. `main.rs` (startup + the event loop), `cli.rs` (arguments, usage text), `wall.rs` (`Wall` and every action on tiles/queue/budget, incl. `handle_overlay_action`), `windowing.rs` (window + GL context creation, fullscreen, which monitor a window is on), `seek.rs` (coalesced keyboard seeking), `persist.rs` (settings.conf, queue.json), `platform/` (everything OS-specific: `linux.rs`, `macos.rs`, same items in both), `screen.rs` (one window + GL context per `Screen`, wall or library), `tile.rs` (one mpv instance + FBO), `compositor.rs`, `overlay.rs` (wall egui), `browser/` (the browser window's egui: `mod.rs` tab bar + shared state, then one file per tab — `library.rs`, `queue.rs`, `sources.rs`, `config.rs`), `catalog.rs` (background source listing), `thumbs.rs`, `icons.rs` (painted button icons — transport, info, subtitles, play), `info_panel.rs` (the "i" panel, shared by tiles and browser rows), `png_util.rs`, `instance.rs` (the single-instance socket, which also carries the API), `rpc.rs` (the API: what each request does, on which thread), `mcp.rs` (`tessera mcp`: the stdio MCP server over that API). |
 
 ## Architecture invariants
 
@@ -376,8 +376,8 @@ segfaults on NVIDIA when decoders re-init mid-playback. Don't "optimize" it back
   normal text). A missing glyph renders as an empty box with no warning —
   `✕` U+2715 did exactly that; `✖` U+2716 is the one that exists. Fonts live
   in `~/.cargo/registry/src/*/epaint-<ver>/fonts/`; parse their cmaps if in
-  doubt. Prefer painter-drawn icons for anything critical (the gear and the
-  window-mode icon already are).
+  doubt. Prefer painter-drawn icons for anything critical (the gear, the
+  window-mode icon and everything in `icons.rs` already are).
 - Two egui layer orders, both in `overlay.rs`: `WALL_ORDER` (status bar,
   chips, queue strips) below `PANEL_ORDER` (help, settings). They must stay
   distinct — egui raises the most recently interacted area to the top within

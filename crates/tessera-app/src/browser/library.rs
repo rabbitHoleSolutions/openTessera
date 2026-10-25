@@ -226,29 +226,6 @@ pub fn draw(
     });
 }
 
-/// A play button the size of the "+" beside it, its triangle painted.
-///
-/// "▶" as text comes from egui's emoji fallback font, whose advance and
-/// baseline don't match the UI font's: it sat low and right of centre in
-/// its button, and wider than the "+".
-fn play_button(ui: &mut egui::Ui, size: egui::Vec2) -> egui::Response {
-    let resp = ui.add(egui::Button::new("").small().min_size(size));
-    let col = ui.style().interact(&resp).fg_stroke.color;
-    let r = resp.rect;
-    let h = r.height() * 0.5;
-    let w = h * 0.87;
-    // Centred on the triangle's centroid, which is a third of the way in
-    // from its flat side; centring the bounding box looks left-heavy.
-    let c = r.center();
-    let left = c.x - w / 3.0;
-    ui.painter().add(egui::Shape::convex_polygon(
-        vec![egui::pos2(left, c.y - h / 2.0), egui::pos2(left + w, c.y), egui::pos2(left, c.y + h / 2.0)],
-        col,
-        egui::Stroke::NONE,
-    ));
-    resp
-}
-
 /// One item row: poster, title, size, and the two queue actions.
 fn row(
     ui: &mut egui::Ui,
@@ -294,7 +271,9 @@ fn row(
             *flash = Some(format!("queued \"{}\"", m.title));
             actions.push(OverlayAction::QueueAppend { item: m.clone() });
         }
-        if play_button(ui, plus.rect.size())
+        // Painted, the size of the "+" beside them: "▶" from the emoji
+        // font sat low and right of centre (see `icons`).
+        if crate::icons::button(ui, crate::icons::Icon::Play, plus.rect.size(), None)
             .on_hover_text("play now on the first tile of the first wall window")
             .clicked()
         {
@@ -303,8 +282,7 @@ fn row(
         // With the row's other buttons, not at its right end: there it
         // sat under the scroll bar, which widens on hover and took the
         // click.
-        if ui
-            .add(egui::Button::new("i").small())
+        if crate::icons::button(ui, crate::icons::Icon::Info, plus.rect.size(), None)
             .on_hover_text("what is this file? (path, size, format)")
             .clicked()
         {

@@ -60,8 +60,7 @@ pub fn draw(
                     {
                         actions.push(OverlayAction::SetVolume { tile_id: t.tile_id, volume: vol });
                     }
-                    if ui
-                        .add(egui::Button::new("i").small())
+                    if crate::icons::button(ui, crate::icons::Icon::Info, crate::icons::small_size(ui), None)
                         .on_hover_text("what is this file? (path, size, format, live decode)")
                         .clicked()
                     {
@@ -173,8 +172,7 @@ pub fn draw(
                     });
                     // Outside the pending-only block: what an item is
                     // is worth asking whether or not it has played.
-                    if ui
-                        .add(egui::Button::new("i").small())
+                    if crate::icons::button(ui, crate::icons::Icon::Info, crate::icons::small_size(ui), None)
                         .on_hover_text("what is this file? (path, size, format)")
                         .clicked()
                     {

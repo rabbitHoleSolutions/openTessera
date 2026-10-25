@@ -4,6 +4,7 @@ mod catalog;
 mod cli;
 mod compositor;
 mod hud;
+mod icons;
 mod info_panel;
 mod instance;
 mod mcp;
