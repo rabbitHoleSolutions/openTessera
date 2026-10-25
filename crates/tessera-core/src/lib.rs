@@ -1,4 +1,5 @@
 pub mod budget;
+pub mod colors;
 pub mod info;
 pub mod layout;
 pub mod media;

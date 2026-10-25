@@ -1105,6 +1105,53 @@ impl Tile {
         crate::png_util::write_png_rgb(path, img.w as i32, img.h as i32, &img.rgb)
     }
 
+    /// The colours of what this tile shows (its crop and zoom applied), as a
+    /// `w`×`h` grid of averages, bottom row first: for lights that follow
+    /// the picture, many times a second. The GPU does the averaging: the
+    /// frame's mipmaps are rebuilt (level 0 is mpv's, so the picture itself
+    /// is untouched) and a level a few texels per cell is read back, a few
+    /// kilobytes rather than a full-size frame. `read` is a spare
+    /// framebuffer to attach that level to. None before the first frame.
+    pub fn read_colors(&self, gl: &glow::Context, read: glow::Framebuffer, w: u32, h: u32) -> Option<crate::screen::RawImage> {
+        let tex = self.texture?;
+        if self.tex_w <= 0 || self.tex_h <= 0 || w == 0 || h == 0 {
+            return None;
+        }
+        // The region shown, y down, as fractions; the texture is bottom-up
+        let (x0, y0, x1, y1) = self.view().source_rect();
+        let (rw, rh) = ((x1 - x0) * self.tex_w as f32, (y1 - y0) * self.tex_h as f32);
+        // The smallest level that still has eight texels or more a cell each
+        // way: coarser, and the texels at the crop's edge would carry the
+        // letterbox's black into the picture's
+        let mut level = 0;
+        while rw / (1 << (level + 1)) as f32 >= (w * 8) as f32 && rh / (1 << (level + 1)) as f32 >= (h * 8) as f32 {
+            level += 1;
+        }
+        let (lw, lh) = ((self.tex_w >> level).max(1), (self.tex_h >> level).max(1));
+        // Rounded inwards, for the same reason
+        let px0 = ((x0 * lw as f32).ceil() as i32).clamp(0, lw - 1);
+        let px1 = ((x1 * lw as f32).floor() as i32).clamp(px0 + 1, lw);
+        let py0 = (((1.0 - y1) * lh as f32).ceil() as i32).clamp(0, lh - 1);
+        let py1 = (((1.0 - y0) * lh as f32).floor() as i32).clamp(py0 + 1, lh);
+        let (sw, sh) = ((px1 - px0) as usize, (py1 - py0) as usize);
+        let mut px = vec![0u8; sw * sh * 3];
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+            if level > 0 {
+                gl.generate_mipmap(glow::TEXTURE_2D);
+            }
+            gl.bind_texture(glow::TEXTURE_2D, None);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(read));
+            gl.framebuffer_texture_2d(glow::READ_FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(tex), level);
+            gl.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+            gl.read_pixels(px0, py0, sw as i32, sh as i32, glow::RGB, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(&mut px));
+            gl.framebuffer_texture_2d(glow::READ_FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, None, 0);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        }
+        Some(crate::screen::RawImage { w, h, rgb: tessera_core::colors::box_average(&px, sw, sh, w as usize, h as usize) })
+    }
+
     /// This tile's current frame, read back from its FBO (bottom row
     /// first). None before the first frame has been rendered.
     pub fn read_fbo(&self, gl: &glow::Context) -> Option<crate::screen::RawImage> {

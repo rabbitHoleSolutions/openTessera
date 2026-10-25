@@ -136,6 +136,15 @@ fn serve_inner(req: &Value, calls: &mpsc::Sender<Call>, injector: &Injector) -> 
             meta["image"] = encode(&img, Encoding::Jpeg { long_side })?;
             Ok(meta)
         }
+        "colors" => {
+            // Raw and tiny: a client asks many times a second
+            use base64::Engine;
+            let (img, mut meta) = ask_capture(calls, method, params)?;
+            let stride = img.w as usize * 3;
+            let upright: Vec<u8> = img.rgb.chunks_exact(stride).rev().flatten().copied().collect();
+            meta["rgb"] = json!(base64::engine::general_purpose::STANDARD.encode(&upright));
+            Ok(meta)
+        }
         "screenshot" => {
             let scale = params.get("scale").and_then(Value::as_f64).unwrap_or(1.0).clamp(0.1, 1.0);
             let (img, mut meta) = ask_capture(calls, method, params)?;
@@ -693,6 +702,18 @@ fn dispatch(
             let track = p.get("track").and_then(Value::as_i64);
             handle_overlay_action(wall, OverlayAction::SetSubtitleTrack { tile_id: id, track }, si);
             Ok(ok(json!({ "tile": id, "track": track })))
+        }
+        "colors" => {
+            let (si, id) = resolve_tile(wall, p, cursor_over)?;
+            let dim = |k: &str, d: u64, max: u64| p.get(k).and_then(Value::as_u64).unwrap_or(d).clamp(1, max) as u32;
+            let (w, h) = (dim("w", 16, 64), dim("h", 9, 36));
+            let (tx, rx) = mpsc::channel();
+            let meta = json!({
+                "ok": true, "tile": id, "w": w, "h": h,
+                "paused": wall.screens[si].tiles.iter().find(|t| t.id == id).map(|t| t.is_paused()),
+            });
+            wall.screens[si].captures.push(Capture { what: CaptureWhat::TileColors { id, w, h }, reply: tx });
+            Ok(Reply::Capture { image: rx, meta })
         }
         "frame" => {
             let (si, id) = resolve_tile(wall, p, cursor_over)?;

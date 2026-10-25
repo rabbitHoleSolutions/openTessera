@@ -105,6 +105,9 @@ pub struct Screen {
     /// Frame grabs asked for over the instance socket (MCP), served at the
     /// next tick — the only point where the right GL state exists.
     pub captures: Vec<Capture>,
+    /// A framebuffer for reading a tile's mipmap level back (TileColors),
+    /// made at the first such capture and kept.
+    colors_fbo: Option<glow::Framebuffer>,
 }
 
 /// An RGB8 readback in glReadPixels order: bottom row first.
@@ -119,6 +122,9 @@ pub enum CaptureWhat {
     Window { overlay: bool },
     /// One tile's video, at the resolution it is decoded to.
     Tile(usize),
+    /// What one tile shows, as a small grid of average colours (see
+    /// [`crate::tile::Tile::read_colors`]).
+    TileColors { id: usize, w: u32, h: u32 },
 }
 
 pub struct Capture {
@@ -167,6 +173,7 @@ impl Screen {
             thumbs: ThumbCache::new(),
             pending_screenshot: None,
             captures: Vec::new(),
+            colors_fbo: None,
         }
         .with_layout(size.width as i32, size.height as i32)
     }
@@ -690,6 +697,14 @@ impl Screen {
                 CaptureWhat::Window { overlay } if overlay == overlay_drawn => Some(self.read_window()),
                 CaptureWhat::Tile(id) if !overlay_drawn => {
                     Some(self.tiles.iter().find(|t| t.id == id).and_then(|t| t.read_fbo(&self.gl)))
+                }
+                CaptureWhat::TileColors { id, w, h } if !overlay_drawn => {
+                    let fbo = match self.colors_fbo {
+                        Some(f) => Some(f),
+                        None => unsafe { self.gl.create_framebuffer().ok() },
+                    };
+                    self.colors_fbo = fbo;
+                    Some(fbo.and_then(|f| self.tiles.iter().find(|t| t.id == id).and_then(|t| t.read_colors(&self.gl, f, w, h))))
                 }
                 _ => None,
             };

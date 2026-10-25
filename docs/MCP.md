@@ -118,6 +118,16 @@ chrome is showing. Its reticle is in picture coordinates, so it rides along
 with the subject as the view moves. Built for a voice assistant's Esper mode; nothing in it
 is Esper-specific. View and HUD belong to the video they were set on.
 
+The socket also answers one call no tool wraps, as it is asked too often
+for the shim: `colors` (`{"rpc":{"method":"colors","params":{"w":16,"h":9,"tile":0}}}`)
+gives what a tile shows (crop and zoom applied) as a `w`×`h` grid of average
+colours, `rgb` being base64 of `w*h*3` bytes, top row first, with `paused`.
+It is for lights that follow the picture (a voice assistant's ambilight, ~25
+times a second): the GPU rebuilds the frame's mipmaps and a level of about
+eight texels a cell is read back (`Tile::read_colors`), a few kilobytes,
+where `tessera_frame` reads the whole frame. `tile` defaults to the focused
+one; `w` is at most 64 and `h` 36. A round trip is ~5-15ms.
+
 ## Not yet
 
 - **Events** (playback ended, now playing, paused, tile closed). Status is
