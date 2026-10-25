@@ -88,7 +88,9 @@ pub fn draw(ctx: &egui::Context, huds: &[Placed]) {
             };
             let box_ = egui::Rect::from_two_pos(to_screen(x0, y0), to_screen(x1, y1));
             if box_.intersects(r) {
-                let len = (box_.width().min(box_.height()) * 0.22).clamp(6.0, unit * 0.08);
+                // min then max, not clamp: on a tile under 75pt the cap is
+                // below the floor, and f32::clamp panics on that.
+                let len = (box_.width().min(box_.height()) * 0.22).min(unit * 0.08).max(6.0);
                 corners(&painter, box_, len, egui::Stroke::new(2.0_f32, GREEN));
                 let c = box_.center();
                 let tick = len * 0.5;

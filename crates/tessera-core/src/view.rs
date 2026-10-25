@@ -63,8 +63,14 @@ impl View {
         let z = self.zoom.clamp(1.0, MAX_ZOOM);
         let (hw, hh) = ((x1 - x0) / (2.0 * z), (y1 - y0) / (2.0 * z));
         let pan = |p: f32| if p.is_finite() { p.clamp(0.0, 1.0) } else { 0.5 };
-        let cx = (x0 + pan(self.pan_x) * (x1 - x0)).clamp(x0 + hw, x1 - hw);
-        let cy = (y0 + pan(self.pan_y) * (y1 - y0)).clamp(y0 + hh, y1 - hh);
+        // Not f32::clamp, which panics when min > max. At zoom 1 the two
+        // bounds are the same number computed two ways, and for an uneven
+        // crop rounding can put them an ulp the wrong way round: Fellowship
+        // of the Ring's auto-crop (top 13.09%, bottom 13.27%) took the whole
+        // app down a few seconds after it was applied.
+        let keep = |c: f32, lo: f32, hi: f32| if lo < hi { c.clamp(lo, hi) } else { (lo + hi) / 2.0 };
+        let cx = keep(x0 + pan(self.pan_x) * (x1 - x0), x0 + hw, x1 - hw);
+        let cy = keep(y0 + pan(self.pan_y) * (y1 - y0), y0 + hh, y1 - hh);
         (cx - hw, cy - hh, cx + hw, cy + hh)
     }
 
@@ -309,6 +315,23 @@ mod tests {
         // Garbage pan falls back to the centre.
         let v = View { zoom: 2.0, pan_x: f32::NAN, ..View::FULL };
         assert!(close(v.source_rect().0, 0.25));
+    }
+
+    #[test]
+    fn an_uneven_crop_never_panics() {
+        // At zoom 1 the window's bounds meet, and rounding used to cross
+        // them for some uneven crops — f32::clamp's panic, in the render
+        // loop. Sweep uneven crops, and the animation into each.
+        for i in 0..600 {
+            let top = 0.10 + i as f32 * 0.0001;
+            let bottom = 0.1327;
+            let v = View { top, bottom, ..View::FULL };
+            for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let (_, y0, _, y1) = View::between(&View::FULL, &v, t).source_rect();
+                assert!(y0 < y1 && y0 >= 0.0 && y1 <= 1.0, "top {top}, t {t}: {y0}..{y1}");
+            }
+            assert!(close(v.source_rect().1, top) && close(v.source_rect().3, 1.0 - bottom));
+        }
     }
 
     #[test]

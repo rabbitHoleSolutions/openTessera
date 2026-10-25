@@ -11,7 +11,7 @@ ideas, no shared code. See `README.md` for the user-facing feature list and
 cargo build --release          # binary: target/release/tessera
 ./packaging/install.sh         # user-local install (bin + icon + .desktop)
 cargo check --workspace        # fast loop while editing
-cargo test --workspace         # 135 tests, mostly tessera-core (layout, budget, queue, sources, info, tracks)
+cargo test --workspace         # 136 tests, mostly tessera-core (layout, budget, queue, sources, info, tracks)
 cargo clippy --workspace --all-targets   # clean; keep it that way
 cargo +1.99.0 clippy --workspace --all-targets -- -D warnings   # exactly what CI runs
 ./scripts/check-macos.sh       # type-check + lint the macOS build from Linux
