@@ -1013,7 +1013,7 @@ fn tile_json(wall: &Wall, si: usize, id: usize, focused: Option<usize>) -> Value
         "volume": t.volume(),
         "window": si,
         "monitor": monitor_of(s),
-        "monitor_count": s.window.available_monitors().count(),
+        "monitor_count": crate::windowing::available_monitors(&s.window).count(),
         "pinned": s.pinned == Some(t.id),
         "fullscreen": s.zoomed == Some(t.id),
         "focused": focused == Some(t.id),
@@ -1054,14 +1054,14 @@ fn monitor_arg(wall: &Wall, p: &Value) -> Result<Option<usize>, String> {
         Some(Value::String(s)) => s.clone(),
         Some(v) => v.to_string(),
     };
-    let infos = wall.screens.first().map(|s| crate::windowing::monitor_infos(s.window.available_monitors())).unwrap_or_default();
+    let infos = wall.screens.first().map(|s| crate::windowing::monitor_infos(crate::windowing::available_monitors(&s.window))).unwrap_or_default();
     tessera_core::monitor::resolve_monitor(&spec, &infos).map(Some)
 }
 
 /// Monitors (with which windows are on each) and windows.
 fn windows_json(wall: &Wall) -> Value {
     let Some(first) = wall.screens.first() else { return json!({ "monitors": [], "windows": [] }) };
-    let infos = crate::windowing::monitor_infos(first.window.available_monitors());
+    let infos = crate::windowing::monitor_infos(crate::windowing::available_monitors(&first.window));
     let monitors: Vec<Value> = infos
         .iter()
         .enumerate()
@@ -1099,7 +1099,7 @@ fn windows_json(wall: &Wall) -> Value {
 fn place_window(wall: &mut Wall, wi: usize, monitor: Option<usize>, fullscreen: Option<bool>) -> Result<(), String> {
     let window = wall.screens[wi].window.clone();
     let target = match monitor {
-        Some(n) => Some((n, window.available_monitors().nth(n).ok_or(format!("there is no monitor {n}"))?)),
+        Some(n) => Some((n, crate::windowing::available_monitors(&window).nth(n).ok_or(format!("there is no monitor {n}"))?)),
         None => None,
     };
     let is_fs = crate::platform::is_fullscreen(&window);
@@ -1108,9 +1108,7 @@ fn place_window(wall: &mut Wall, wi: usize, monitor: Option<usize>, fullscreen: 
     if want_fs {
         let s = &mut wall.screens[wi];
         if !is_fs && s.windowed_restore.is_none() {
-            if let Ok(pos) = window.outer_position() {
-                s.windowed_restore = Some((pos, window.inner_size()));
-            }
+            s.windowed_restore = Some((window.outer_position().ok(), window.inner_size()));
         }
         // Going fullscreen somewhere else: "windowed" afterwards should stay
         // there, not return to where it was before.

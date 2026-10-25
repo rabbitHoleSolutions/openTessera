@@ -37,6 +37,13 @@ pub enum ScreenRole {
     Browser,
 }
 
+/// Where a window was and how big, to put it back after fullscreen. The
+/// position is optional because a Wayland window can't learn its own
+/// (`outer_position` always fails): that once meant nothing was saved at
+/// all, so an F zoom took the window fullscreen and un-zooming, finding
+/// nothing to restore, left it there. The size is always known.
+pub type Restore = (Option<winit::dpi::PhysicalPosition<i32>>, winit::dpi::PhysicalSize<u32>);
+
 pub struct Screen {
     pub window: Arc<Window>,
     pub surface: glutin::surface::Surface<glutin::surface::WindowSurface>,
@@ -82,11 +89,11 @@ pub struct Screen {
     pub should_fullscreen: bool,
     /// Window geometry saved by W (window-mode toggle) before expanding to
     /// fullscreen; restored when the window becomes a window again.
-    pub windowed_restore: Option<(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>)>,
+    pub windowed_restore: Option<Restore>,
     /// Window geometry saved by F (tile zoom) when IT took the window
     /// fullscreen; restored when the zoom exits. Kept separate so W and F
     /// never clobber each other's restore state.
-    pub zoom_restore: Option<(winit::dpi::PhysicalPosition<i32>, winit::dpi::PhysicalSize<u32>)>,
+    pub zoom_restore: Option<Restore>,
     /// Floating (T): no title bar, above every other window. Per window
     /// and not persisted — see [`crate::windowing::toggle_floating`].
     pub floating: bool,

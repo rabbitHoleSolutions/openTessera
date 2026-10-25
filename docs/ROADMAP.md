@@ -1364,6 +1364,8 @@ and from an F zoom, the gear checkbox, and the frameless corner resize and
 status-bar move (`drag_resize_window` / `drag_window` both work under
 mutter). Not tested: other X11 WMs, and Wayland, where the window can't be
 retyped and only the level is set (which winit doesn't do there either).
+Since tested on COSMIC/Wayland: as predicted, T only drops the title bar
+and the window stays in its tile (§30).
 
 **Effort**: S
 
@@ -1576,6 +1578,54 @@ pixels, so the smallest chip stays crisp at a UI scale of 2.
 
 **Known gaps**: a pick made in Plex or Jellyfin's own apps is not read;
 the API has no audio-track tool, so only the chip sets audio.
+
+**Effort**: S
+
+---
+
+## 30. COSMIC on Wayland
+
+Status: **implemented, first pass** (2026-10-25) — built and run on Ubuntu
+26.04, COSMIC (cosmic-comp 1.0), native Wayland, Intel UHD 630 (a T2
+MacBook Pro), one 3440x1440 monitor, libmpv 2.5.
+
+It built and ran unchanged: winit picks Wayland, the window sends
+`app_id` "tessera" (winit 0.29's X11 `with_name` sets the Wayland app_id
+too, so the dock matches the desktop entry), and COSMIC draws server-side
+decorations. Mouse input, tile drag, scroll volume, W and the API's
+fullscreen/windowed, F zoom, N, held-arrow seeking (coalesced: 3 seeks for
+2s held) and the status-bar buttons all work. COSMIC auto-tiles like
+pop-shell: a window is sized into a slot, and gets the slot back when
+fullscreen ends; the wall reflows each time.
+
+What had to change:
+
+- **hwdec**: the Linux default was `nvdec-copy` alone, which on a machine
+  without NVIDIA fell to software decoding without a word. Now
+  `nvdec-copy,vaapi-copy` (an mpv priority list; NVDEC first so NVIDIA is
+  unchanged). mpv < 0.36 can't take a list and gets the first entry
+  (`tessera_mpv::hwdec_for_api`).
+- **F zoom stuck fullscreen**: the zoom saved the window's position to put
+  it back, and only saved anything if it could read one — which a Wayland
+  window never can. The zoom still took the window fullscreen, and
+  un-zooming, with nothing saved, left it there; the next W then went the
+  wrong way. Restore points (`screen::Restore`) now always keep the size
+  and an optional position. W's restore had the same gap (it fell back to
+  a centred 1600x900).
+- **A phantom monitor**: winit 0.29's `Window::available_monitors()` lists
+  every Wayland output twice, so the API offered a "monitor 1" that was
+  the same DP-1. `windowing::available_monitors` dedups, and every
+  window-side lookup goes through it.
+
+Testing on Wayland: `xdotool` can't reach the window; the MCP's synthetic
+input covers the mouse, and `wtype` the keys, into whatever has keyboard
+focus (see CLAUDE.md).
+
+**Known gaps**: T can't float a window out of COSMIC's tiling (Wayland has
+no retyping, and winit sets no window level there) — it only removes the
+title bar. mpv prints "Cannot load libcuda.so.1" twice on non-NVIDIA
+machines as NVDEC is tried first; harmless. Not tested: several monitors,
+fractional scaling, the browser window, AMD.
 
 **Effort**: S
 

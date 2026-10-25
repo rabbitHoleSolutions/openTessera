@@ -11,7 +11,7 @@ ideas, no shared code. See `README.md` for the user-facing feature list and
 cargo build --release          # binary: target/release/tessera
 ./packaging/install.sh         # user-local install (bin + icon + .desktop)
 cargo check --workspace        # fast loop while editing
-cargo test --workspace         # 131 tests, mostly tessera-core (layout, budget, queue, sources, info, tracks)
+cargo test --workspace         # 135 tests, mostly tessera-core (layout, budget, queue, sources, info, tracks)
 cargo clippy --workspace --all-targets   # clean; keep it that way
 cargo +1.99.0 clippy --workspace --all-targets -- -D warnings   # exactly what CI runs
 ./scripts/check-macos.sh       # type-check + lint the macOS build from Linux
@@ -33,7 +33,10 @@ sandboxed instance with its own HOME, so the user's settings are safe:
 `tessera_dev_input` (click/drag/scroll through the real event path — no
 xdotool focus games), `tessera_dev_log`, `tessera_dev_quit` — plus the seven
 player tools, aimed at the sandbox. It can't press keys; use `xdotool key`
-for hotkeys. See `docs/MCP.md`.
+for hotkeys under X11, `wtype` under Wayland (see "On COSMIC" below). See
+`docs/MCP.md`. Its `files` must be paths the MCP server can see — it runs
+outside the shell sandbox, whose `/tmp` is private, so put test media under
+the gitignored `target/` (e.g. `target/test-media`), not the scratchpad.
 
 Without it, launching **windowed** by hand is fine — never bare (it grabs
 every monitor fullscreen):
@@ -45,7 +48,7 @@ TESSERA_DUMP_DIR=<scratch> TESSERA_DUMP_OVERLAY=1 \
 ```
 
 That dumps a full-screen PNG (overlay included) every status interval, which
-is readable directly. The session is X11 with `xdotool` available, so the UI
+is readable directly. On an X11 session (Pop!_OS) with `xdotool`, the UI
 can be driven: `xdotool search --classname tessera`, then
 `xdotool mousemove --window <id> X Y` (window-relative, matches the PNG's
 pixel coordinates 1:1 at `--ui-scale 1`). Caveats: bare `xdotool click` fires
@@ -76,6 +79,19 @@ the running-instance path. `osascript -e 'tell application id
 `linux.rs` never compiles on a Mac — type-check it by stubbing its X11 import.
 The reverse works without a Mac: `scripts/check-macos.sh` checks and lints
 the whole workspace for `aarch64-apple-darwin` (it can't link or run).
+
+**On COSMIC** (Wayland, Ubuntu 26.04, Intel iGPU) the app runs natively on
+Wayland — winit picks it whenever `WAYLAND_DISPLAY` is set; force XWayland
+with `WINIT_UNIX_BACKEND=x11` to tell a Wayland problem from a COSMIC one.
+`xdotool` can't reach a Wayland window. The MCP's input covers the mouse;
+for keys, `wtype -k <key>` works (COSMIC offers the virtual-keyboard
+protocol) but types into whatever has *keyboard focus*, and the user's
+terminal takes focus back the moment they reply. So: ask the user to click
+the Tessera title bar after a delay, send one probe key and check the
+sandbox log (`/run/user/1000/tessera-dev/tessera.log`) shows it arrived
+before sending more. COSMIC auto-tiles windows (per workspace), so a
+window's size changes under you: re-read tile rects from
+`tessera_dev_state` before aiming input.
 
 Useful at runtime: `--windowed 1600x900` (one ordinary window),
 `--screens 0` (single monitor), `--tiles N`, `--populate N`, `--overlay`
@@ -334,7 +350,19 @@ either). Placement at creation sticks, and so does fullscreen on a monitor
 the one way out of the tile: `platform::set_floating` withdraws the window
 and maps it back as a DIALOG, which pop-shell leaves alone. The window is
 away from the WM for a moment, so anything else asked of the WM right
-after (fullscreen, focus) has to wait for it — see ROADMAP §24.
+after (fullscreen, focus) has to wait for it — see ROADMAP §24. COSMIC's
+auto-tiling behaves the same way (a window is resized into a slot, and
+gets its slot back when fullscreen ends), but T can't free a window there:
+under Wayland it only drops the title bar (§30).
+
+**Under Wayland a window doesn't know where it is, and winit lists each
+monitor twice.** `outer_position()` always fails there, so anything saved
+"to put back later" must not hinge on it — `Restore` keeps the size and an
+*optional* position; gating the whole save on the position once left an F
+zoom stuck fullscreen. And winit 0.29's `Window::available_monitors()`
+returns every Wayland output twice; go through
+`windowing::available_monitors`, which dedups, never the winit method on a
+window (the event loop's list is fine).
 
 **`ctx.set_pixels_per_point()` takes effect on the *next* frame** (it routes
 through `set_zoom_factor`). Any UI-scale logic has to account for that one-frame
@@ -360,8 +388,12 @@ and rebuild the mpv instance from a `ResumeState` snapshot (item, time-pos,
 paused, volume, mute, aid/sid). `context.make_current()` before touching GL for
 a screen.
 
-**`--hwdec nvdec-copy` is the deliberate default.** Zero-copy CUDA/GL interop
-segfaults on NVIDIA when decoders re-init mid-playback. Don't "optimize" it back.
+**`--hwdec nvdec-copy,vaapi-copy` is the deliberate default.** Zero-copy
+CUDA/GL interop segfaults on NVIDIA when decoders re-init mid-playback.
+Don't "optimize" it back. NVDEC stays first so an NVIDIA box keeps the path
+the app was tuned on; VA-API (Intel, AMD) is the fallback — alone,
+`nvdec-copy` dropped them to software decoding silently. mpv < 0.36 can't
+take a list; `tessera_mpv::hwdec_for_api` narrows it to the first entry.
 
 ## Conventions
 

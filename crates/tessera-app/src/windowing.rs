@@ -224,7 +224,9 @@ pub fn toggle_window_mode(screens: &mut [Screen], idx: usize) -> bool {
             .or(screen.zoom_restore.take());
         match restore {
             Some((pos, size)) => {
-                window.set_outer_position(pos);
+                if let Some(pos) = pos {
+                    window.set_outer_position(pos);
+                }
                 let _ = window.request_inner_size(size);
                 screen.resize(size.width, size.height);
             }
@@ -253,10 +255,7 @@ pub fn toggle_window_mode(screens: &mut [Screen], idx: usize) -> bool {
         // rest of the window on the way out of fullscreen.
         let remapped = unfloat_for_fullscreen(screen);
         if screen.windowed_restore.is_none() {
-            if let Ok(pos) = window.outer_position() {
-                let size = window.inner_size();
-                screen.windowed_restore = Some((pos, size));
-            }
+            screen.windowed_restore = Some((window.outer_position().ok(), window.inner_size()));
         }
         // Aim at the monitor the window is on NOW, not the one it was
         // created on: dragging a window to another screen and hitting W is
@@ -296,7 +295,9 @@ pub fn toggle_fullscreen(screens: &mut [Screen], idx: usize, tile_id: Option<usi
         // fullscreen is undone by W, not by un-zooming).
         if let Some((pos, size)) = screen.zoom_restore.take() {
             platform::exit_fullscreen(&screen.window);
-            screen.window.set_outer_position(pos);
+            if let Some(pos) = pos {
+                screen.window.set_outer_position(pos);
+            }
             let _ = screen.window.request_inner_size(size);
             screen.resize(size.width, size.height);
         }
@@ -305,11 +306,10 @@ pub fn toggle_fullscreen(screens: &mut [Screen], idx: usize, tile_id: Option<usi
         // A floating window zooms within itself: it is a small window on
         // purpose, and taking the monitor over would undo that.
         if !platform::is_fullscreen(&screen.window) && !screen.floating {
-            // Windowed window: also take over the whole monitor.
-            if let Ok(pos) = screen.window.outer_position() {
-                let size = screen.window.inner_size();
-                screen.zoom_restore = Some((pos, size));
-            }
+            // Windowed window: also take over the whole monitor. Saved even
+            // without a position (see `Restore`): it is also the record
+            // that this zoom is what made the window fullscreen.
+            screen.zoom_restore = Some((screen.window.outer_position().ok(), screen.window.inner_size()));
             let monitor = screen.window.current_monitor();
             platform::enter_fullscreen(&screen.window, monitor);
         }
@@ -380,7 +380,7 @@ pub fn toggle_floating(screens: &mut [Screen], idx: usize) -> bool {
     if platform::set_floating(&window, screen.floating) {
         screen.refocus_at = Some(std::time::Instant::now() + FLOAT_REFOCUS);
     }
-    if let Some((pos, _)) = headed {
+    if let Some((Some(pos), _)) = headed {
         window.set_outer_position(pos);
     }
     let _ = window.request_inner_size(size);
@@ -426,6 +426,23 @@ pub fn fix_displaced_walls(screens: &mut [Screen]) -> bool {
     fixed_any
 }
 
+/// The monitors, as a window sees them — use this, never
+/// `window.available_monitors()` directly. winit 0.29's Wayland backend
+/// seeds a window's monitor list with every output it knows, then pushes
+/// each one again when its `new_output` callback fires, so one monitor
+/// came back as two ("monitor 1: DP-1" beside "monitor 0: DP-1"). The
+/// event loop's own list is built differently and doesn't double. Order
+/// is kept, so indices still match the event loop's.
+pub fn available_monitors(window: &winit::window::Window) -> impl Iterator<Item = winit::monitor::MonitorHandle> {
+    let mut seen: Vec<winit::monitor::MonitorHandle> = Vec::new();
+    for m in window.available_monitors() {
+        if !seen.contains(&m) {
+            seen.push(m);
+        }
+    }
+    seen.into_iter()
+}
+
 /// What `tessera_core::monitor` needs to know about each monitor, in
 /// `available_monitors()` order.
 pub fn monitor_infos(monitors: impl Iterator<Item = winit::monitor::MonitorHandle>) -> Vec<tessera_core::monitor::MonitorInfo> {
@@ -446,8 +463,7 @@ pub fn monitor_under_window(
     window: &winit::window::Window,
 ) -> Option<(usize, winit::monitor::MonitorHandle)> {
     let c = window_centre(window)?;
-    window
-        .available_monitors()
+    available_monitors(window)
         .enumerate()
         .find(|(_, m)| monitor_contains(m, c))
 }
