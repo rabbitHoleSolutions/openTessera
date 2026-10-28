@@ -202,9 +202,17 @@ fn list_requested(params: &Value, calls: &mpsc::Sender<Call>) -> Result<Vec<Medi
         .map(|a| a.iter().filter_map(Value::as_str).map(PathBuf::from).collect())
         .unwrap_or_default();
     let mut items = Vec::new();
+    // The saved sources, for cameras: read once, and only if a camera or URL is asked for
+    let mut saved: Option<Vec<tessera_core::sources::Source>> = None;
     for p in paths {
+        if let Some(name) = p.strip_prefix("camera:") {
+            let sources = saved.get_or_insert_with(|| crate::persist::load_settings().sources);
+            items.push(tessera_core::sources::find_camera(sources, name).ok_or_else(|| no_camera(name, sources))?);
+            continue;
+        }
         if p.contains("://") {
-            items.push(MediaItem::from_url(p).ok_or_else(|| {
+            let sources = saved.get_or_insert_with(|| crate::persist::load_settings().sources);
+            items.push(tessera_core::sources::camera_at(sources, p).or_else(|| MediaItem::from_url(p)).ok_or_else(|| {
                 format!("can't open {p}: only http(s) and streaming URLs (rtsp, rtmp, srt, udp) are supported")
             })?);
             continue;
@@ -220,6 +228,50 @@ fn list_requested(params: &Value, calls: &mpsc::Sender<Call>) -> Result<Vec<Medi
         items.extend(found);
     }
     Ok(items)
+}
+
+/// "no camera called …", with the ones there are.
+pub fn no_camera(name: &str, sources: &[tessera_core::sources::Source]) -> String {
+    let names = camera_names(sources);
+    if names.is_empty() {
+        format!("no camera called {name:?}: no cameras are set up (they're added in tessera's sources tab)")
+    } else {
+        format!("no camera called {name:?}; the cameras are: {}", names.join(", "))
+    }
+}
+
+fn camera_names(sources: &[tessera_core::sources::Source]) -> Vec<String> {
+    sources
+        .iter()
+        .flat_map(|s| match s {
+            tessera_core::sources::Source::Cameras { streams, .. } => streams.iter().map(|c| c.name.clone()).collect(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+/// The sources as `sources list` answers: each one's kind and label (never a token), and a
+/// camera group's camera names (never their URLs).
+pub fn sources_json(sources: &[tessera_core::sources::Source]) -> Value {
+    use tessera_core::sources::Source;
+    let list: Vec<Value> = sources
+        .iter()
+        .map(|src| {
+            let kind = match src {
+                Source::Folder { .. } => "folder",
+                Source::Plex { .. } => "plex",
+                Source::Jellyfin { .. } => "jellyfin",
+                Source::Cameras { .. } => "cameras",
+            };
+            // The label never carries a token (see Source::label).
+            let mut v = json!({ "kind": kind, "label": src.label() });
+            if let Source::Cameras { streams, .. } = src {
+                v["cameras"] = json!(streams.iter().map(|c| c.name.as_str()).collect::<Vec<_>>());
+            }
+            v
+        })
+        .collect();
+    json!({ "sources": list })
 }
 
 /// `~/x` as a path under `$HOME`; anything else as given.
@@ -507,21 +559,7 @@ fn dispatch(
         }
         "sources" => match s("action").unwrap_or("list") {
             "list" => {
-                let list: Vec<Value> = settings
-                    .sources
-                    .iter()
-                    .map(|src| {
-                        let kind = match src {
-                            tessera_core::sources::Source::Folder { .. } => "folder",
-                            tessera_core::sources::Source::Plex { .. } => "plex",
-                            tessera_core::sources::Source::Jellyfin { .. } => "jellyfin",
-                            tessera_core::sources::Source::Cameras { .. } => "cameras",
-                        };
-                        // The label never carries a token (see Source::label).
-                        json!({ "kind": kind, "label": src.label() })
-                    })
-                    .collect();
-                Ok(ok(json!({ "sources": list })))
+                Ok(ok(sources_json(&settings.sources)))
             }
             "add" => {
                 let path = s("path").ok_or("add needs \"path\"")?.to_string();

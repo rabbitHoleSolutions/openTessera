@@ -229,7 +229,15 @@ impl Server {
                 let mut params = a.clone();
                 params["action"] = json!(action);
                 // An add walks the whole folder to count it; a NAS can be slow.
-                let v = self.rpc("sources", params, Duration::from_secs(120))?;
+                let mut saved = false;
+                let v = match self.rpc("sources", params, Duration::from_secs(120)) {
+                    // Not running: what's saved is what it would list (an add needs it running)
+                    Err(e) if action == "list" && e.starts_with("tessera isn't running") => {
+                        saved = true;
+                        crate::rpc::sources_json(&crate::persist::load_settings().sources)
+                    }
+                    r => r?,
+                };
                 Ok(text(match action {
                     "add" => format!(
                         "added {} — {} video(s) found; they appear in the library, and tessera_open can now play from it",
@@ -237,15 +245,31 @@ impl Server {
                         v["videos"]
                     ),
                     _ => {
-                        let list: Vec<String> = v["sources"]
-                            .as_array()
-                            .map(|a| a.iter().map(|s| format!("- {}", s["label"].as_str().unwrap_or("?"))).collect())
-                            .unwrap_or_default();
-                        if list.is_empty() {
+                        let srcs = v["sources"].as_array().cloned().unwrap_or_default();
+                        let names = |s: &Value| -> Vec<String> {
+                            s["cameras"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default()
+                        };
+                        let list: Vec<String> = srcs
+                            .iter()
+                            .map(|s| {
+                                let cams = names(s);
+                                let label = s["label"].as_str().unwrap_or("?");
+                                if cams.is_empty() { format!("- {label}") } else { format!("- {label}: {}", cams.join(", ")) }
+                            })
+                            .collect();
+                        let first_cam = srcs.iter().flat_map(names).next();
+                        let mut out = if list.is_empty() {
                             "no sources configured".to_string()
                         } else {
                             format!("{} source(s):\n{}", list.len(), list.join("\n"))
+                        };
+                        if let Some(cam) = first_cam {
+                            out.push_str(&format!("\nopen a camera by its name with tessera_open, e.g. paths [\"camera:{cam}\"]"));
                         }
+                        if saved {
+                            out.push_str("\n(tessera isn't running: these are its saved sources; tessera_open starts it)");
+                        }
+                        out
                     }
                 }))
             }
@@ -285,7 +309,9 @@ impl Server {
         for t in &tiles {
             out.push(tile_line(t));
             if let Some(p) = t["path"].as_str() {
-                out.push(format!("  file: {p}"));
+                // A camera's stream address often carries its access token: it isn't handed on
+                let stream = tessera_core::MediaItem::from_url(p).is_some_and(|m| m.kind == tessera_core::SourceKind::Camera);
+                out.push(if stream { "  a live stream (a camera's address isn't shown)".to_string() } else { format!("  file: {p}") });
             }
         }
         if tiles.len() > 1 && v["focused"].is_null() {
@@ -364,10 +390,14 @@ impl Server {
     /// manager — after checking them against the same roots the app would,
     /// placed on `monitor` / `fullscreen` if asked.
     fn launch_and_open(&self, paths: &[String], a: &Value) -> Result<String, String> {
-        let roots = crate::rpc::allowed_roots(&crate::persist::load_settings().sources);
+        let sources = crate::persist::load_settings().sources;
+        let roots = crate::rpc::allowed_roots(&sources);
         let mut argv = Vec::new();
         for p in paths {
-            if p.contains("://") {
+            if let Some(name) = p.strip_prefix("camera:") {
+                tessera_core::sources::find_camera(&sources, name).ok_or_else(|| crate::rpc::no_camera(name, &sources))?;
+                argv.push(p.clone());
+            } else if p.contains("://") {
                 tessera_core::MediaItem::from_url(p)
                     .ok_or_else(|| format!("can't open {p}: only http(s) and streaming URLs are supported"))?;
                 argv.push(p.clone());
@@ -1194,13 +1224,14 @@ fn player_tools() -> Vec<Value> {
             "Open videos",
             "Play video files, folders or URLs. Starts tessera if it isn't running. The first item plays now — replacing \
              what the focused tile shows, or in `tile`, or in a new tile with new_tile=true — and the rest join the queue. \
-             Local paths must be inside the user's media folders (~/Videos or a configured source). `monitor` picks the \
+             Local paths must be inside the user's media folders (~/Videos or a configured source). A configured camera \
+             opens by its name as camera:<name> (tessera_sources lists them). `monitor` picks the \
              physical screen and `fullscreen` makes the window fill it. \
              Example: {\"paths\": [\"~/Videos/Heat (1995).mkv\"], \"monitor\": 1, \"fullscreen\": true}.",
             json!({
                 "type": "object",
                 "properties": {
-                    "paths": { "type": "array", "items": { "type": "string" }, "description": "Files, folders, or http(s)/rtsp URLs." },
+                    "paths": { "type": "array", "items": { "type": "string" }, "description": "Files, folders, http(s)/rtsp URLs, or camera:<name> for a configured camera." },
                     "tile": tile_prop(),
                     "new_tile": { "type": "boolean", "description": "Play in a new tile beside the others instead of replacing one." },
                     "unmuted": { "type": "boolean", "description": "Make sure it plays with sound." },
@@ -1350,7 +1381,7 @@ fn player_tools() -> Vec<Value> {
             "tessera_sources",
             "Video sources",
             "Where tessera finds videos. action=list shows the configured sources (folders, Plex/Jellyfin servers, \
-             cameras). action=add adds a folder as a source: its videos, subfolders included, appear in tessera's library, \
+             cameras by name), running or not. action=add adds a folder as a source: its videos, subfolders included, appear in tessera's library, \
              and tessera_open can play files inside it. The folder must exist and contain videos. Plex, Jellyfin and \
              cameras need a sign-in, so they are added in tessera's own sources tab instead. \
              Example: {\"action\": \"add\", \"path\": \"/mnt/storage/video\"}.",

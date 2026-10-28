@@ -190,8 +190,13 @@ fn main() {
     };
     // A URL plays, but is not a folder to keep as a source.
     let mut url_items = Vec::new();
+    // camera:<name> is a configured camera; its URL (or any other) plays as that camera, by its name
+    let as_item = |s: &str| match s.strip_prefix("camera:") {
+        Some(name) => tessera_core::sources::find_camera(&settings.sources, name),
+        None => tessera_core::sources::camera_at(&settings.sources, s).or_else(|| tessera_core::MediaItem::from_url(s)),
+    };
     for f in &args.files {
-        match f.to_str().and_then(tessera_core::MediaItem::from_url) {
+        match f.to_str().and_then(as_item) {
             Some(item) => url_items.push(item),
             None => push_unique(tessera_core::sources::Source::Folder { path: f.display().to_string() }),
         }

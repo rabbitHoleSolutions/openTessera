@@ -240,6 +240,41 @@ fn camera_item(cam: &CameraStream) -> MediaItem {
     }
 }
 
+/// The configured camera called `name` (any case), as its item: "Front Door", or "Outside/Front Door"
+/// to pick within a group when two groups have one of that name. So a client can open a camera by
+/// its name without ever holding its stream URL, which often carries an access token.
+pub fn find_camera(sources: &[Source], name: &str) -> Option<MediaItem> {
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+    let (group, want) = match name.split_once('/') {
+        Some((g, c)) => (Some(norm(g)), norm(c)),
+        None => (None, norm(name)),
+    };
+    cameras(sources)
+        .filter(|(src, _)| group.as_ref().is_none_or(|g| matches!(src, Source::Cameras { label, .. } if norm(label) == *g)))
+        .find(|(_, cam)| norm(&cam.name) == want)
+        .map(|(src, cam)| named(src, cam))
+}
+
+/// A URL that is one of the configured cameras, as that camera (its name, not its URL, as the
+/// title); None for any other URL.
+pub fn camera_at(sources: &[Source], url: &str) -> Option<MediaItem> {
+    cameras(sources).find(|(_, cam)| cam.url == url).map(|(src, cam)| named(src, cam))
+}
+
+fn cameras(sources: &[Source]) -> impl Iterator<Item = (&Source, &CameraStream)> {
+    sources.iter().flat_map(|s| match s {
+        Source::Cameras { streams, .. } => streams.iter().map(|c| (s, c)).collect::<Vec<_>>(),
+        _ => Vec::new(),
+    })
+}
+
+/// A camera's item stamped with its source, as `Source::list` stamps it.
+fn named(src: &Source, cam: &CameraStream) -> MediaItem {
+    let mut item = camera_item(cam);
+    item.source = Some(src.label());
+    item
+}
+
 fn config_path() -> Option<PathBuf> {
     std::env::var_os("TESSERA_SOURCES_CONF")
         .map(PathBuf::from)
@@ -1274,5 +1309,18 @@ mod camera_source_tests {
     fn an_empty_camera_group_is_a_listing_of_nothing_not_an_error() {
         let empty = Source::Cameras { label: "None".into(), streams: vec![] };
         assert!(empty.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_camera_opens_by_name_and_its_url_keeps_its_name() {
+        let sources = vec![Source::Folder { path: "/x".into() }, cams()];
+        let front = find_camera(&sources, "  front ").unwrap();
+        assert_eq!((front.title.as_str(), front.uri.as_str()), ("Front", "rtsps://192.168.1.1:7441/abc?enableSrtp"));
+        assert!(find_camera(&sources, "outside/DRIVEWAY").is_some());
+        assert!(find_camera(&sources, "inside/driveway").is_none());
+        assert!(find_camera(&sources, "garage").is_none());
+        let by_url = camera_at(&sources, "rtsp://192.168.1.50:554/s0").unwrap();
+        assert_eq!(by_url.title, "Driveway");
+        assert!(camera_at(&sources, "rtsp://elsewhere/s0").is_none());
     }
 }
