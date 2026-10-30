@@ -33,3 +33,18 @@ probe, since a wrong `hwdec` there would mislead more than a log line.
 `crates/tessera-app/src/tile.rs`. Re-reading
 the property on first frame, or on mpv's `video-reconfig`, rather than at
 `FileLoaded`, is the obvious direction.
+
+## 2. `T` doesn't float a window on Wayland (COSMIC)
+
+**Symptom.** On COSMIC under Wayland, `T` removes the window's title bar
+but the window stays in COSMIC's tiling and isn't kept above other
+windows, so it isn't the picture-in-picture it is on X11 and macOS.
+Nothing breaks; `T` again puts the title bar back.
+
+**Why.** On X11 `platform::set_floating` withdraws the window and maps it
+back as a dialog, which the tiling WM leaves alone, and sets it
+always-on-top. Wayland has no way to retype a window, and winit 0.29 sets
+no window level there, so only the decorations change.
+
+**Where to look.** `set_floating` in
+`crates/tessera-app/src/platform/linux.rs`, and ROADMAP §30.

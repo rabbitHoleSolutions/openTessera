@@ -70,8 +70,8 @@ otherwise.
 
 | Area | Tested on | Untested — reports welcome |
 |---|---|---|
-| **Linux** | Pop!_OS, GNOME with the pop-shell tiling extension, X11 session | Wayland sessions; other desktops and window managers (KDE, stock GNOME, i3, sway, …); other distributions |
-| **GPU (Linux)** | NVIDIA RTX 5080, NVDEC | AMD and Intel (VA-API); other NVIDIA generations |
+| **Linux** | Pop!_OS, GNOME with the pop-shell tiling extension, X11 session; Ubuntu 26.04, COSMIC, Wayland session (`T` doesn't float there — see [known issues](docs/KNOWN_ISSUES.md)) | Other desktops and window managers (KDE, stock GNOME, i3, sway, …); other distributions |
+| **GPU (Linux)** | NVIDIA RTX 5080, NVDEC; Intel UHD 630, VA-API | AMD; other NVIDIA and Intel generations |
 | **macOS** | M1 Max, macOS 26, Homebrew mpv 0.41 (first pass) | Intel Macs; older macOS; mixed Retina and non-Retina displays; much of the interactive UI (see [ROADMAP §16](docs/ROADMAP.md)) |
 | **Windows** | — | Not supported, and no plans |
 | **Plex / Jellyfin** | The maintainer's own servers | Other server versions and setups |
