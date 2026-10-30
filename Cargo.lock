@@ -1761,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "tessera-app"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "base64",
  "egui",
@@ -1785,7 +1785,7 @@ dependencies = [
 
 [[package]]
 name = "tessera-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1794,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "tessera-mpv"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "libloading",
 ]
