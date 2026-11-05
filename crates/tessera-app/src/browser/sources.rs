@@ -199,7 +199,11 @@ pub fn draw(
                 }
             });
 
-            if !matches!(state.add.kind, SourceKind::Folder | SourceKind::Cameras) {
+            // Once the picker is up it *is* the library choice, so the box
+            // goes away rather than sit there looking like it still counts
+            // (its name, if any, was carried into the picker as a tick).
+            let picking = services.auth.state.libraries.is_some();
+            if !matches!(state.add.kind, SourceKind::Folder | SourceKind::Cameras) && !picking {
                 ui.horizontal(|ui| {
                     ui.label("library");
                     let lib = ui.add_sized(
@@ -336,7 +340,7 @@ fn jellyfin(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserC
             } else {
                 state.add.error.clear();
                 let (u, p) = (state.add.user.clone(), state.add.pass.clone());
-                services.auth.jellyfin_login(&state.add.path, &u, &p);
+                services.auth.jellyfin_login(&state.add.path, &u, &p, services.plex_client_id);
             }
         }
     });
@@ -378,10 +382,13 @@ fn jellyfin(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserC
                 services.auth.list_libraries(ServerKind::Jellyfin, &url, &key);
             }
         }
-        if ui
-            .button("add")
-            .on_hover_text("add with the library box above (all libraries if blank)")
-            .clicked()
+        // Hidden under the picker, which has its own buttons and has
+        // taken the library box's place.
+        if services.auth.state.libraries.is_none()
+            && ui
+                .button("add")
+                .on_hover_text("add with the library box above (all libraries if blank)")
+                .clicked()
         {
             if url.is_empty() || key.is_empty() {
                 state.add.error = "a server url and an API key are both needed".into();
@@ -499,10 +506,13 @@ fn plex(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserCtx) 
                 services.auth.list_libraries(ServerKind::Plex, &url, &tok);
             }
         }
-        if ui
-            .button("add")
-            .on_hover_text("add with the library box above (all libraries if blank)")
-            .clicked()
+        // Hidden under the picker, which has its own buttons and has
+        // taken the library box's place.
+        if services.auth.state.libraries.is_none()
+            && ui
+                .button("add")
+                .on_hover_text("add with the library box above (all libraries if blank)")
+                .clicked()
         {
             if url.is_empty() || tok.is_empty() {
                 state.add.error = "a server url and a token are both needed".into();
@@ -542,6 +552,21 @@ fn library_picker(
     };
     let mut added = Vec::new();
     let mut back = false;
+
+    // A name typed into the library box before signing in becomes a tick
+    // here, once — it used to be dropped without a word. Matched the way
+    // listing matches it, ignoring case.
+    let typed = std::mem::take(&mut state.add.library);
+    let typed = typed.trim();
+    if !typed.is_empty() {
+        let hit = libs.found.iter().find(|l| l.name.eq_ignore_ascii_case(typed));
+        match hit {
+            Some(lib) => {
+                state.add.picked.insert(lib.name.clone());
+            }
+            None => state.add.error = format!("no library named \"{typed}\" on this server — pick from the list"),
+        }
+    }
 
     ui.add_space(6.0);
     egui::Frame::group(ui.style()).show(ui, |ui| {

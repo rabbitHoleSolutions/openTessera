@@ -319,7 +319,12 @@ pub(crate) fn http_error(e: ureq::Error) -> String {
             // An HTML error page says nothing a toast can use, and nor
             // does Jellyfin's stock 500 body — its reason is only in its
             // own log.
-            if first.is_empty() || first.starts_with('<') || first == "Error processing request." {
+            // 401 is the server no longer taking the saved token — revoked
+            // from its Devices page, or (before per-install device ids) by
+            // a sign-in on another computer. Say what fixes it.
+            if code == 401 {
+                "the server answered 401: it no longer accepts this source's sign-in — remove the source and sign in again".to_owned()
+            } else if first.is_empty() || first.starts_with('<') || first == "Error processing request." {
                 format!("the server answered {code}")
             } else {
                 format!("the server answered {code}: {first}")
@@ -650,17 +655,7 @@ impl JellyfinSource {
             };
             let declared_movies =
                 f.get("CollectionType").and_then(Value::as_str) == Some("movies");
-            let counted = get_json(
-                &format!(
-                    "{}/Items?ParentId={id}&Recursive=true&IncludeItemTypes=Movie&Limit=0&api_key={}",
-                    self.base, self.api_key
-                ),
-                &[],
-            )?;
-            let movies = counted
-                .get("TotalRecordCount")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
+            let movies = self.count_movies(id)?;
             if movies > 0 || declared_movies {
                 out.push(LibraryInfo { name: name.to_owned(), movies });
             }
@@ -708,9 +703,83 @@ impl JellyfinSource {
             "{}/Items?{}IncludeItemTypes=Movie&Fields=MediaSources&api_key={}",
             self.base, parent_q, self.api_key
         );
-        let json = get_json(&url, &[])?;
+        let mut json = get_json(&url, &[])?;
+        if !parent.is_empty() && json.get("TotalRecordCount").and_then(Value::as_u64) == Some(0) {
+            let mut fetch = |p: &str| self.children(p, "&Fields=MediaSources");
+            json = serde_json::json!({ "Items": walk_movies(&mut fetch, &parent)? });
+        }
         Ok(jellyfin_items_from_query(&json, &self.base, &self.api_key))
     }
+
+    /// How many movies a library holds, by the same rule [`Self::list`]
+    /// fetches them: recursively, or by walking its folders when that
+    /// finds none (see [`walk_movies`]).
+    fn count_movies(&self, id: &str) -> Result<u64, SourceError> {
+        let counted = get_json(
+            &format!(
+                "{}/Items?ParentId={id}&Recursive=true&IncludeItemTypes=Movie&Limit=0&api_key={}",
+                self.base, self.api_key
+            ),
+            &[],
+        )?;
+        match counted.get("TotalRecordCount").and_then(Value::as_u64).unwrap_or(0) {
+            0 => {
+                let mut fetch = |p: &str| self.children(p, "");
+                Ok(walk_movies(&mut fetch, id)?.len() as u64)
+            }
+            n => Ok(n),
+        }
+    }
+
+    /// One folder's direct children — not recursive, which is the point.
+    fn children(&self, parent: &str, fields: &str) -> Result<Value, SourceError> {
+        get_json(
+            &format!("{}/Items?ParentId={parent}{fields}&api_key={}", self.base, self.api_key),
+            &[],
+        )
+    }
+}
+
+/// Every movie under `root`, found by walking its folders one level at a
+/// time rather than asking Jellyfin for a recursive listing.
+///
+/// Needed when one library's folder sits inside another's — observed:
+/// `_sx2` on `/media` and `Movies` on `/media/movies`. Jellyfin files each
+/// item once, under the outer library, and a *signed-in user's* recursive
+/// query on the inner one then answers 0 (an API key with no user still
+/// gets 29, which is why it once worked with a pasted key). The web UI
+/// shows the movies because it lists a folder's direct children, which
+/// is what this does. Bounded, since it's one request per folder.
+fn walk_movies(
+    fetch: &mut dyn FnMut(&str) -> Result<Value, SourceError>,
+    root: &str,
+) -> Result<Vec<Value>, SourceError> {
+    const MAX_FOLDERS: usize = 500;
+    const MAX_DEPTH: usize = 8;
+    let mut out = Vec::new();
+    let mut stack = vec![(root.to_owned(), 0)];
+    let mut visited = 0;
+    while let Some((folder, depth)) = stack.pop() {
+        visited += 1;
+        if visited > MAX_FOLDERS {
+            break;
+        }
+        let page = fetch(&folder)?;
+        for item in page.get("Items").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default() {
+            match item.get("Type").and_then(Value::as_str) {
+                Some("Movie") => out.push(item.clone()),
+                // Plain folders only: a BoxSet's movies are filed
+                // elsewhere and would be listed twice.
+                Some("Folder" | "CollectionFolder") if depth < MAX_DEPTH => {
+                    if let Some(id) = item.get("Id").and_then(Value::as_str) {
+                        stack.push((id.to_owned(), depth + 1));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Maps a Jellyfin `/Items` response into MediaItems. Direct-play URI:
@@ -1053,6 +1122,36 @@ mod tests {
     }
 
     #[test]
+    fn walk_finds_movies_a_recursive_query_misses() {
+        use serde_json::json;
+        // Movies/ holds two films and a subfolder with a third, plus a
+        // BoxSet (its films are filed elsewhere) and a non-movie video.
+        let tree = |p: &str| -> Value {
+            match p {
+                "lib" => json!({"Items": [
+                    {"Id": "m1", "Type": "Movie"},
+                    {"Id": "m2", "Type": "Movie"},
+                    {"Id": "sub", "Type": "Folder"},
+                    {"Id": "box", "Type": "BoxSet"},
+                    {"Id": "v", "Type": "Video"},
+                ]}),
+                "sub" => json!({"Items": [{"Id": "m3", "Type": "Movie"}]}),
+                "box" => panic!("a BoxSet must not be walked"),
+                _ => json!({"Items": []}),
+            }
+        };
+        let mut fetch = |p: &str| Ok(tree(p));
+        let found = walk_movies(&mut fetch, "lib").unwrap();
+        let mut ids: Vec<_> = found.iter().map(|i| i["Id"].as_str().unwrap()).collect();
+        ids.sort();
+        assert_eq!(ids, ["m1", "m2", "m3"]);
+
+        // A folder that contains itself can't spin forever.
+        let mut cyclic = |_: &str| Ok(json!({"Items": [{"Id": "x", "Type": "Folder"}]}));
+        assert!(walk_movies(&mut cyclic, "x").unwrap().is_empty());
+    }
+
+    #[test]
     fn http_errors_never_carry_the_url() {
         // The query is the credential; this is what leaked into a toast.
         let e = agent().get("http://127.0.0.1:1/Items/x?api_key=sekrit").call().unwrap_err();
@@ -1067,6 +1166,9 @@ mod tests {
         assert!(shown.contains("read-only"), "{shown}");
         let resp = ureq::Response::new(400, "Bad Request", "Item not found").unwrap();
         assert_eq!(http_error(ureq::Error::Status(400, resp)), "the server answered 400: Item not found");
+
+        let resp = ureq::Response::new(401, "Unauthorized", "").unwrap();
+        assert!(http_error(ureq::Error::Status(401, resp)).contains("sign in again"));
 
         let page = ureq::Response::new(404, "Not Found", "<html><body>nope</body></html>").unwrap();
         assert_eq!(http_error(ureq::Error::Status(404, page)), "the server answered 404");

@@ -30,7 +30,7 @@ enum Request {
     /// Ubiquiti's LAN probe. Separate from Jellyfin discovery despite the
     /// same shape: different port, different payload, different answer.
     DiscoverCameras,
-    JellyfinLogin { url: String, username: String, password: String },
+    JellyfinLogin { url: String, username: String, password: String, install_id: String },
     /// `generation` is the flow's ticket: the worker abandons the poll as
     /// soon as [`Auth::generation`] moves past it.
     PlexLink { client_id: String, generation: u64 },
@@ -145,8 +145,8 @@ impl Auth {
                             Err(e) => tx_ev.send(Event::Failed(e.to_string())),
                         }
                     }
-                    Request::JellyfinLogin { url, username, password } => {
-                        match signin::jellyfin_login(&url, &username, &password) {
+                    Request::JellyfinLogin { url, username, password, install_id } => {
+                        match signin::jellyfin_login(&url, &username, &password, &install_id, &host_name()) {
                             Ok(token) => tx_ev.send(Event::JellyfinToken { url, token }),
                             Err(e) => tx_ev.send(Event::Failed(e.to_string())),
                         }
@@ -246,10 +246,13 @@ impl Auth {
         self.start(|_| Request::DiscoverCameras);
     }
 
-    pub fn jellyfin_login(&mut self, url: &str, username: &str, password: &str) {
-        let (url, username, password) =
-            (url.trim().to_owned(), username.trim().to_owned(), password.to_owned());
-        self.start(move |_| Request::JellyfinLogin { url, username, password });
+    /// `install_id` is the per-install id (the one plex.tv knows as the
+    /// client id); Jellyfin's device id is derived from it, so one
+    /// install's sign-in can't revoke another's token.
+    pub fn jellyfin_login(&mut self, url: &str, username: &str, password: &str, install_id: &str) {
+        let (url, username, password, install_id) =
+            (url.trim().to_owned(), username.trim().to_owned(), password.to_owned(), install_id.to_owned());
+        self.start(move |_| Request::JellyfinLogin { url, username, password, install_id });
     }
 
     pub fn plex_link(&mut self, client_id: &str) {
@@ -374,4 +377,19 @@ fn plex_link(
         return Ok(());
     }
     tx.send(Event::PlexServers(probed))
+}
+
+/// This machine's name, for the device a Jellyfin sign-in registers — so
+/// the server's Devices list says which computer each token belongs to.
+/// POSIX, so the same on Linux and macOS. Empty if it can't be read.
+fn host_name() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: the buffer is valid for its length; gethostname writes at
+    // most that many bytes and we stop at the first NUL ourselves.
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rc != 0 {
+        return String::new();
+    }
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    String::from_utf8_lossy(&buf[..end]).into_owned()
 }

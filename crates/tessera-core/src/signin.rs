@@ -225,13 +225,22 @@ pub fn parse_ubiquiti_reply(body: &[u8], from: &str) -> Option<DiscoveredCamera>
 
 /// Exchanges a username and password for an access token, which is what the
 /// source stores. The password is not kept.
-pub fn jellyfin_login(base: &str, username: &str, password: &str) -> Result<String, SourceError> {
+///
+/// `install_id` is [`plex_client_id`]'s per-install identifier and `host`
+/// this machine's name; see [`jellyfin_auth_header`] for why they matter.
+pub fn jellyfin_login(
+    base: &str,
+    username: &str,
+    password: &str,
+    install_id: &str,
+    host: &str,
+) -> Result<String, SourceError> {
     let base = base.trim_end_matches('/');
     let body = serde_json::json!({ "Username": username, "Pw": password });
     let resp = agent()
         .post(&format!("{base}/Users/AuthenticateByName"))
         .set("Accept", "application/json")
-        .set("X-Emby-Authorization", JELLYFIN_AUTH_HEADER)
+        .set("X-Emby-Authorization", &jellyfin_auth_header(install_id, base, username, host))
         .send_json(body)
         .map_err(|e| SourceError::Http(friendly_http(e)))?;
     let v: Value = resp
@@ -240,10 +249,48 @@ pub fn jellyfin_login(base: &str, username: &str, password: &str) -> Result<Stri
     parse_login_token(&v)
 }
 
-/// Jellyfin wants a client identity on the auth request; without it the
-/// server rejects the login outright.
-const JELLYFIN_AUTH_HEADER: &str =
-    "MediaBrowser Client=\"openTessera\", Device=\"desktop\", DeviceId=\"opentessera\", Version=\"1.0\"";
+/// The client identity Jellyfin wants on the auth request (without it the
+/// server rejects the login outright).
+///
+/// The `DeviceId` is what decides how long the token lives. Jellyfin's
+/// tokens don't expire on a clock — but a sign-in logs out every existing
+/// session for the same user *and DeviceId*, revoking its token. This used
+/// to be the constant `opentessera`, so signing in on a second computer (or
+/// adding the same server twice) silently killed the first one's token,
+/// which then got 401s some time later. So the id is per install (the
+/// random `plex-client-id`), per server and per user: two machines, or two
+/// URLs for one server, never share it, while signing the same source in
+/// again on the same machine still replaces its old token rather than
+/// leaving a stray one behind. `Device` carries the host name, so the
+/// server's Devices list can tell the installs apart.
+pub fn jellyfin_auth_header(install_id: &str, base: &str, username: &str, host: &str) -> String {
+    // FNV-1a rather than std's hasher, which isn't promised stable across
+    // Rust releases — a changed id would revoke nothing, but would orphan
+    // a device on the server.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let base = base.trim_end_matches('/').to_ascii_lowercase();
+    let user = username.trim().to_lowercase();
+    for part in [install_id.trim(), "\0", &base, "\0", &user] {
+        for b in part.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    // The header is a comma-separated list of quoted values, and a header
+    // must be ASCII: keep the host name to what can't break either.
+    let host: String = host
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ' '))
+        .collect();
+    let device = match host.trim() {
+        "" => "openTessera".to_owned(),
+        h => format!("openTessera on {h}"),
+    };
+    format!(
+        "MediaBrowser Client=\"openTessera\", Device=\"{device}\", DeviceId=\"opentessera-{h:016x}\", Version=\"{}\"",
+        env!("CARGO_PKG_VERSION")
+    )
+}
 
 /// Pulls the access token out of an AuthenticateByName response.
 pub fn parse_login_token(v: &Value) -> Result<String, SourceError> {
@@ -454,6 +501,8 @@ pub fn parse_servers(v: &Value, account_token: &str) -> Vec<PlexServer> {
 /// A stable per-install identifier. plex.tv keys the PIN and the account's
 /// device list on it, so it must not change between creating and checking a
 /// PIN — nor across runs, or every launch registers a new "device".
+/// Jellyfin's sign-in derives its device id from it too (the name predates
+/// that; renaming the file would change every install's id).
 pub fn plex_client_id(config_dir: &std::path::Path) -> String {
     let path = config_dir.join("plex-client-id");
     if let Ok(existing) = std::fs::read_to_string(&path) {
@@ -613,6 +662,24 @@ mod tests {
         ]);
         let s = parse_servers(&v, "acct");
         assert_eq!(s.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Mine", "Shared"]);
+    }
+
+    #[test]
+    fn jellyfin_device_id_differs_per_install_server_and_user() {
+        let id = |h: &str| h.split("DeviceId=\"").nth(1).unwrap().split('"').next().unwrap().to_owned();
+        let a = jellyfin_auth_header("install-a", "http://jf:8096", "jason", "box");
+        // Stable: signing the same source in again replaces its old token.
+        assert_eq!(id(&a), id(&jellyfin_auth_header("install-a", "http://jf:8096/", "Jason", "other")));
+        // Another machine must not revoke this one's token.
+        assert_ne!(id(&a), id(&jellyfin_auth_header("install-b", "http://jf:8096", "jason", "box")));
+        // Nor another URL for the same server, nor another user.
+        assert_ne!(id(&a), id(&jellyfin_auth_header("install-a", "https://jf.example", "jason", "box")));
+        assert_ne!(id(&a), id(&jellyfin_auth_header("install-a", "http://jf:8096", "kid", "box")));
+        assert!(a.contains("Device=\"openTessera on box\""), "{a}");
+        // A host name can't break out of its quotes.
+        let odd = jellyfin_auth_header("i", "http://jf", "u", "ev\"il, Token=\"x");
+        assert!(odd.contains("Device=\"openTessera on evil Tokenx\""), "{odd}");
+        assert!(jellyfin_auth_header("i", "http://jf", "u", "").contains("Device=\"openTessera\""));
     }
 
     #[test]
