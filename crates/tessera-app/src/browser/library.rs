@@ -13,7 +13,7 @@
 
 use tessera_core::{MediaItem, QueueOrder};
 
-use super::{flash_label, human_size, BrowserCtx, BrowserState, QueueView, MAX_ROWS};
+use super::{flash_label, human_size, BrowserCtx, BrowserState, QueueView};
 use crate::catalog::Listing;
 use crate::overlay::{OverlayAction, UiSettings};
 use crate::thumbs::ThumbCache;
@@ -98,28 +98,31 @@ pub fn draw(
         state.source = (!sources.is_empty()).then_some(0);
     }
 
-    egui::SidePanel::left("library-sources")
-        .resizable(true)
-        .default_width(220.0)
-        .show(ctx, |ui| {
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new("sources").strong());
-            ui.weak("manage them in the sources tab (S)");
-            ui.add_space(6.0);
-            if sources.is_empty() {
-                ui.weak("none yet");
-                if ui.button("add a source").clicked() {
-                    state.tab = super::Tab::Sources;
-                }
-            }
-            for (i, src) in sources.iter().enumerate() {
-                let selected = state.source == Some(i);
-                if ui.selectable_label(selected, src.label()).clicked() {
-                    state.source = Some(i);
-                    state.search.clear();
-                }
-            }
-        });
+    // Side by side while there is room for both, stacked when there isn't:
+    // in a narrow window (a WM tile, a portrait monitor) the sidebar kept
+    // its width and the item list was squeezed to nothing, so a source
+    // could be picked but never seen.
+    let win = ctx.screen_rect();
+    if win.width() >= SIDEBAR_W + MIN_LIST_W {
+        egui::SidePanel::left("library-sources")
+            .resizable(true)
+            .default_width(SIDEBAR_W)
+            // Dragged wider, it still leaves the list its minimum.
+            .max_width(win.width() - MIN_LIST_W)
+            .show(ctx, |ui| source_list(ui, state, sources));
+    } else {
+        // Resizable, and the scroll area fills it rather than shrinking to
+        // its content: a panel's height is whatever its content was last
+        // frame, so a shrinking scroll area could only ever get shorter.
+        // Capped so the items below always keep most of the window.
+        let rows = sources.len().max(1) as f32;
+        let row_h = ctx.style().spacing.interact_size.y + ctx.style().spacing.item_spacing.y;
+        egui::TopBottomPanel::top("library-sources-stacked")
+            .resizable(true)
+            .default_height((70.0 + rows * row_h).min(win.height() * 0.3))
+            .height_range(60.0..=(win.height() * 0.6).max(60.0))
+            .show(ctx, |ui| source_list(ui, state, sources));
+    }
 
     egui::CentralPanel::default().show(ctx, |ui| {
         let Some(src) = state.source.and_then(|i| sources.get(i)).cloned() else {
@@ -130,7 +133,11 @@ pub fn draw(
         };
 
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
+        // Wrapped: in a narrow window an unwrapped row runs past the
+        // window edge, losing "date" and "size" — and it widens the panel
+        // with it, so every item row below lays out to that width and
+        // loses its size column off the right too.
+        ui.horizontal_wrapped(|ui| {
             ui.label("filter");
             ui.add(
                 egui::TextEdit::singleline(&mut state.search)
@@ -202,26 +209,56 @@ pub fn draw(
         ui.separator();
 
         let rows = state.rows.rows();
-        let total = rows.len();
-        let shown = total.min(MAX_ROWS);
         // A row is the 36pt thumbnail plus the layout's own spacing. Passed
         // to show_rows so egui lays out only what is on screen: drawing all
-        // 300 meant asking the thumbnail cache for 300 posters at once,
-        // which fetched and uploaded every one of them whether or not it
-        // was ever scrolled to.
+        // of them meant asking the thumbnail cache for every poster at once,
+        // which fetched and uploaded each one whether or not it was ever
+        // scrolled to. That also makes the whole listing affordable — it
+        // used to stop at 300, with the "N more not shown" note drawn below
+        // a scroll area that had already taken the full height, so a big
+        // Plex library just ended at item 300 with no word as to why.
         let row_h = 36.0 + ui.spacing().item_spacing.y;
         let mut flash: Option<String> = None;
-        egui::ScrollArea::vertical().show_rows(ui, row_h, shown, |ui, range| {
+        egui::ScrollArea::vertical().show_rows(ui, row_h, rows.len(), |ui, range| {
             for &i in &rows[range] {
                 row(ui, &items[i], services.thumbs, queue, actions, &mut flash);
             }
         });
-        if total > shown {
-            ui.add_space(6.0);
-            ui.weak(format!("{} more not shown — narrow the filter", total - shown));
-        }
         if let Some(msg) = flash {
             state.flash(msg);
+        }
+    });
+}
+
+/// The sources sidebar's width, and the narrowest the item list may get
+/// beside it before the two stack instead: a row's poster, its three
+/// buttons, a short title and the size column.
+const SIDEBAR_W: f32 = 220.0;
+const MIN_LIST_W: f32 = 420.0;
+
+/// The source picker, drawn beside the item list or above it.
+fn source_list(ui: &mut egui::Ui, state: &mut BrowserState, sources: &[tessera_core::sources::Source]) {
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new("sources").strong());
+    ui.weak("manage them in the sources tab (S)");
+    ui.add_space(6.0);
+    if sources.is_empty() {
+        ui.weak("none yet");
+        if ui.button("add a source").clicked() {
+            state.tab = super::Tab::Sources;
+        }
+    }
+    // Scrolled: a few Plex and Jellyfin libraries plus folders and camera
+    // groups is more than a short window holds, and a panel clips whatever
+    // doesn't fit with no way to reach it. Not shrunk vertically, so it
+    // fills a stacked panel the user has dragged taller.
+    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        for (i, src) in sources.iter().enumerate() {
+            let selected = state.source == Some(i);
+            if ui.selectable_label(selected, src.label()).clicked() {
+                state.source = Some(i);
+                state.search.clear();
+            }
         }
     });
 }

@@ -50,9 +50,10 @@ struct DoneMsg {
 /// A `State::Ready` holds a live GPU texture, and nothing used to evict:
 /// scrolling a few thousand Plex posters uploaded one texture each and kept
 /// every one of them, per screen, for the life of the process. The bound is
-/// comfortably above what any view can show at once (the library lists at
-/// most `MAX_ROWS`, the hover strip a dozen), so eviction never touches
-/// something on screen and cannot thrash.
+/// comfortably above what any view can show at once (the library draws
+/// only the rows in view — a window's height of 36pt rows — and the hover
+/// strip a dozen), so eviction never touches something on screen and
+/// cannot thrash.
 const MAX_ENTRIES: usize = 512;
 
 pub struct ThumbCache {

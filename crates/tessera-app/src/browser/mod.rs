@@ -31,10 +31,6 @@ pub(crate) use tessera_core::info::human_size;
 /// windows, so without a flash a bulk add gives no feedback at all.
 pub(crate) const FLASH_SECS: f64 = 2.5;
 
-/// Rows drawn per frame. The full list can be thousands of items; egui has
-/// no virtualisation here, so the filter is how you reach the rest.
-pub(crate) const MAX_ROWS: usize = 300;
-
 /// Which tab the browser window is showing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Tab {

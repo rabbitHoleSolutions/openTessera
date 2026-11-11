@@ -5,7 +5,7 @@
 //! is a fact about this list, and it is the tab you are on when you wonder
 //! whether the list will still be here tomorrow.
 
-use super::{flash_label, fmt_time, truncate, BrowserState, QueueView, WallTile, MAX_ROWS};
+use super::{flash_label, fmt_time, truncate, BrowserState, QueueView, WallTile};
 use crate::overlay::{OverlayAction, UiSettings};
 
 /// How long "clear queue" stays armed before it disarms itself.
@@ -20,7 +20,12 @@ pub fn draw(
     actions: &mut Vec<OverlayAction>,
 ) {
     egui::CentralPanel::default().show(ctx, |ui| {
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        // show_viewport, not show: the queue can be thousands long, and
+        // egui lays out everything handed to a plain ScrollArea whether
+        // it is scrolled to or not. That cost is why the list used to be
+        // cut off at 300 — and with no filter on this tab, everything past
+        // that was simply unreachable.
+        egui::ScrollArea::vertical().show_viewport(ui, |ui, viewport| {
             ui.add_space(4.0);
             ui.label(egui::RichText::new("now playing").strong());
             ui.weak("every tile on every wall window");
@@ -132,9 +137,42 @@ pub fn draw(
             }
             // The first pending item has nothing to swap up into.
             let first_pending = queue.current.map_or(0, |c| c + 1);
-            for (i, m) in queue.items.iter().enumerate().take(MAX_ROWS) {
+
+            // The rows are virtual, as ScrollArea::show_rows makes them,
+            // but below a header that is laid out normally — show_rows
+            // assumes the rows are the whole content. Room is reserved for
+            // every row; only the ones in the viewport are drawn, each in
+            // its own fixed rect so a row a pixel taller than `row_h`
+            // can't drift the ones below it out of line with the
+            // scroll bar.
+            let n = queue.items.len();
+            let row_h = ui.spacing().interact_size.y;
+            let row_step = row_h + ui.spacing().item_spacing.y;
+            let content = ui.max_rect();
+            let rows_top = ui.cursor().top();
+            // `viewport` is in content coordinates, 0 at the top of the
+            // header; the first row starts where the header ended.
+            let header_h = rows_top - content.top();
+            // From the cursor, not the top: egui measures set_min_height
+            // from where the next widget would go, so the header is
+            // already counted.
+            ui.set_min_height(row_step * n as f32);
+            let first = (((viewport.min.y - header_h) / row_step).floor().max(0.0) as usize).min(n);
+            let last = ((((viewport.max.y - header_h) / row_step).ceil().max(0.0)) as usize + 1).min(n);
+            for (i, m) in queue.items.iter().enumerate().take(last).skip(first) {
                 let pending = i >= first_pending;
-                ui.horizontal(|ui| {
+                let rect = egui::Rect::from_min_size(
+                    egui::pos2(content.left(), rows_top + i as f32 * row_step),
+                    egui::vec2(content.width(), row_h),
+                );
+                // Keyed on the index, so a button keeps its id however far
+                // the list has scrolled.
+                let mut row_ui = ui.child_ui_with_id_source(
+                    rect,
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    ("queue-row", i),
+                );
+                row_ui.horizontal(|ui| {
                     if Some(i) == queue.current {
                         ui.colored_label(egui::Color32::from_rgb(140, 220, 140), "▶");
                     } else {
@@ -184,10 +222,6 @@ pub fn draw(
                         ui.weak(truncate(&m.title, 80));
                     }
                 });
-            }
-            if queue.items.len() > MAX_ROWS {
-                ui.add_space(6.0);
-                ui.weak(format!("{} more not shown", queue.items.len() - MAX_ROWS));
             }
         });
     });
