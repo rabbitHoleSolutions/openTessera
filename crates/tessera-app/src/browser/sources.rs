@@ -19,6 +19,23 @@ use crate::overlay::UiSettings;
 /// How long a source removal stays armed before it disarms itself.
 const REMOVE_ARM_SECS: f64 = 4.0;
 
+/// The outline drawn round a required field an action found empty. Brighter
+/// than the error text under the form, because a 1.5px line has to carry
+/// the same message as a whole sentence.
+const MISSING_RED: egui::Color32 = egui::Color32::from_rgb(230, 80, 80);
+
+/// A required field in the add-form, so an action that refuses can say
+/// *which* box is the problem, not just that one is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Field {
+    Path,
+    User,
+    Token,
+    /// The name, then the url, of the camera row at this index.
+    CameraName(usize),
+    CameraUrl(usize),
+}
+
 /// Which kind of source the add-form is editing.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SourceKind {
@@ -61,6 +78,10 @@ pub struct AddForm {
     /// Cameras being assembled into one source, edited in place before
     /// being committed together.
     pub cameras: Vec<CameraStream>,
+    /// Required fields the last action found empty. Outlined in red until
+    /// they are filled — checked against the field each frame, so typing
+    /// clears the outline without every text box having to remember to.
+    missing: std::collections::BTreeSet<Field>,
 }
 
 impl AddForm {
@@ -68,6 +89,27 @@ impl AddForm {
     fn clear(&mut self) {
         let kind = self.kind;
         *self = AddForm { kind, ..AddForm::default() };
+    }
+
+    fn is_blank(&self, f: Field) -> bool {
+        match f {
+            Field::Path => self.path.trim().is_empty(),
+            Field::User => self.user.trim().is_empty(),
+            Field::Token => self.token.trim().is_empty(),
+            Field::CameraName(i) => self.cameras.get(i).is_some_and(|c| c.name.trim().is_empty()),
+            Field::CameraUrl(i) => self.cameras.get(i).is_some_and(|c| c.url.trim().is_empty()),
+        }
+    }
+
+    /// Note which of `fields` are empty, replacing whatever the last action
+    /// flagged; true when none are, i.e. the action may go ahead.
+    fn require(&mut self, fields: &[Field]) -> bool {
+        self.missing = fields.iter().copied().filter(|&f| self.is_blank(f)).collect();
+        self.missing.is_empty()
+    }
+
+    fn is_missing(&self, f: Field) -> bool {
+        self.missing.contains(&f) && self.is_blank(f)
     }
 
     fn library_filter(&self) -> Option<String> {
@@ -186,6 +228,7 @@ pub fn draw(
                     if path_resp.changed() {
                         state.add.error.clear();
                     }
+                    outline_if(ui, &path_resp, state.add.is_missing(Field::Path));
                     path_resp.on_hover_text(match state.add.kind {
                         SourceKind::Folder => "folder (or file) path on disk",
                         _ => "server url, e.g. http://nas:8096",
@@ -223,6 +266,16 @@ pub fn draw(
                 SourceKind::Folder => folder(ui, state).into_iter().collect(),
                 SourceKind::Cameras => cameras(ui, state, services).into_iter().collect(),
             };
+
+            // Every outlined box filled in: the sentence explaining the
+            // outlines is now wrong, so it goes with them. (Only a refused
+            // action sets `missing`, so this can't eat any other error.)
+            if !state.add.missing.is_empty()
+                && state.add.missing.iter().all(|&f| !state.add.is_blank(f))
+            {
+                state.add.missing.clear();
+                state.add.error.clear();
+            }
 
             if !services.auth.state.error.is_empty() {
                 ui.colored_label(
@@ -279,6 +332,19 @@ pub fn draw(
     });
 }
 
+/// Outline `resp` in red when `missing`. Painted over the widget after the
+/// fact rather than restyled, so a field looks exactly as it always does
+/// until an action has found it empty.
+fn outline_if(ui: &egui::Ui, resp: &egui::Response, missing: bool) {
+    if missing {
+        ui.painter().rect_stroke(
+            resp.rect.expand(1.0),
+            ui.visuals().widgets.inactive.rounding,
+            egui::Stroke::new(1.5_f32, MISSING_RED),
+        );
+    }
+}
+
 /// LAN discovery, then username/password, with an API key as the fallback.
 ///
 /// Ends in the same picker as Plex: signing in used to mint a token and
@@ -322,7 +388,8 @@ fn jellyfin(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserC
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.label("user");
-        ui.add_sized([140.0, 18.0], egui::TextEdit::singleline(&mut state.add.user));
+        let user = ui.add_sized([140.0, 18.0], egui::TextEdit::singleline(&mut state.add.user));
+        outline_if(ui, &user, state.add.is_missing(Field::User));
         ui.label("password");
         ui.add_sized(
             [140.0, 18.0],
@@ -333,10 +400,14 @@ fn jellyfin(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserC
             .on_hover_text("exchanges your password for an access token — the password is not stored")
             .clicked()
         {
-            if state.add.path.trim().is_empty() {
-                state.add.error = "pick or type a server url first".into();
-            } else if state.add.user.trim().is_empty() {
-                state.add.error = "enter your Jellyfin username".into();
+            // No password is fine: Jellyfin lets an account have none.
+            if !state.add.require(&[Field::Path, Field::User]) {
+                state.add.error = match state.add.missing.len() {
+                    2 => "a server url and a username are both needed",
+                    _ if state.add.is_missing(Field::Path) => "pick or type a server url first",
+                    _ => "enter your Jellyfin username",
+                }
+                .into();
             } else {
                 state.add.error.clear();
                 let (u, p) = (state.add.user.clone(), state.add.pass.clone());
@@ -359,12 +430,13 @@ fn jellyfin(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserC
 
     ui.horizontal(|ui| {
         ui.weak("or paste an API key:");
-        ui.add_sized(
+        let token = ui.add_sized(
             [200.0, 18.0],
             egui::TextEdit::singleline(&mut state.add.token)
                 .hint_text("API key")
                 .password(true),
         );
+        outline_if(ui, &token, state.add.is_missing(Field::Token));
         let (url, key) = (
             state.add.path.trim().to_owned(),
             state.add.token.trim().to_owned(),
@@ -374,7 +446,7 @@ fn jellyfin(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserC
             .on_hover_text("list this server's libraries and pick from them")
             .clicked()
         {
-            if url.is_empty() || key.is_empty() {
+            if !state.add.require(&[Field::Path, Field::Token]) {
                 state.add.error = "a server url and an API key are both needed".into();
             } else {
                 state.add.error.clear();
@@ -390,7 +462,7 @@ fn jellyfin(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserC
                 .on_hover_text("add with the library box above (all libraries if blank)")
                 .clicked()
         {
-            if url.is_empty() || key.is_empty() {
+            if !state.add.require(&[Field::Path, Field::Token]) {
                 state.add.error = "a server url and an API key are both needed".into();
             } else {
                 added.push(Source::Jellyfin {
@@ -481,12 +553,13 @@ fn plex(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserCtx) 
 
     ui.horizontal(|ui| {
         ui.weak("or paste a token:");
-        ui.add_sized(
+        let token = ui.add_sized(
             [200.0, 18.0],
             egui::TextEdit::singleline(&mut state.add.token)
                 .hint_text("X-Plex-Token")
                 .password(true),
         );
+        outline_if(ui, &token, state.add.is_missing(Field::Token));
         let (url, tok) = (
             state.add.path.trim().to_owned(),
             state.add.token.trim().to_owned(),
@@ -498,7 +571,7 @@ fn plex(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserCtx) 
             .on_hover_text("list this server's libraries and pick from them")
             .clicked()
         {
-            if url.is_empty() || tok.is_empty() {
+            if !state.add.require(&[Field::Path, Field::Token]) {
                 state.add.error = "a server url and a token are both needed".into();
             } else {
                 state.add.error.clear();
@@ -514,7 +587,7 @@ fn plex(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserCtx) 
                 .on_hover_text("add with the library box above (all libraries if blank)")
                 .clicked()
         {
-            if url.is_empty() || tok.is_empty() {
+            if !state.add.require(&[Field::Path, Field::Token]) {
                 state.add.error = "a server url and a token are both needed".into();
             } else {
                 added.push(Source::Plex {
@@ -700,16 +773,31 @@ fn cameras(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserCt
         ui.label(egui::RichText::new("streams in this source").strong());
     }
     let mut drop_at = None;
+    // A copy, because the rows below borrow the cameras mutably.
+    let missing = state.add.missing.clone();
     for (i, cam) in state.add.cameras.iter_mut().enumerate() {
         ui.horizontal(|ui| {
             if ui.button(egui::RichText::new("✖").small()).on_hover_text("remove").clicked() {
                 drop_at = Some(i);
             }
-            ui.add_sized([140.0, 18.0], egui::TextEdit::singleline(&mut cam.name).hint_text("name"));
-            ui.add_sized(
+            let name = ui.add_sized(
+                [140.0, 18.0],
+                egui::TextEdit::singleline(&mut cam.name).hint_text("name"),
+            );
+            outline_if(
+                ui,
+                &name,
+                missing.contains(&Field::CameraName(i)) && cam.name.trim().is_empty(),
+            );
+            let url = ui.add_sized(
                 [340.0, 18.0],
                 egui::TextEdit::singleline(&mut cam.url)
                     .hint_text("rtsps://<controller>:7441/<alias>?enableSrtp"),
+            );
+            outline_if(
+                ui,
+                &url,
+                missing.contains(&Field::CameraUrl(i)) && cam.url.trim().is_empty(),
             );
             if cam.url.trim().is_empty() {
                 ui.colored_label(
@@ -721,27 +809,41 @@ fn cameras(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserCt
     }
     if let Some(i) = drop_at {
         state.add.cameras.remove(i);
+        // The flags are by row index, and the rows below this one just
+        // moved up — they would outline the wrong row.
+        state.add.missing.clear();
     }
 
     ui.horizontal(|ui| {
         if ui.button("add a stream").clicked() {
             state.add.cameras.push(CameraStream::default());
         }
-        let ready = state
-            .add
-            .cameras
-            .iter()
-            .any(|c| !c.url.trim().is_empty() && !c.name.trim().is_empty());
+        // Always clickable, like folder's: a grey button said nothing about
+        // which of several rows was holding it back. Every row needs both
+        // halves — a half-filled one used to be dropped without a word,
+        // which is how a Protect camera with no url went missing.
         if ui
-            .add_enabled(ready, egui::Button::new("add source"))
+            .button("add source")
             .on_hover_text("each stream becomes an item you can queue like a film")
             .clicked()
         {
+            let need: Vec<Field> = (0..state.add.cameras.len())
+                .flat_map(|i| [Field::CameraName(i), Field::CameraUrl(i)])
+                .collect();
+            if state.add.cameras.is_empty() {
+                state.add.error = "add a stream first — scan the network, or \"add a stream\"".into();
+                return;
+            }
+            if !state.add.require(&need) {
+                state.add.error =
+                    "every stream needs a name and a url — fill in or remove the outlined ones".into();
+                return;
+            }
+            state.add.error.clear();
             let streams: Vec<CameraStream> = state
                 .add
                 .cameras
                 .iter()
-                .filter(|c| !c.url.trim().is_empty() && !c.name.trim().is_empty())
                 .map(|c| CameraStream {
                     name: c.name.trim().to_owned(),
                     url: c.url.trim().to_owned(),
@@ -768,11 +870,10 @@ fn folder(ui: &mut egui::Ui, state: &mut BrowserState) -> Option<Source> {
     // Deliberately always clickable: a permanently grey button reads as
     // "this feature doesn't work". Say what is missing instead.
     if ui.button("add source").clicked() {
-        let path = state.add.path.trim();
-        if path.is_empty() {
+        if !state.add.require(&[Field::Path]) {
             state.add.error = "enter a folder path first".into();
         } else {
-            return Some(Source::Folder { path: path.to_owned() });
+            return Some(Source::Folder { path: state.add.path.trim().to_owned() });
         }
     }
     None
