@@ -5,6 +5,7 @@ members = [
     "crates/tessera-core",
     "crates/tessera-app",
 ]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.3.1"
@@ -38,3 +39,9 @@ tessera-core = { path = "crates/tessera-core" }
 
 [profile.release]
 lto = "thin"
+
+# winit 0.29.15 with one fix: an X11 drop made before the dragged data
+# arrived was lost, left the drop hint up, and made the next drag drop the
+# old files. See vendor/README.md. 0.29 is the last line egui 0.27 takes.
+[patch.crates-io]
+winit = { path = "vendor/winit" }

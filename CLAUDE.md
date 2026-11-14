@@ -11,7 +11,7 @@ ideas, no shared code. See `README.md` for the user-facing feature list and
 cargo build --release          # binary: target/release/tessera
 ./packaging/install.sh         # user-local install (bin + icon + .desktop)
 cargo check --workspace        # fast loop while editing
-cargo test --workspace         # 136 tests, mostly tessera-core (layout, budget, queue, sources, info, tracks)
+cargo test --workspace         # 140 tests, mostly tessera-core (layout, budget, queue, sources, info, tracks)
 cargo clippy --workspace --all-targets   # clean; keep it that way
 cargo +1.99.0 clippy --workspace --all-targets -- -D warnings   # exactly what CI runs
 ./scripts/check-macos.sh       # type-check + lint the macOS build from Linux
@@ -107,6 +107,11 @@ Useful at runtime: `--windowed 1600x900` (one ordinary window),
 | `tessera-mpv` | libmpv render-API wrapper: `dlopen` + hand-declared C ABI (no dev headers). `MpvLib` / `Mpv` / `RenderContext`. |
 | `tessera-core` | Pure logic, no I/O of its own beyond HTTP sources: `MediaItem`/`SourceKind`, `PlaybackQueue`, `solve_grid`, `DecodeBudget`, `title` (file name → show/season/episode/year), `subs` (SRT cues, search), `timecode` (`HH:MM:SS`, seek targets incl. chapters), `info` (the "i" panel's rows: Plex/Jellyfin detail parsers, size/bitrate/date formatting), `tracks` (the audio and subtitle tracks picked per item, and matching them back onto a file's tracks), `view` (per-tile crop/zoom), `monitor` (a monitor by number, connector or position). **This is where tests live** — put new logic here if it can be tested headlessly. |
 | `tessera-app` | The binary. `main.rs` (startup + the event loop), `cli.rs` (arguments, usage text), `wall.rs` (`Wall` and every action on tiles/queue/budget, incl. `handle_overlay_action`), `windowing.rs` (window + GL context creation, fullscreen, which monitor a window is on), `seek.rs` (coalesced keyboard seeking), `persist.rs` (settings.conf, queue.json), `platform/` (everything OS-specific: `linux.rs`, `macos.rs`, same items in both), `screen.rs` (one window + GL context per `Screen`, wall or library), `tile.rs` (one mpv instance + FBO), `compositor.rs`, `overlay.rs` (wall egui), `browser/` (the browser window's egui: `mod.rs` tab bar + shared state, then one file per tab — `library.rs`, `queue.rs`, `sources.rs`, `config.rs`), `catalog.rs` (background source listing), `thumbs.rs`, `icons.rs` (painted button icons — transport, info, subtitles, play), `info_panel.rs` (the "i" panel, shared by tiles and browser rows), `png_util.rs`, `instance.rs` (the single-instance socket, which also carries the API), `rpc.rs` (the API: what each request does, on which thread), `mcp.rs` (`tessera mcp`: the stdio MCP server over that API). |
+
+**winit is vendored** (`vendor/winit`, via `[patch.crates-io]`) for one X11
+fix: a drop made before the dragged data arrived was lost, left the "drop to
+play" hint up, and made the next drag drop the old files. Bumping winit
+means carrying the `PATCH(tessera)` changes over — see `vendor/README.md`.
 
 ## Architecture invariants
 
