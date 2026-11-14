@@ -359,13 +359,24 @@ pub struct BudgetUi {
 /// Thumb box the entries are fitted into (egui points).
 const THUMB_MAX: egui::Vec2 = egui::Vec2::new(84.0, 56.0);
 
-/// Everything on the transport row except the scrub bar: the four seek
-/// buttons before it, plus the time, pin, fullscreen, -, + and trash after.
-/// Measured rather than guessed — this used to count only the trailing half,
-/// so the row was always about 110pt wider than the `avail` it was handed.
-/// Harmless on a big tile; on the rightmost column the excess ran past the
-/// window edge, where the Area's clip rect sliced it off.
-const ROW_FIXED: f32 = 442.0;
+/// Every button on a tile chip, in points at k = 1. One box for all of them
+/// is what makes the two rows line up: the top row's info/audio/subtitle
+/// pickers sit over prev/back/forward, and its solo and mute over trash and
+/// "+". They used to be 18, 20, 22 and 24 wide, plus a pin button at its
+/// natural size, so no two columns met.
+const CHIP_BUTTON: egui::Vec2 = egui::Vec2::new(24.0, 16.0);
+/// Between buttons in a group, and between groups (buttons, the scrub bar,
+/// the time). egui's default 8pt between every item made a row of small
+/// buttons look scattered, and spent width the scrub bar wanted.
+const CHIP_ITEM_GAP: f32 = 4.0;
+const CHIP_GROUP_GAP: f32 = 6.0;
+
+/// Everything on the transport row except the scrub bar, at k = 1: the four
+/// seek buttons before it, then the time, pin, fullscreen, -, + and trash.
+/// Only the chip's scale is judged by it now — the scrub bar itself takes
+/// whatever the laid-out row leaves, measured by egui rather than by this.
+/// Measured at about 320 with an MM:SS duration; H:MM:SS adds ~20.
+const ROW_FIXED: f32 = 340.0;
 
 /// Logical width the tile chip is laid out around: the fixed transport
 /// controls plus a scrub bar worth having.
@@ -769,6 +780,7 @@ pub fn draw(
                         ui.set_max_width(avail);
                         ui.set_min_width(avail.min(460.0));
                         ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = CHIP_ITEM_GAP * k;
                             // Track pickers (A/S) sit at the row start so their
                             // position is stable. A only when the file has >1
                             // audio track; S whenever subtitles exist.
@@ -777,7 +789,7 @@ pub fn draw(
                                 // one exact box at any chip scale.
                                 let b = |ui: &mut egui::Ui, icon: Icon, open: bool, tip: &str| {
                                     let fill = open.then_some(egui::Color32::from_rgb(70, 110, 150));
-                                    let r = crate::icons::button(ui, icon, egui::vec2(18.0, 16.0) * k, fill);
+                                    let r = crate::icons::button(ui, icon, CHIP_BUTTON * k, fill);
                                     let clicked = r.clicked();
                                     r.on_hover_text(tip);
                                     clicked
@@ -812,109 +824,129 @@ pub fn draw(
                                     });
                                 }
                             }
-                            let state = if tile.paused { "⏸" } else { "▶" };
-                            let title = truncate(&tile.title, 38);
-                            let color = if tile.paused {
-                                egui::Color32::from_rgb(200, 120, 120)
-                            } else {
-                                egui::Color32::WHITE
-                            };
-                            let label = ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(format!("{state}  {title}"))
-                                        .strong()
-                                        .color(color),
-                                )
-                                .sense(egui::Sense::click()),
-                            );
-                            if label.hovered() {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                            }
-                            if label.clicked() {
-                                actions.push(OverlayAction::TogglePause { tile_id: tile.id });
-                            }
-                            // Inline volume slider: shown when the tile is
-                            // unmuted (or the cursor is over the tile, so a
-                            // muted tile's level can be pre-set). % label
-                            // alongside; live-set on drag.
-                            if tile.audio_enabled {
-                                let tile_hovered = ctx
-                                    .input(|i| i.pointer.hover_pos())
-                                    .map(|p| cell.contains(p.x * ppp, p.y * ppp))
-                                    .unwrap_or(false);
-                                if !tile.muted || tile_hovered {
-                                    let mut vol = tile.volume.clamp(0, 100) as f32;
-                                    // Same trap the scrub bar below documents:
-                                    // egui draws the rail at
-                                    // spacing.slider_width and ignores the
-                                    // width add_sized allocated, so this came
-                                    // out ~36pt wider than its slot and pushed
-                                    // the mute and solo buttons toward the
-                                    // chip edge.
-                                    ui.spacing_mut().slider_width = 64.0 * k;
-                                    let sresp = ui.add_sized(
-                                        egui::vec2(64.0, 14.0) * k,
-                                        egui::Slider::new(&mut vol, 0.0..=100.0).show_value(false),
-                                    );
-                                    if sresp.changed() {
-                                        actions.push(OverlayAction::SetVolume {
-                                            tile_id: tile.id,
-                                            volume: vol.round() as i64,
-                                        });
+                            // Everything after the pickers is laid out from
+                            // the chip's right edge inward: solo, mute, then
+                            // the volume. So the row ends flush with the chip,
+                            // and the two buttons sit exactly over the
+                            // transport row's last two, which share their box
+                            // (CHIP_BUTTON). The title takes whatever is left
+                            // and truncates to it — it used to be cut at 38
+                            // characters, which was wrong for every width but
+                            // one and left the row ending wherever it ended.
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                // Solo: unmute this tile, mute every other
+                                // stream (audio focus).
+                                {
+                                    let mut btn = egui::Button::new(egui::RichText::new("🎤").small());
+                                    if tile.solo {
+                                        btn = btn.fill(egui::Color32::from_rgb(70, 110, 150));
                                     }
-                                    ui.label(
-                                        egui::RichText::new(format!("{}%", vol.round() as i64)).small().weak(),
+                                    let resp = ui.add_sized(CHIP_BUTTON * k, btn);
+                                    if resp.clicked() {
+                                        actions.push(OverlayAction::Solo { tile_id: tile.id });
+                                    }
+                                    resp.on_hover_text("solo audio: mute every other stream");
+                                }
+                                // Always-visible mute button with state.
+                                {
+                                    let (icon, fill) = if !tile.audio_enabled {
+                                        // Audio pipeline off: gray speaker.
+                                        (egui::RichText::new("🔇").weak(), None)
+                                    } else if tile.muted {
+                                        (egui::RichText::new("🔇").color(egui::Color32::from_rgb(240, 110, 110)), Some(egui::Color32::from_rgba_unmultiplied(120, 40, 40, 90)))
+                                    } else {
+                                        (egui::RichText::new("🔊").color(egui::Color32::from_rgb(130, 220, 140)), None)
+                                    };
+                                    let mut btn = egui::Button::new(icon.small());
+                                    if let Some(f) = fill {
+                                        btn = btn.fill(f);
+                                    }
+                                    let resp = ui.add_sized(CHIP_BUTTON * k, btn);
+                                    if resp.clicked() {
+                                        actions.push(OverlayAction::MuteButton { tile_id: tile.id });
+                                    }
+                                    let tip = if !tile.audio_enabled {
+                                        "audio is off — turn it on in the config tab (C)".to_string()
+                                    } else if tile.muted {
+                                        "muted — click to unmute (right-click video also works)".to_string()
+                                    } else {
+                                        "playing — click to mute".to_string()
+                                    };
+                                    resp.on_hover_text(tip);
+                                }
+                                // Inline volume slider: shown when the tile is
+                                // unmuted (or the cursor is over the tile, so
+                                // a muted tile's level can be pre-set). %
+                                // label alongside; live-set on drag.
+                                if tile.audio_enabled {
+                                    let tile_hovered = ctx
+                                        .input(|i| i.pointer.hover_pos())
+                                        .map(|p| cell.contains(p.x * ppp, p.y * ppp))
+                                        .unwrap_or(false);
+                                    if !tile.muted || tile_hovered {
+                                        let mut vol = tile.volume.clamp(0, 100) as f32;
+                                        // Sized for "100%", so dragging from
+                                        // 100 to 5 doesn't slide the slider
+                                        // sideways under the pointer.
+                                        let pct = egui::RichText::new(format!("{}%", vol.round() as i64)).small().weak();
+                                        let pct_w = text_width(ui, "100%", egui::TextStyle::Small);
+                                        ui.add_sized(egui::vec2(pct_w, CHIP_BUTTON.y * k), egui::Label::new(pct));
+                                        // Same trap the scrub bar below
+                                        // documents: egui draws the rail at
+                                        // spacing.slider_width and ignores the
+                                        // width add_sized allocated.
+                                        ui.spacing_mut().slider_width = 64.0 * k;
+                                        let sresp = ui.add(
+                                            egui::Slider::new(&mut vol, 0.0..=100.0).show_value(false),
+                                        );
+                                        if sresp.changed() {
+                                            actions.push(OverlayAction::SetVolume {
+                                                tile_id: tile.id,
+                                                volume: vol.round() as i64,
+                                            });
+                                        }
+                                        sresp.on_hover_text("volume (scroll wheel also works)");
+                                    }
+                                }
+                                ui.add_space(CHIP_GROUP_GAP * k);
+                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    let state = if tile.paused { "⏸" } else { "▶" };
+                                    let color = if tile.paused {
+                                        egui::Color32::from_rgb(200, 120, 120)
+                                    } else {
+                                        egui::Color32::WHITE
+                                    };
+                                    let label = ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(format!("{state}  {}", tile.title))
+                                                .strong()
+                                                .color(color),
+                                        )
+                                        .truncate(true)
+                                        .sense(egui::Sense::click()),
                                     );
-                                    sresp.on_hover_text("volume (scroll wheel also works)");
-                                }
-                            }
-                            // Always-visible mute button with state.
-                            {
-                                let (icon, fill) = if !tile.audio_enabled {
-                                    // Audio pipeline off: gray speaker.
-                                    (egui::RichText::new("🔇").weak(), None)
-                                } else if tile.muted {
-                                    (egui::RichText::new("🔇").color(egui::Color32::from_rgb(240, 110, 110)), Some(egui::Color32::from_rgba_unmultiplied(120, 40, 40, 90)))
-                                } else {
-                                    (egui::RichText::new("🔊").color(egui::Color32::from_rgb(130, 220, 140)), None)
-                                };
-                                let mut btn = egui::Button::new(icon.small()).min_size(egui::vec2(24.0, 16.0) * k);
-                                if let Some(f) = fill {
-                                    btn = btn.fill(f);
-                                }
-                                let resp = ui.add(btn);
-                                if resp.clicked() {
-                                    actions.push(OverlayAction::MuteButton { tile_id: tile.id });
-                                }
-                                let tip = if !tile.audio_enabled {
-                                    "audio is off — turn it on in the config tab (C)".to_string()
-                                } else if tile.muted {
-                                    "muted — click to unmute (right-click video also works)".to_string()
-                                } else {
-                                    "playing — click to mute".to_string()
-                                };
-                                resp.on_hover_text(tip);
-                            }
-                            // Solo: unmute this tile, mute every other stream
-                            // (audio focus).
-                            {
-                                let mut btn = egui::Button::new(egui::RichText::new("🎤").small())
-                                    .min_size(egui::vec2(24.0, 16.0) * k);
-                                if tile.solo {
-                                    btn = btn.fill(egui::Color32::from_rgb(70, 110, 150));
-                                }
-                                let resp = ui.add(btn);
-                                if resp.clicked() {
-                                    actions.push(OverlayAction::Solo { tile_id: tile.id });
-                                }
-                                resp.on_hover_text("solo audio: mute every other stream");
-                            }
+                                    if label.hovered() {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    }
+                                    if label.clicked() {
+                                        actions.push(OverlayAction::TogglePause { tile_id: tile.id });
+                                    }
+                                });
+                            });
                         });
-                        // Transport row: prev, -10s, +10s, next, scrub, time.
+                        // Transport row: prev, -10s, +10s, next on the left;
+                        // pin, fullscreen, -, +, trash from the right edge in,
+                        // then the time; the scrub bar takes everything
+                        // between. It used to be sized as `avail - ROW_FIXED`,
+                        // a guess at the rest of the row that only ever
+                        // matched one set of widths — too high, and the row
+                        // stopped well short of the chip's edge with the scrub
+                        // bar cramped on even a large tile.
                         ui.horizontal(|ui| {
-                            let b = |ui: &mut egui::Ui, glyph: &str, w: f32| {
+                            ui.spacing_mut().item_spacing.x = CHIP_ITEM_GAP * k;
+                            let b = |ui: &mut egui::Ui, glyph: &str| {
                                 ui.add_sized(
-                                    egui::vec2(w, 16.0) * k,
+                                    CHIP_BUTTON * k,
                                     egui::Button::new(egui::RichText::new(glyph).small()),
                                 )
                             };
@@ -922,7 +954,7 @@ pub fn draw(
                             // font, and at a small chip scale they sat off
                             // centre and clipped (see `icons`).
                             let t = |ui: &mut egui::Ui, icon: Icon| {
-                                crate::icons::button(ui, icon, egui::vec2(22.0, 16.0) * k, None)
+                                crate::icons::button(ui, icon, CHIP_BUTTON * k, None)
                             };
                             if t(ui, Icon::Prev).on_hover_text("previous in the queue").clicked() {
                                 actions.push(OverlayAction::Prev { tile_id: tile.id });
@@ -941,12 +973,6 @@ pub fn draw(
                             if t(ui, Icon::Next).on_hover_text("next in the queue").clicked() {
                                 actions.push(OverlayAction::Next { tile_id: tile.id });
                             }
-                            // The scrub bar takes whatever the rest of the row
-                            // leaves — a fixed stub made seeking a two-hour
-                            // film hopeless on a big tile, and a stub that
-                            // ignored the leading buttons overflowed a small
-                            // one. See ROW_FIXED.
-                            let scrub_w = (avail - ROW_FIXED * k).max(40.0 * k);
                             // Where the user is heading: mpv's position plus
                             // whatever seek is still accumulating. Duration is
                             // -1 until mpv has read the file, so the clamp has
@@ -994,7 +1020,8 @@ pub fn draw(
                                 } else if !at_edge {
                                     btn = btn.fill(egui::Color32::from_rgb(150, 90, 30));
                                 }
-                                let resp = ui.add_sized(egui::vec2(96.0, 16.0) * k, btn);
+                                ui.add_space(CHIP_GROUP_GAP * k);
+                                let resp = ui.add_sized(egui::vec2(96.0 * k, CHIP_BUTTON.y * k), btn);
                                 if resp.clicked() {
                                     actions.push(OverlayAction::GoLive { tile_id: tile.id });
                                 }
@@ -1005,112 +1032,125 @@ pub fn draw(
                                 } else {
                                     "behind live — click to rejoin at the current moment"
                                 });
-                                ui.add_space((scrub_w - 96.0 * k).max(0.0));
-                            } else if tile.duration > 0.0 {
-                                let mut pos = target;
-                                // egui draws a Slider's rail at
-                                // spacing.slider_width (100 by default) and
-                                // ignores whatever room add_sized gives it —
-                                // so widening the row alone does nothing.
-                                ui.spacing_mut().slider_width = scrub_w;
-                                let sresp = ui.add(
-                                    egui::Slider::new(&mut pos, 0.0..=tile.duration)
-                                        .show_value(false),
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                // Delete current video (click twice to confirm).
+                                let armed = matches!(confirm_delete, Some((id, _)) if *id == tile.id);
+                                let mut btn = egui::Button::new(
+                                    egui::RichText::new(if armed { "🗑?" } else { "🗑" }).small(),
                                 );
-                                if (sresp.clicked() || sresp.drag_stopped())
-                                    && (pos - target).abs() > 0.5
-                                {
-                                    actions.push(OverlayAction::SeekTo { tile_id: tile.id, to: pos });
-                                }
-                            } else {
-                                ui.add_space(scrub_w);
-                            }
-                            if !tile.live {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{} / {}",
-                                        fmt_time(target),
-                                        fmt_time(tile.duration)
-                                    ))
-                                    .small()
-                                    .weak(),
-                                );
-                            }
-                            // Pin this tile: it takes most of the screen, the
-                            // rest share a bottom strip (P also toggles).
-                            {
-                                let mut btn =
-                                    egui::Button::new(egui::RichText::new("📌").small());
-                                if tile.pinned {
-                                    btn = btn.fill(egui::Color32::from_rgb(70, 110, 150));
-                                }
-                                let resp = ui.add(btn);
-                                if resp.clicked() {
-                                    actions.push(OverlayAction::TogglePin { tile_id: tile.id });
-                                }
-                                resp.on_hover_text("pin this tile: it takes most of the screen (P)");
-                            }
-                            // Fullscreen this tile (painter-drawn corner-bracket
-                            // icon: no font dependency).
-                            let (zrect, zresp) = ui.allocate_exact_size(
-                                egui::vec2(20.0, 16.0) * k,
-                                egui::Sense::click(),
-                            );
-                            {
-                                let p = ui.painter_at(zrect);
-                                let col = if zresp.hovered() {
-                                    egui::Color32::WHITE
-                                } else {
-                                    egui::Color32::from_gray(180)
-                                };
-                                let r = zrect.shrink(2.0 * k);
-                                let arm = 5.0 * k;
-                                let st = egui::Stroke::new(1.6 * k, col);
-                                let lt = r.left_top();
-                                let rt = r.right_top();
-                                let lb = r.left_bottom();
-                                let rb = r.right_bottom();
-                                p.line_segment([lt, egui::pos2(r.left() + arm, r.top())], st);
-                                p.line_segment([lt, egui::pos2(r.left(), r.top() + arm)], st);
-                                p.line_segment([rt, egui::pos2(r.right() - arm, r.top())], st);
-                                p.line_segment([rt, egui::pos2(r.right(), r.top() + arm)], st);
-                                p.line_segment([lb, egui::pos2(r.left() + arm, r.bottom())], st);
-                                p.line_segment([lb, egui::pos2(r.left(), r.bottom() - arm)], st);
-                                p.line_segment([rb, egui::pos2(r.right() - arm, r.bottom())], st);
-                                p.line_segment([rb, egui::pos2(r.right(), r.bottom() - arm)], st);
-                            }
-                            if zresp.clicked() {
-                                actions.push(OverlayAction::FullscreenToggle { tile_id: tile.id });
-                            }
-                            zresp.on_hover_text("fullscreen this tile (F)");
-                            // Panel management: remove this tile / add one.
-                            if b(ui, "-", 20.0).on_hover_text("remove this tile").clicked() {
-                                actions.push(OverlayAction::RemovePanel { tile_id: tile.id });
-                            }
-                            if b(ui, "+", 20.0).on_hover_text("add a tile (next from queue)").clicked() {
-                                actions.push(OverlayAction::AddPanel);
-                            }
-                            // Delete current video (click twice to confirm).
-                            let armed = matches!(confirm_delete, Some((id, _)) if *id == tile.id);
-                            let mut btn = egui::Button::new(
-                                egui::RichText::new(if armed { "🗑?" } else { "🗑" }).small(),
-                            );
-                            if armed {
-                                btn = btn.fill(egui::Color32::from_rgb(200, 60, 60));
-                            }
-                            let del = ui.add_sized(egui::vec2(24.0, 16.0) * k, btn);
-                            if del.clicked() {
                                 if armed {
-                                    actions.push(OverlayAction::DeleteCurrent { tile_id: tile.id });
-                                    *confirm_delete = None;
-                                } else {
-                                    *confirm_delete = Some((tile.id, std::time::Instant::now()));
+                                    btn = btn.fill(egui::Color32::from_rgb(200, 60, 60));
                                 }
-                            }
-                            del.on_hover_text(if armed {
-                                "click again to DELETE this video from its source and move on"
-                            } else {
-                                "delete this video (file / library) and play the next"
+                                let del = ui.add_sized(CHIP_BUTTON * k, btn);
+                                if del.clicked() {
+                                    if armed {
+                                        actions.push(OverlayAction::DeleteCurrent { tile_id: tile.id });
+                                        *confirm_delete = None;
+                                    } else {
+                                        *confirm_delete = Some((tile.id, std::time::Instant::now()));
+                                    }
+                                }
+                                del.on_hover_text(if armed {
+                                    "click again to DELETE this video from its source and move on"
+                                } else {
+                                    "delete this video (file / library) and play the next"
+                                });
+                                // Panel management: add a tile / remove this one.
+                                if b(ui, "+").on_hover_text("add a tile (next from queue)").clicked() {
+                                    actions.push(OverlayAction::AddPanel);
+                                }
+                                if b(ui, "-").on_hover_text("remove this tile").clicked() {
+                                    actions.push(OverlayAction::RemovePanel { tile_id: tile.id });
+                                }
+                                // Fullscreen this tile. Painter-drawn corner
+                                // brackets (no font dependency) on the same
+                                // button face as its neighbours — it used to
+                                // be bare, the one control in the row without
+                                // a box, which is what threw the spacing off.
+                                let (zrect, zresp) = ui.allocate_exact_size(CHIP_BUTTON * k, egui::Sense::click());
+                                if ui.is_rect_visible(zrect) {
+                                    let v = ui.style().interact(&zresp);
+                                    ui.painter().rect(zrect.expand(v.expansion), v.rounding, v.weak_bg_fill, v.bg_stroke);
+                                    let p = ui.painter_at(zrect.expand(v.expansion));
+                                    let col = if zresp.hovered() {
+                                        egui::Color32::WHITE
+                                    } else {
+                                        egui::Color32::from_gray(180)
+                                    };
+                                    let r = egui::Rect::from_center_size(zrect.center(), egui::vec2(14.0, 10.0) * k);
+                                    let arm = 4.0 * k;
+                                    let st = egui::Stroke::new(1.4 * k, col);
+                                    let lt = r.left_top();
+                                    let rt = r.right_top();
+                                    let lb = r.left_bottom();
+                                    let rb = r.right_bottom();
+                                    p.line_segment([lt, egui::pos2(r.left() + arm, r.top())], st);
+                                    p.line_segment([lt, egui::pos2(r.left(), r.top() + arm)], st);
+                                    p.line_segment([rt, egui::pos2(r.right() - arm, r.top())], st);
+                                    p.line_segment([rt, egui::pos2(r.right(), r.top() + arm)], st);
+                                    p.line_segment([lb, egui::pos2(r.left() + arm, r.bottom())], st);
+                                    p.line_segment([lb, egui::pos2(r.left(), r.bottom() - arm)], st);
+                                    p.line_segment([rb, egui::pos2(r.right() - arm, r.bottom())], st);
+                                    p.line_segment([rb, egui::pos2(r.right(), r.bottom() - arm)], st);
+                                }
+                                if zresp.clicked() {
+                                    actions.push(OverlayAction::FullscreenToggle { tile_id: tile.id });
+                                }
+                                zresp.on_hover_text("fullscreen this tile (F)");
+                                // Pin this tile: it takes most of the screen,
+                                // the rest share a bottom strip (P also
+                                // toggles).
+                                {
+                                    let mut btn = egui::Button::new(egui::RichText::new("📌").small());
+                                    if tile.pinned {
+                                        btn = btn.fill(egui::Color32::from_rgb(70, 110, 150));
+                                    }
+                                    let resp = ui.add_sized(CHIP_BUTTON * k, btn);
+                                    if resp.clicked() {
+                                        actions.push(OverlayAction::TogglePin { tile_id: tile.id });
+                                    }
+                                    resp.on_hover_text("pin this tile: it takes most of the screen (P)");
+                                }
+                                if tile.live {
+                                    return;
+                                }
+                                ui.add_space(CHIP_GROUP_GAP * k);
+                                // A fixed slot, sized for the duration's own
+                                // shape with every digit a 0, so the scrub
+                                // bar's end doesn't twitch as the seconds tick
+                                // (or as a seek crosses 9:59 → 10:00).
+                                let dur = fmt_time(tile.duration);
+                                let shape: String = dur.chars().map(|c| if c.is_ascii_digit() { '0' } else { c }).collect();
+                                let time_w = text_width(ui, &format!("{shape} / {shape}"), egui::TextStyle::Small);
+                                ui.add_sized(
+                                    egui::vec2(time_w, CHIP_BUTTON.y * k),
+                                    egui::Label::new(
+                                        egui::RichText::new(format!("{} / {}", fmt_time(target), dur)).small().weak(),
+                                    ),
+                                );
+                                if tile.duration > 0.0 {
+                                    ui.add_space(CHIP_GROUP_GAP * k);
+                                    let mut pos = target;
+                                    // egui draws a Slider's rail at
+                                    // spacing.slider_width (100 by default)
+                                    // and ignores whatever room add_sized
+                                    // gives it — so the width has to go in
+                                    // here. Less the leading group's gap, so
+                                    // the bar doesn't touch the next button.
+                                    ui.spacing_mut().slider_width =
+                                        (ui.available_width() - ui.spacing().item_spacing.x - CHIP_GROUP_GAP * k)
+                                            .max(40.0 * k);
+                                    let sresp = ui.add(
+                                        egui::Slider::new(&mut pos, 0.0..=tile.duration)
+                                            .show_value(false),
+                                    );
+                                    if (sresp.clicked() || sresp.drag_stopped())
+                                        && (pos - target).abs() > 0.5
+                                    {
+                                        actions.push(OverlayAction::SeekTo { tile_id: tile.id, to: pos });
+                                    }
+                                }
                             });
                         });
                         // Expanded track row: off + one button per track, the
@@ -1800,13 +1840,11 @@ fn fit(size: egui::Vec2, k: f32) -> egui::Vec2 {
     egui::vec2(size.x * s, size.y * s)
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_owned()
-    } else {
-        let cut: String = s.chars().take(max - 1).collect();
-        format!("{cut}…")
-    }
+/// Width of `text` in a text style of `ui`'s, for a slot that must not
+/// change size as its text does.
+fn text_width(ui: &egui::Ui, text: &str, style: egui::TextStyle) -> f32 {
+    let font = style.resolve(ui.style());
+    ui.fonts(|f| f.layout_no_wrap(text.to_owned(), font, egui::Color32::WHITE).size().x)
 }
 
 fn fmt_time(t: f64) -> String {
