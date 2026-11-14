@@ -145,6 +145,9 @@ pub fn is_video_file(path: &Path) -> bool {
         ext.as_str(),
         "mp4" | "mkv" | "webm" | "avi" | "mov" | "ts" | "m2ts" | "mts" | "flv" | "wmv" | "mpg" | "mpeg" | "m4v" | "ogv"
             | "m2v" | "vob" | "3gp"
+            // The rest of what packaging/tessera.desktop claims, so a folder
+            // of them is listed and not just a file of one opened directly.
+            | "mk3d" | "f4v" | "qt" | "divx" | "asf" | "3g2" | "ogm" | "dv" | "rm" | "rmvb" | "mxf" | "mpe" | "m2t"
     )
 }
 
@@ -227,6 +230,19 @@ fn skipped_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_claimed_video_extension_is_listed() {
+        // The desktop entry claims these types; a folder holding them must
+        // list them too, case and all.
+        for ext in ["avi", "DIVX", "mkv", "mk3d", "mp4", "f4v", "mov", "qt", "mpg", "m2ts", "wmv", "asf",
+                    "3gp", "3g2", "ogv", "ogm", "dv", "rmvb", "mxf", "webm", "flv", "vob"] {
+            assert!(is_video_file(Path::new(&format!("a.{ext}"))), "{ext}");
+        }
+        for ext in ["srt", "nfo", "jpg", "txt", "mp3"] {
+            assert!(!is_video_file(Path::new(&format!("a.{ext}"))), "{ext}");
+        }
+    }
 
     #[test]
     fn folders_are_walked_recursively_skipping_junk() {

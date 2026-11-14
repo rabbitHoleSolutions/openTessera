@@ -31,11 +31,10 @@ DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}"
 APP_DIR="$DATA_DIR/applications"
 ICON_ROOT="$DATA_DIR/icons/hicolor"
 SIZES=(16 24 32 48 64 128 256 512)
-MIMES=(
-  video/x-matroska video/mp4 video/mpeg video/quicktime video/x-msvideo
-  video/x-ms-wmv video/webm video/x-flv video/3gpp video/ogg video/mp2t
-  video/x-m4v video/avi
-)
+# The video types the desktop entry claims (everything but folders): one list,
+# read from there, so --default can't set fewer types than Open With offers.
+mapfile -t MIMES < <(sed -n 's/^MimeType=//p' "$REPO/packaging/tessera.desktop" \
+  | tr ';' '\n' | grep -v -e '^$' -e '^inode/')
 
 build=1
 set_default=0

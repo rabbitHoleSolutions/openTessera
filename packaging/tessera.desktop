@@ -14,7 +14,13 @@ Keywords=video;wall;multi;mosaic;player;jellyfin;plex;
 # the dock shows a second, generic entry instead of lighting up this one.
 StartupWMClass=tessera
 StartupNotify=false
-MimeType=video/x-matroska;video/mp4;video/mpeg;video/quicktime;video/x-msvideo;video/x-ms-wmv;video/webm;video/x-flv;video/3gpp;video/ogg;video/mp2t;video/x-m4v;video/avi;inode/directory;
+# Each type under its current name AND its older aliases: shared-mime-info
+# renames types between versions (2.2 made .avi video/vnd.avi, where it had
+# been video/x-msvideo), and a default set under the old name stops
+# applying to files typed with the new one — which is how .avi quietly
+# stopped opening in Tessera. install.sh --default reads this line, so the
+# two lists can't drift apart.
+MimeType=video/x-matroska;video/x-matroska-3d;video/webm;video/mp4;video/x-m4v;video/mp4v-es;video/vnd.avi;video/x-msvideo;video/avi;video/msvideo;video/x-avi;video/divx;video/quicktime;video/mpeg;video/x-mpeg;video/x-mpeg2;video/mpeg-system;video/x-mpeg-system;video/mp2t;video/x-flv;video/flv;video/x-ms-wmv;video/x-ms-asf;application/vnd.ms-asf;video/3gpp;video/3gp;video/3gpp2;video/ogg;video/x-ogm+ogg;video/x-theora+ogg;video/x-theora;video/dv;application/vnd.rn-realmedia;video/vnd.rn-realvideo;application/mxf;inode/directory;
 Actions=Wall;
 
 # The all-monitors video wall, as a right-click action on the dock icon.
