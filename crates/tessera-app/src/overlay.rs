@@ -42,6 +42,10 @@ pub struct OverlayState {
     /// Computed each frame by the caller: pinned OR recent user input,
     /// i.e. `opacity > 0`.
     pub visible: bool,
+    /// Computed each frame by the caller: whether any tile in any window
+    /// plays, so every window's "pause all" reads the same way — it pauses
+    /// everything, not just the window it is in.
+    pub any_playing: bool,
     /// How much of the wall chrome shows, 1 → 0 across the fade-out
     /// ([`chrome_opacity`]). The help and gear panels ignore it.
     pub opacity: f32,
@@ -533,6 +537,8 @@ pub fn draw(
     empty_hint: Option<EmptyWall>,
     opacity: f32,
     floating: bool,
+    // Any tile playing in *any* window (`OverlayState::any_playing`).
+    any_playing: bool,
 ) -> Option<egui::Rect> {
     const CONFIRM_SECS: f64 = 4.0;
     // A floating window's move handle: the status text's share of the bar,
@@ -659,7 +665,6 @@ pub fn draw(
                             if ui.small_button("?").on_hover_text("keyboard & mouse help").clicked() {
                                 actions.push(OverlayAction::ToggleHelp);
                             }
-                            let any_playing = tiles.iter().any(|t| !t.paused);
                             let label = if any_playing { "⏸ pause all" } else { "▶ play all" };
                             if ui.small_button(label).clicked() {
                                 actions.push(if any_playing { OverlayAction::PauseAll } else { OverlayAction::ResumeAll });
@@ -1593,10 +1598,10 @@ pub fn pos_on_help(ctx: &egui::Context, x: f32, y: f32) -> bool {
 const KEYS: &[(&str, &str)] = &[
     ("Esc", "exit fullscreen; otherwise quit"),
     ("Tab", "pin/unpin the overlay (auto-hides when idle)"),
-    ("Space", "pause/resume all tiles on this screen"),
+    ("Space", "pause/resume everything, in every window"),
     ("F", "fullscreen the tile under the cursor (its sound plays, the rest mute, unless all are muted)"),
-    ("W", "toggle THIS window: fullscreen wall <-> window (on whichever monitor it is currently on — drag it, then W)"),
-    ("T", "float THIS window on top, no title bar — drag the status bar to move it, the edges to resize"),
+    ("W", "toggle the focused window: fullscreen wall <-> window (on whichever monitor it is currently on — drag it, then W)"),
+    ("T", "float the focused window on top, no title bar — drag the status bar to move it, the edges to resize"),
     ("Left / Right", "seek -/+10s on the tile under the cursor; hold to scan (the jump adds up and is applied in batches, so it doesn't stutter)"),
     ("Up / Down", "volume -/+5 on unmuted tiles of this screen"),
     ("N / Shift+P", "next / previous queue item on each tile"),

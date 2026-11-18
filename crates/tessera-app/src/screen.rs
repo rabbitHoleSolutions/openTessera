@@ -525,6 +525,7 @@ impl Screen {
         let visible = overlay.visible;
         let opacity = overlay.opacity;
         let floating = self.floating;
+        let any_playing = overlay.any_playing;
         // Read before the egui pass borrows half of `self`: what the
         // pointer is over decides the cursor shape on a floating window,
         // which has no frame of its own to show resize arrows.
@@ -616,7 +617,7 @@ impl Screen {
                 crate::browser::draw(ctx, browser_state, settings, &queue_view, &mut bctx, &mut actions);
             } else if visible {
                 let ppp = ctx.pixels_per_point();
-                move_handle = overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, tile_drag, overlay.track_panel, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete, empty_hint, opacity, floating)
+                move_handle = overlay::draw(ctx, monitor_index, pinned, window_fullscreen, &tiles_ui, &cells, &queue_entries, &budget_ui, hover, tile_drag, overlay.track_panel, thumbs, &mut actions, &mut queue_drag, &mut confirm_delete, empty_hint, opacity, floating, any_playing)
                     .map(|r| egui::Rect::from_min_max((r.min.to_vec2() * ppp).to_pos2(), (r.max.to_vec2() * ppp).to_pos2()));
             }
             crate::hud::draw(ctx, &huds);

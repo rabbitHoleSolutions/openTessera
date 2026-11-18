@@ -216,7 +216,7 @@ SECOND LAUNCH:
 
 CONTROLS:
   Tab                Pin/unpin the overlay UI (auto-hides when idle)
-  Space              Pause/resume all tiles on the focused screen
+  Space              Pause/resume everything, in every window
   Left click         Pause/resume the clicked tile
   Drag               Rearrange: drop on another tile to swap, or onto another
                      screen to move the tile there (Esc cancels)
@@ -231,8 +231,8 @@ CONTROLS:
                      ('audio follows pin and fullscreen' in the config tab)
   - / +              Remove the tile under the cursor / add a tile (focused screen)
   F                  Fullscreen the tile under the cursor on its screen (F/Esc exits)
-  W                  Toggle THIS screen (cursor's window): fullscreen wall <-> window
-  T                  Float THIS window on top, without a title bar (again: back);
+  W                  Toggle the focused window: fullscreen wall <-> window
+  T                  Float the focused window on top, without a title bar (again: back);
                      drag its status bar to move it, its edges to resize it
   L / Q / S / C      Browser window on the library / queue / sources / config
                      tab (opens it if there isn't one yet)

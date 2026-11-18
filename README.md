@@ -186,12 +186,12 @@ endpoint. Nothing is transcoded, and seeking works as it does for local files.
 | Wheel | Volume of the tile under the cursor |
 | `←` / `→` | Seek ∓10s on the tile under the cursor (hold to scan) |
 | `↑` / `↓` | Volume of the unmuted tiles in the window |
-| `Space` | Pause / resume every tile in the window |
+| `Space` | Pause / resume everything, in every window (as the status bar's "pause all") |
 | `N` / `Shift+P` | Next / previous queue item |
 | `P` | Pin the tile under the cursor large (its sound plays, the rest mute) |
 | `F` | Zoom the tile under the cursor to fill its screen (likewise) |
-| `W` | Toggle this window between windowed and fullscreen |
-| `T` | Float this window on top of everything, without a title bar (drag the status bar to move it, the edges to resize) |
+| `W` | Toggle the focused window between windowed and fullscreen |
+| `T` | Float the focused window on top of everything, without a title bar (drag the status bar to move it, the edges to resize) |
 | `-` / `+` | Remove the tile under the cursor / add a tile |
 | `L` `Q` `S` `C` | Browser window: library, queue, sources, config |
 | `Tab` | Keep the overlay visible (otherwise it fades out after 1s idle; the browser's config tab sets both times) |

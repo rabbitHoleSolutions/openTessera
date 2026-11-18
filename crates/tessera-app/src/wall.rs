@@ -378,18 +378,8 @@ pub fn handle_overlay_action(wall: &mut Wall, action: OverlayAction, screen_idx:
             wall.queue.set_order(QueueOrder::Name);
             println!("screen {monitor_index}: queue: sorted by name");
         }
-        OverlayAction::PauseAll => {
-            let ids: Vec<usize> = wall.screens[screen_idx].tiles.iter().map(|t| t.id).collect();
-            for id in ids {
-                pause_and_release(wall.screens, wall.budget, id, "user pause");
-            }
-        }
-        OverlayAction::ResumeAll => {
-            let ids: Vec<usize> = wall.screens[screen_idx].tiles.iter().map(|t| t.id).collect();
-            for id in ids {
-                resume_tile(wall.screens, wall.budget, id);
-            }
-        }
+        OverlayAction::PauseAll => set_all_paused(wall.screens, wall.budget, true),
+        OverlayAction::ResumeAll => set_all_paused(wall.screens, wall.budget, false),
     }
 }
 
@@ -530,6 +520,26 @@ pub fn remove_tile_action(
                 toggle_fullscreen(screens, si, None);
             }
             break;
+        }
+    }
+}
+
+/// Whether any tile in any window is playing — what "pause all" (the
+/// status bar's button, and Space) decides on.
+pub fn any_playing(screens: &[Screen]) -> bool {
+    screens.iter().flat_map(|s| s.tiles.iter()).any(|t| !t.is_paused())
+}
+
+/// Pauses, or resumes, every tile in every window. "Pause all" is the one
+/// control that is not per-window: everything else acts on the window it
+/// was used in, but stopping the wall means all of it.
+pub fn set_all_paused(screens: &mut [Screen], budget: &mut DecodeBudget, pause: bool) {
+    let ids: Vec<usize> = screens.iter().flat_map(|s| s.tiles.iter().map(|t| t.id)).collect();
+    for id in ids {
+        if pause {
+            pause_and_release(screens, budget, id, "user pause");
+        } else {
+            resume_tile(screens, budget, id);
         }
     }
 }

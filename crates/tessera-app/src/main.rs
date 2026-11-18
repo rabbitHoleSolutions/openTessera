@@ -42,7 +42,7 @@ use seek::{flush_seek, queue_seek};
 use tile::{Tile, TileOptions};
 use wall::{
     add_tile_action, close_screen, finish_tile_drag, follow_audio, handle_overlay_action, list_off_thread,
-    open_listed, pause_and_release, raw_tile_click, remove_tile_action, request_admission, resume_tile, shutdown,
+    open_listed, pause_and_release, raw_tile_click, remove_tile_action, request_admission, shutdown,
     tile_next, toggle_pin, Listed, OpenTarget, Wall,
 };
 use windowing::{
@@ -588,6 +588,7 @@ fn main() {
                         )
                     };
                     overlay.visible = overlay.opacity > 0.0;
+                    overlay.any_playing = wall::any_playing(&screens);
                     // Issue any seek the user has finished spelling out.
                     flush_seek(&mut screens, &mut overlay, false);
                     // Deferred re-anchoring of displaced fullscreen walls.
@@ -1509,17 +1510,10 @@ fn main() {
                                         }
                                     }
                                     Key::Named(NamedKey::Space) => {
-                                        let ids: Vec<usize> = screens[idx].tiles.iter().map(|t| t.id).collect();
-                                        let any_playing = screens[idx].tiles.iter().any(|t| !t.is_paused());
-                                        if any_playing {
-                                            for id in ids {
-                                                pause_and_release(&mut screens, &mut budget, id, "user pause");
-                                            }
-                                        } else {
-                                            for id in ids {
-                                                resume_tile(&mut screens, &mut budget, id);
-                                            }
-                                        }
+                                        // The "pause all" button's key, and like it
+                                        // the one control that spans every window.
+                                        let pause = wall::any_playing(&screens);
+                                        wall::set_all_paused(&mut screens, &mut budget, pause);
                                     }
                                     Key::Named(NamedKey::ArrowUp) => {
                                         screens[idx].adjust_volume(5);
@@ -1534,10 +1528,13 @@ fn main() {
                                         queue_seek(&mut screens, idx, &mut overlay, 10.0);
                                     }
                                     Key::Character(ref c) if c.eq_ignore_ascii_case("w") => {
-                                        // The window under the cursor, else the focused one.
-                                        let target = cursor_over
-                                            .and_then(|w| screens.iter().position(|s| s.window.id() == w))
-                                            .unwrap_or(idx);
+                                        // The focused window — the one the key came to,
+                                        // as with every other per-window key. It used to
+                                        // be the window under the pointer, and a wall
+                                        // fills the screen the pointer rests on: with
+                                        // one wall and one window, W only ever toggled
+                                        // the wall, whichever window had been clicked.
+                                        let target = idx;
                                         if screens[target].floating && platform::FLOAT_ON_RELEASE {
                                             // Unfloats first: on the release, as T.
                                             on_release = Some(('w', screens[target].window.id()));
@@ -1546,8 +1543,8 @@ fn main() {
                                         }
                                     }
                                     Key::Character(ref c) if c.eq_ignore_ascii_case("t") => {
-                                        // Same target rule as W.
-                                        let w = cursor_over.unwrap_or(screens[idx].window.id());
+                                        // Same target rule as W: the focused window.
+                                        let w = screens[idx].window.id();
                                         if platform::FLOAT_ON_RELEASE {
                                             on_release = Some(('t', w));
                                         } else if float_key(&mut screens, 't', w) {
