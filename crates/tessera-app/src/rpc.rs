@@ -1099,14 +1099,19 @@ fn monitor_arg(wall: &Wall, p: &Value) -> Result<Option<usize>, String> {
 /// Monitors (with which windows are on each) and windows.
 fn windows_json(wall: &Wall) -> Value {
     let Some(first) = wall.screens.first() else { return json!({ "monitors": [], "windows": [] }) };
-    let infos = crate::windowing::monitor_infos(crate::windowing::available_monitors(&first.window));
+    let handles: Vec<_> = crate::windowing::available_monitors(&first.window).collect();
+    let infos = crate::windowing::monitor_infos(handles.iter().cloned());
     let monitors: Vec<Value> = infos
         .iter()
         .enumerate()
         .map(|(i, m)| {
             let on: Vec<usize> = wall.screens.iter().enumerate().filter(|(_, s)| monitor_of(s) == Some(i)).map(|(wi, _)| wi).collect();
+            // Size in pixels, like the windows' sizes beside it; the
+            // position is in desktop coordinates (points on a Mac), the
+            // only space in which monitors' positions compare.
+            let px = handles[i].size();
             json!({
-                "index": i, "name": m.name, "size": [m.w, m.h], "position": [m.x, m.y], "windows": on,
+                "index": i, "name": m.name, "size": [px.width, px.height], "position": [m.x, m.y], "windows": on,
                 // The words that name it, so a client can say "left".
                 "positions": tessera_core::monitor::position_words(&infos, i),
             })
@@ -1186,13 +1191,14 @@ fn place_window(wall: &mut Wall, wi: usize, monitor: Option<usize>, fullscreen: 
             // move nor a fullscreen hop sticks there. What does: placement
             // when a window is created, and fullscreen on a monitor. The
             // shim reports where the window really ended up.
-            let (mp, ms) = (m.position(), m.size());
+            // Centred at the size it has now — counted in the target
+            // monitor's pixels, which on a Mac are not the window's.
             let size = window.outer_size();
-            let (w, h) = (size.width.min(ms.width), size.height.min(ms.height));
-            window.set_outer_position(winit::dpi::PhysicalPosition::new(
-                mp.x + (ms.width - w) as i32 / 2,
-                mp.y + (ms.height - h) as i32 / 2,
-            ));
+            let k = m.scale_factor() / window.scale_factor();
+            let k = if crate::platform::DESKTOP_IN_POINTS { k } else { 1.0 };
+            let size = ((size.width as f64 * k) as u32, (size.height as f64 * k) as u32);
+            let (pos, _, _) = crate::windowing::centred_on(&m, size);
+            window.set_outer_position(pos);
         }
     }
     if settle && crate::platform::WM_SETTLE {

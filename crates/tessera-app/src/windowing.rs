@@ -44,20 +44,20 @@ pub fn open_window<T>(
     size: (u32, u32),
     on: Option<&winit::monitor::MonitorHandle>,
 ) -> Option<Arc<winit::window::Window>> {
-    let (mut w, mut h) = size;
-    let mut wb = app_window().with_title("Tessera");
-    if let Some(m) = on {
-        let (mp, ms) = (m.position(), m.size());
-        w = w.min(ms.width);
-        h = h.min(ms.height);
-        wb = wb.with_position(winit::dpi::PhysicalPosition::new(
-            mp.x + (ms.width.saturating_sub(w)) as i32 / 2,
-            mp.y + (ms.height.saturating_sub(h)) as i32 / 2,
-        ));
-    }
-    wb = wb.with_inner_size(winit::dpi::PhysicalSize::new(w, h));
+    let wb = app_window().with_title("Tessera");
+    let wb = match on {
+        Some(m) => {
+            let (pos, size, _) = centred_on(m, size);
+            wb.with_position(pos).with_inner_size(size)
+        }
+        None => wb.with_inner_size(winit::dpi::PhysicalSize::new(size.0, size.1)),
+    };
+    let position = wb.window_attributes().position;
     match glutin_winit::finalize_window(target, wb, gl_config) {
-        Ok(win) => Some(Arc::new(win)),
+        Ok(win) => {
+            platform::place_created_window(&win, position);
+            Some(Arc::new(win))
+        }
         Err(e) => {
             eprintln!("warning: new window failed: {e}");
             None
@@ -141,14 +141,8 @@ pub fn window_builder(args: &Args, monitors: &[winit::monitor::MonitorHandle], i
             // window manager places it, as before.
             match args.monitor {
                 Some(_) => {
-                    let (mp, ms) = (monitor.position(), monitor.size());
-                    let (w, h) = ((*w).min(ms.width), (*h).min(ms.height));
-                    wb.with_inner_size(winit::dpi::PhysicalSize::new(w, h)).with_position(
-                        winit::dpi::PhysicalPosition::new(
-                            mp.x + (ms.width - w) as i32 / 2,
-                            mp.y + (ms.height - h) as i32 / 2,
-                        ),
-                    )
+                    let (pos, size, _) = centred_on(monitor, (*w, *h));
+                    wb.with_inner_size(size).with_position(pos)
                 }
                 None => wb.with_inner_size(winit::dpi::PhysicalSize::new(*w, *h)),
             }
@@ -167,11 +161,20 @@ pub fn app_window() -> WindowBuilder {
     platform::window_builder(WindowBuilder::new()).with_window_icon(window_icon())
 }
 
-/// Inner window rect in global screen coordinates (x0, y0, x1, y1).
+/// Inner window rect in desktop coordinates (x0, y0, x1, y1).
 pub fn window_rect(s: &Screen) -> Option<(i32, i32, i32, i32)> {
     let p = s.window.inner_position().ok()?;
     let sz = s.window.inner_size();
-    Some((p.x, p.y, p.x + sz.width as i32, p.y + sz.height as i32))
+    let sf = s.window.scale_factor();
+    let d = |v: i32| to_desktop(v, sf);
+    Some((d(p.x), d(p.y), d(p.x + sz.width as i32), d(p.y + sz.height as i32)))
+}
+
+/// A point inside `window`, in its physical pixels, in desktop coordinates.
+pub fn window_point_to_desktop(window: &winit::window::Window, p: (f32, f32)) -> Option<(f32, f32)> {
+    let o = window.inner_position().ok()?;
+    let ds = desktop_scale(window.scale_factor()) as f32;
+    Some(((o.x as f32 + p.0) / ds, (o.y as f32 + p.1) / ds))
 }
 
 /// A request aimed at the app rather than at a window means "come to the
@@ -232,14 +235,10 @@ pub fn toggle_window_mode(screens: &mut [Screen], idx: usize) -> bool {
             }
             None => {
                 if let Some(m) = window.current_monitor() {
-                    let ms = m.size();
-                    let (w, h) = (ms.width.min(1600), ms.height.min(900));
-                    let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(w, h));
-                    let mp = m.position();
-                    let x = mp.x + (ms.width.saturating_sub(w)) as i32 / 2;
-                    let y = mp.y + (ms.height.saturating_sub(h)) as i32 / 2;
-                    window.set_outer_position(winit::dpi::PhysicalPosition::new(x, y));
-                    screen.resize(w, h);
+                    let (pos, size, px) = centred_on(&m, (1600, 900));
+                    let _ = window.request_inner_size(size);
+                    window.set_outer_position(pos);
+                    screen.resize(px.width, px.height);
                 }
             }
         }
@@ -448,8 +447,10 @@ pub fn available_monitors(window: &winit::window::Window) -> impl Iterator<Item 
 pub fn monitor_infos(monitors: impl Iterator<Item = winit::monitor::MonitorHandle>) -> Vec<tessera_core::monitor::MonitorInfo> {
     monitors
         .map(|m| {
-            let (p, s) = (m.position(), m.size());
-            tessera_core::monitor::MonitorInfo { name: m.name(), x: p.x, y: p.y, w: s.width, h: s.height }
+            // Desktop coordinates, so "left" and "right" compare like
+            // with like on a Mac with mixed scale factors.
+            let (x, y, w, h) = monitor_rect(&m);
+            tessera_core::monitor::MonitorInfo { name: m.name(), x, y, w, h }
         })
         .collect()
 }
@@ -468,19 +469,71 @@ pub fn monitor_under_window(
         .find(|(_, m)| monitor_contains(m, c))
 }
 
+/// Pixels per unit of desktop coordinates, for something at scale factor
+/// `sf`. Every comparison or placement of windows against monitors goes
+/// through desktop coordinates — see `platform::DESKTOP_IN_POINTS` for
+/// why winit's physical figures can't be compared directly on a Mac.
+fn desktop_scale(sf: f64) -> f64 {
+    if platform::DESKTOP_IN_POINTS { sf } else { 1.0 }
+}
+
+fn to_desktop(v: i32, sf: f64) -> i32 {
+    (v as f64 / desktop_scale(sf)).round() as i32
+}
+
+/// A monitor's rect (x, y, w, h) in desktop coordinates.
+pub fn monitor_rect(monitor: &winit::monitor::MonitorHandle) -> (i32, i32, u32, u32) {
+    let (mp, ms, sf) = (monitor.position(), monitor.size(), monitor.scale_factor());
+    (to_desktop(mp.x, sf), to_desktop(mp.y, sf), to_desktop(ms.width as i32, sf) as u32, to_desktop(ms.height as i32, sf) as u32)
+}
+
+/// A position in desktop coordinates, as winit takes it.
+fn desktop_position(x: i32, y: i32) -> winit::dpi::Position {
+    if platform::DESKTOP_IN_POINTS {
+        winit::dpi::LogicalPosition::new(x, y).into()
+    } else {
+        winit::dpi::PhysicalPosition::new(x, y).into()
+    }
+}
+
+/// Where a window `size` pixels big (as it would be on `monitor`) goes to
+/// sit centred on `monitor`, clamped to it: its position and size to hand
+/// winit, and that size in the monitor's pixels.
+pub fn centred_on(
+    monitor: &winit::monitor::MonitorHandle,
+    size: (u32, u32),
+) -> (winit::dpi::Position, winit::dpi::Size, winit::dpi::PhysicalSize<u32>) {
+    let sf = monitor.scale_factor();
+    let (mx, my, mw, mh) = monitor_rect(monitor);
+    let w = (to_desktop(size.0 as i32, sf) as u32).min(mw);
+    let h = (to_desktop(size.1 as i32, sf) as u32).min(mh);
+    let pos = desktop_position(mx + (mw - w) as i32 / 2, my + (mh - h) as i32 / 2);
+    let size: winit::dpi::Size = if platform::DESKTOP_IN_POINTS {
+        winit::dpi::LogicalSize::new(w, h).into()
+    } else {
+        winit::dpi::PhysicalSize::new(w, h).into()
+    };
+    let ds = desktop_scale(sf);
+    let px = winit::dpi::PhysicalSize::new((w as f64 * ds).round() as u32, (h as f64 * ds).round() as u32);
+    (pos, size, px)
+}
+
 /// Centre of a window in desktop coordinates, or None if the WM won't
 /// report its position yet (freshly mapped windows).
 pub fn window_centre(window: &winit::window::Window) -> Option<(i32, i32)> {
     let pos = window.outer_position().ok()?;
     let size = window.inner_size();
-    Some((pos.x + size.width as i32 / 2, pos.y + size.height as i32 / 2))
+    let sf = window.scale_factor();
+    Some((
+        to_desktop(pos.x + size.width as i32 / 2, sf),
+        to_desktop(pos.y + size.height as i32 / 2, sf),
+    ))
 }
 
 /// Whether a point lies in a monitor's rect. Half-open on the far edges so
 /// adjacent monitors can't both claim a point on their shared border.
 pub fn monitor_contains(monitor: &winit::monitor::MonitorHandle, p: (i32, i32)) -> bool {
-    let (mp, ms) = (monitor.position(), monitor.size());
-    rect_contains((mp.x, mp.y, ms.width, ms.height), p)
+    rect_contains(monitor_rect(monitor), p)
 }
 
 /// The containment test itself, free of winit types so it can be tested.

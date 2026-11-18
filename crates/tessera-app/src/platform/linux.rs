@@ -33,6 +33,10 @@ pub const HWDEC_HELP: &str = "mpv hardware decode mode, or a comma-separated lis
 /// loop re-anchors them on a short timer (see `fix_displaced_walls`).
 pub const WM_SETTLE: bool = true;
 
+/// X11 positions windows and monitors in one physical-pixel space, which
+/// winit reports as is. (Wayland reports no window position at all.)
+pub const DESKTOP_IN_POINTS: bool = false;
+
 /// Startup tiles are created before the event loop runs. (macOS has to
 /// wait for the first tick, which is when Finder's open-file arrives.)
 pub const DEFER_STARTUP_TILES: bool = false;
@@ -74,6 +78,10 @@ pub fn fullscreen_window_builder(wb: WindowBuilder, monitor: &MonitorHandle) -> 
     wb.with_decorations(false)
         .with_fullscreen(Some(Fullscreen::Borderless(Some(monitor.clone()))))
 }
+
+/// Nothing to do: placement at creation sticks here, and moving a window
+/// the WM has just tiled only gets it snapped back.
+pub fn place_created_window(_window: &Window, _position: Option<winit::dpi::Position>) {}
 
 /// Nothing to do: the builder already asked for fullscreen.
 pub fn finish_fullscreen_window(_window: &Window, _monitor: &MonitorHandle) {}

@@ -381,6 +381,17 @@ returns every Wayland output twice; go through
 `windowing::available_monitors`, which dedups, never the winit method on a
 window (the event loop's list is fine).
 
+**Windows and monitors are compared in desktop coordinates, never in
+winit's raw physical figures.** On macOS each physical figure is scaled by
+its *own* factor (a monitor's by that monitor's, a window's by the
+window's), so beside a 2x Retina panel a 1x TV's rect lies inside the
+panel's, and W on the TV filled the panel. `windowing::{monitor_rect,
+window_centre, window_rect, centred_on}` convert through
+`platform::DESKTOP_IN_POINTS` (points on a Mac, pixels on X11); place and
+compare through them. Also on macOS, AppKit clamps a window being
+*created* onto the main screen — `platform::place_created_window` moves it
+back once it exists.
+
 **`ctx.set_pixels_per_point()` takes effect on the *next* frame** (it routes
 through `set_zoom_factor`). Any UI-scale logic has to account for that one-frame
 lag — which is part of why the scale slider commits on release rather than live.

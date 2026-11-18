@@ -329,8 +329,9 @@ fn main() {
         ScreenSel::Windowed(_, _) => vec![chosen_monitor.unwrap_or(0)],
     };
 
-    let (first_window, gl_config) = {
+    let (first_window, gl_config, position) = {
         let wb = window_builder(&args, &monitors, monitor_indices[0]);
+        let position = wb.window_attributes().position;
         let template = glutin::config::ConfigTemplateBuilder::new()
             .with_alpha_size(8)
             .with_stencil_size(0);
@@ -338,7 +339,7 @@ fn main() {
             .with_window_builder(Some(wb))
             .build(&event_loop, template, |mut configs| configs.next().unwrap())
         {
-            Ok(pair) => pair,
+            Ok((window, config)) => (window, config, position),
             Err(e) => {
                 eprintln!("error: display/window init failed: {e}");
                 std::process::exit(1);
@@ -352,13 +353,18 @@ fn main() {
 
     let mut windows: Vec<(Arc<winit::window::Window>, usize)> = Vec::new();
     if let Some(w) = first_window {
+        platform::place_created_window(&w, position);
         windows.push((Arc::new(w), monitor_indices[0]));
     }
 
     for &idx in monitor_indices.iter().skip(1) {
         let wb = window_builder(&args, &monitors, idx);
+        let position = wb.window_attributes().position;
         match glutin_winit::finalize_window(&event_loop, wb, &gl_config) {
-            Ok(w) => windows.push((Arc::new(w), idx)),
+            Ok(w) => {
+                platform::place_created_window(&w, position);
+                windows.push((Arc::new(w), idx));
+            }
             Err(e) => eprintln!("warning: window for monitor {idx} failed: {e}"),
         }
     }

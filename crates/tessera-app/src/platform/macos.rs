@@ -33,6 +33,14 @@ pub const HWDEC_HELP: &str = "mpv hardware decode mode (default videotoolbox —
 /// lands where it was asked to.
 pub const WM_SETTLE: bool = false;
 
+/// Window and monitor positions only share a coordinate space in points.
+/// winit reports each in physical pixels, but scaled by its *own* factor:
+/// a monitor's origin by that monitor's, a window's by the window's. With a
+/// Retina panel (2x) beside a 1x TV, the panel's pixel rect then reaches
+/// right over the TV's, and a window on the TV was found "on" the panel —
+/// so W filled the wrong screen. Cocoa's global coordinates are points.
+pub const DESKTOP_IN_POINTS: bool = true;
+
 /// A file opened from Finder arrives as an Apple Event during the event
 /// loop's launch, not on the command line — so startup tiles wait for the
 /// first tick, when it is known whether the queue is the saved one or
@@ -65,6 +73,16 @@ pub fn fullscreen_window_builder(wb: WindowBuilder, monitor: &MonitorHandle) -> 
     let sf = monitor.scale_factor();
     wb.with_position(Position::Logical(monitor.position().to_logical(sf)))
         .with_inner_size(winit::dpi::Size::Logical(monitor.size().to_logical(sf)))
+}
+
+/// Puts a just-created window where its builder asked. AppKit constrains a
+/// window onto the *main* screen as it is created, so one asked for on
+/// another display came up clamped to the main one's edge. Moving it once
+/// it exists is not constrained.
+pub fn place_created_window(window: &Window, position: Option<Position>) {
+    if let Some(p) = position {
+        window.set_outer_position(p);
+    }
 }
 
 pub fn finish_fullscreen_window(window: &Window, monitor: &MonitorHandle) {

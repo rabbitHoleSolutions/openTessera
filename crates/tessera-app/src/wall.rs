@@ -701,12 +701,12 @@ pub fn finish_tile_drag(
     };
     // Global pointer position: drag.pos lives in pos_window's coordinate
     // space (physical px, possibly past that window's bounds while a
-    // button grab routes motion to the drag source).
+    // button grab routes motion to the drag source). Compared in desktop
+    // coordinates, which windows at different scale factors share.
     let global = screens
         .iter()
         .position(|s| s.window.id() == drag.pos_window)
-        .and_then(|i| screens[i].window.inner_position().ok())
-        .map(|p| (p.x as f32 + drag.pos.0, p.y as f32 + drag.pos.1));
+        .and_then(|i| crate::windowing::window_point_to_desktop(&screens[i].window, drag.pos));
     let target = global.and_then(|(gx, gy)| {
         screens.iter().position(|s| {
             window_rect(s)
