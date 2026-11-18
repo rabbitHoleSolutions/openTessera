@@ -206,7 +206,7 @@ fn main() {
         if args.plex {
             match cfg.plex {
                 Some(srv) => push_unique(tessera_core::sources::Source::Plex {
-                    url: srv.url,
+                    url: tessera_core::signin::server_url(&srv.url, tessera_core::signin::PLEX_PORT),
                     token: srv.token,
                     library: args.plex_library.clone(),
                 }),
@@ -216,7 +216,7 @@ fn main() {
         if args.jellyfin {
             match cfg.jellyfin {
                 Some(srv) => push_unique(tessera_core::sources::Source::Jellyfin {
-                    url: srv.url,
+                    url: tessera_core::signin::server_url(&srv.url, tessera_core::signin::JELLYFIN_PORT),
                     api_key: srv.token,
                     library: args.jellyfin_library.clone(),
                 }),

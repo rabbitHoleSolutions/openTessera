@@ -231,7 +231,8 @@ pub fn draw(
                     outline_if(ui, &path_resp, state.add.is_missing(Field::Path));
                     path_resp.on_hover_text(match state.add.kind {
                         SourceKind::Folder => "folder (or file) path on disk",
-                        _ => "server url, e.g. http://nas:8096",
+                        SourceKind::Plex => "server address — nas is taken as http://nas:32400",
+                        _ => "server address — nas is taken as http://nas:8096",
                     });
                 } else {
                     ui.add_sized(
@@ -438,7 +439,7 @@ fn jellyfin(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserC
         );
         outline_if(ui, &token, state.add.is_missing(Field::Token));
         let (url, key) = (
-            state.add.path.trim().to_owned(),
+            ServerKind::Jellyfin.server_url(&state.add.path),
             state.add.token.trim().to_owned(),
         );
         if ui
@@ -466,7 +467,7 @@ fn jellyfin(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserC
                 state.add.error = "a server url and an API key are both needed".into();
             } else {
                 added.push(Source::Jellyfin {
-                    url: url.trim_end_matches('/').to_owned(),
+                    url,
                     api_key: key,
                     library: state.add.library_filter(),
                 });
@@ -561,7 +562,7 @@ fn plex(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserCtx) 
         );
         outline_if(ui, &token, state.add.is_missing(Field::Token));
         let (url, tok) = (
-            state.add.path.trim().to_owned(),
+            ServerKind::Plex.server_url(&state.add.path),
             state.add.token.trim().to_owned(),
         );
         // "browse" reaches the same picker as the plex.tv flow, so a pasted
@@ -591,7 +592,7 @@ fn plex(ui: &mut egui::Ui, state: &mut BrowserState, services: &mut BrowserCtx) 
                 state.add.error = "a server url and a token are both needed".into();
             } else {
                 added.push(Source::Plex {
-                    url: url.trim_end_matches('/').to_owned(),
+                    url,
                     token: tok,
                     library: state.add.library_filter(),
                 });

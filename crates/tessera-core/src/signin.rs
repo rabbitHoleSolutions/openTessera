@@ -27,6 +27,49 @@ use serde_json::Value;
 use crate::sources::SourceError;
 
 // ---------------------------------------------------------------------------
+// Typed server addresses
+// ---------------------------------------------------------------------------
+
+/// The port a Jellyfin server listens on out of the box (HTTP).
+pub const JELLYFIN_PORT: u16 = 8096;
+/// The port a Plex Media Server listens on out of the box.
+pub const PLEX_PORT: u16 = 32400;
+
+/// A server address as a person types it, made into a base URL: `nas`
+/// becomes `http://nas:8096` for Jellyfin, which is how the server is
+/// reached on a LAN nine times in ten. A missing scheme is taken as
+/// `http://`; the port is filled in only when the scheme was missing too,
+/// since `https://jf.example.com` is a reverse proxy on 443 and must not
+/// grow a `:8096`. A port that was given (`nas:8920`) is kept, as is a
+/// path (`nas/jellyfin`). A trailing `/` is dropped, as the URL builders
+/// append their own. Bare IPv6 (`fd00::1`) is bracketed so its colons
+/// aren't read as a port.
+pub fn server_url(input: &str, default_port: u16) -> String {
+    let s = input.trim().trim_end_matches('/');
+    if s.is_empty() || s.contains("://") {
+        return s.to_owned();
+    }
+    let (authority, path) = match s.find('/') {
+        Some(i) => s.split_at(i),
+        None => (s, ""),
+    };
+    let has_port = match authority.rfind(']') {
+        // [v6] or [v6]:port
+        Some(close) => authority[close..].contains(':'),
+        None => authority.contains(':'),
+    };
+    let bare_v6 = !authority.starts_with('[') && authority.matches(':').count() > 1;
+    let authority = if bare_v6 {
+        format!("[{authority}]:{default_port}")
+    } else if has_port {
+        authority.to_owned()
+    } else {
+        format!("{authority}:{default_port}")
+    };
+    format!("http://{authority}{path}")
+}
+
+// ---------------------------------------------------------------------------
 // Jellyfin: LAN discovery
 // ---------------------------------------------------------------------------
 
@@ -565,6 +608,36 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_bare_host_gets_http_and_the_default_port() {
+        assert_eq!(server_url("nas", JELLYFIN_PORT), "http://nas:8096");
+        assert_eq!(server_url("  192.168.1.14/ ", JELLYFIN_PORT), "http://192.168.1.14:8096");
+        assert_eq!(server_url("nas.local", PLEX_PORT), "http://nas.local:32400");
+    }
+
+    #[test]
+    fn a_given_port_or_path_is_kept() {
+        assert_eq!(server_url("nas:8920", JELLYFIN_PORT), "http://nas:8920");
+        assert_eq!(server_url("nas/jellyfin/", JELLYFIN_PORT), "http://nas:8096/jellyfin");
+        assert_eq!(server_url("nas:8080/jf", JELLYFIN_PORT), "http://nas:8080/jf");
+    }
+
+    #[test]
+    fn a_given_scheme_means_the_url_is_left_alone() {
+        // A reverse proxy on 443: no :8096 may be added.
+        assert_eq!(server_url("https://jf.example.com/", JELLYFIN_PORT), "https://jf.example.com");
+        assert_eq!(server_url("http://nas", JELLYFIN_PORT), "http://nas");
+        assert_eq!(server_url("http://nas:8096", JELLYFIN_PORT), "http://nas:8096");
+        assert_eq!(server_url("", JELLYFIN_PORT), "");
+    }
+
+    #[test]
+    fn ipv6_colons_are_not_a_port() {
+        assert_eq!(server_url("fd00::1", JELLYFIN_PORT), "http://[fd00::1]:8096");
+        assert_eq!(server_url("[fd00::1]", JELLYFIN_PORT), "http://[fd00::1]:8096");
+        assert_eq!(server_url("[fd00::1]:8920", JELLYFIN_PORT), "http://[fd00::1]:8920");
+    }
 
     #[test]
     fn discovery_reply_falls_back_to_the_address_for_a_name() {

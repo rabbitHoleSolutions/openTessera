@@ -47,6 +47,18 @@ pub enum ServerKind {
     Jellyfin,
 }
 
+impl ServerKind {
+    /// A typed address made into this kind's base URL: `nas` becomes
+    /// `http://nas:8096` for Jellyfin, `http://nas:32400` for Plex.
+    pub fn server_url(self, input: &str) -> String {
+        use tessera_core::signin::{server_url, JELLYFIN_PORT, PLEX_PORT};
+        server_url(input, match self {
+            ServerKind::Plex => PLEX_PORT,
+            ServerKind::Jellyfin => JELLYFIN_PORT,
+        })
+    }
+}
+
 enum Event {
     Discovered(Vec<DiscoveredServer>),
     CamerasFound(Vec<DiscoveredCamera>),
@@ -251,7 +263,7 @@ impl Auth {
     /// install's sign-in can't revoke another's token.
     pub fn jellyfin_login(&mut self, url: &str, username: &str, password: &str, install_id: &str) {
         let (url, username, password, install_id) =
-            (url.trim().to_owned(), username.trim().to_owned(), password.to_owned(), install_id.to_owned());
+            (ServerKind::Jellyfin.server_url(url), username.trim().to_owned(), password.to_owned(), install_id.to_owned());
         self.start(move |_| Request::JellyfinLogin { url, username, password, install_id });
     }
 
@@ -265,7 +277,7 @@ impl Auth {
     /// Lists a server's movie libraries for the picker.
     pub fn list_libraries(&mut self, kind: ServerKind, base: &str, token: &str) {
         self.state.libraries = None;
-        let (base, token) = (base.trim_end_matches('/').to_owned(), token.to_owned());
+        let (base, token) = (kind.server_url(base), token.to_owned());
         self.start(move |_| Request::Libraries { kind, base, token });
     }
 
